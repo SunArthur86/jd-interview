@@ -22,11 +22,12 @@ export const APP_CONFIG = {
     'pdd-trade':   { label: '拼多多·交易核心',  icon: '🛒', color: '#ff6c44' },
     'pdd-content': { label: '拼多多·内容社区',  icon: '📱', color: '#34c759' },
     'pdd-ai':      { label: '拼多多·AI 中台',   icon: '🤖', color: '#af52de' },
+    'java-architect': { label: 'Java 后端架构师', icon: '🏗️', color: '#5856d6' },
   } as Record<string, CategoryConfig>,
   subcatGroups: {
     // 各 JD 内部统一的能力维度小分组（subcategory 通过 getSubcatGroup 映射）
     'JD 核心技术':    ['Java 并发', 'JVM', 'Java 集合', 'Spring Cloud', 'Spring Boot', '微服务', 'MySQL', 'Redis', 'HBase', 'ES', 'Kafka', '分库分表', '供应链', '商品', '交易', '订单', '用户', '评价', '直播', '中台', '规则引擎', '特征工程', '实时计算', '风控系统', '数据隔离', '系统解耦', '分布式事务'],
-    '架构设计':       ['供应链架构', '交易架构', '多活容灾', '网关设计', '内容架构', '直播架构', 'Feed 流', '搜索架构', '中台架构', '风控架构设计', '特征平台设计', '决策引擎设计', '关系网络设计', '设备指纹设计'],
+    '架构设计':       ['架构设计', '供应链架构', '交易架构', '多活容灾', '网关设计', '内容架构', '直播架构', 'Feed 流', '搜索架构', '中台架构', '风控架构设计', '特征平台设计', '决策引擎设计', '关系网络设计', '设备指纹设计', '安全架构'],
     '高并发高可用':   ['池化', '缓存', '扩容', '异步', '队列', '限流', '降级', '负载均衡', '隔离', '压测', '预案', '回滚', '可观测性', '稳定性治理', '高可用'],
     'AI Agent/Infra': ['Agent 改造', 'Agent 架构', 'Agent 工程化', 'LLM 训练', 'LLM 推理', '模型服务', 'RAG 工程', '多模态', '实验平台', '智能风控', 'LLM 风控', 'GraphRAG', 'FDE 解决方案', 'AI Harness'],
   } as Record<string, string[]>,
