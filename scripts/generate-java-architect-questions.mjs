@@ -116,6 +116,215 @@ const groupOf = (subcategory) => {
 
 const difficultyOf = (i) => (i % 5 === 0 ? 'L4' : i % 3 === 0 ? 'L3' : 'L2');
 
+const domainProfiles = {
+  JVM: {
+    objects: ['堆内存、线程栈、Metaspace、直接内存', 'GC 日志、JFR 事件、对象分配速率', '容器内存限制与 JVM ergonomics'],
+    architecture: ['按服务类型区分吞吐优先和延迟优先 GC', '把堆、直接内存、线程数、连接池放到同一张容量表里', '用压测和线上画像校准停顿目标'],
+    failure: ['Full GC 或并发标记跟不上导致 P99 抖动', '容器内存被低估触发 OOMKilled', '大对象和缓存无上限污染老年代'],
+    metrics: ['young_gc_pause_p99', 'old_gc_count', 'allocation_rate_mb_s', 'heap_after_gc_ratio'],
+  },
+  'Java 并发': {
+    objects: ['业务线程池、队列、Future 链、锁竞争点', 'CPU 密集型与 IO 密集型任务', '上下文、超时和取消信号'],
+    architecture: ['线程池按业务域隔离，拒绝策略要可解释', '异步链路必须有超时、取消、降级和上下文透传', '共享状态优先不可变或分片，减少大锁'],
+    failure: ['队列无界导致内存被打满', '异步任务丢失 trace 和安全上下文', '锁竞争把 CPU 消耗在阻塞和唤醒上'],
+    metrics: ['pool_active_ratio', 'queue_wait_ms_p99', 'rejected_tasks', 'lock_blocked_threads'],
+  },
+  'Spring Boot': {
+    objects: ['BeanDefinition、Bean 生命周期、AOP 代理', '事务边界、自动配置、starter', '配置属性和条件装配'],
+    architecture: ['用 starter 固化通用能力，避免业务项目复制配置', '事务只包住核心写操作，外部 IO 放到事务外', '扩展点要有顺序、幂等和可观测'],
+    failure: ['自调用导致事务或 AOP 失效', '自动配置条件过宽影响所有服务', '初始化逻辑过重拖慢启动和发布'],
+    metrics: ['startup_seconds', 'bean_init_failures', 'tx_rollback_rate', 'aop_proxy_miss_count'],
+  },
+  'Spring Cloud': {
+    objects: ['服务注册发现、配置中心、负载均衡、Feign/Dubbo 客户端', '超时、重试、熔断、灰度标签', '服务实例健康状态'],
+    architecture: ['治理能力沉到框架层，业务代码只表达业务意图', '调用链统一超时预算，重试只对幂等接口开启', '灰度按用户、租户、地域或流量标签路由'],
+    failure: ['注册中心抖动引发调用失败', '重试放大下游故障', '配置变更未审计导致批量事故'],
+    metrics: ['rpc_p99', 'service_error_rate', 'retry_amplification', 'config_change_count'],
+  },
+  MySQL: {
+    objects: ['表模型、索引、事务、锁、主从复制', '慢 SQL、执行计划、Buffer Pool', '备份、归档和恢复链路'],
+    architecture: ['核心状态靠唯一约束和事务保证正确性', '索引围绕高频查询和排序分页设计', '大表治理提前规划冷热分层和归档'],
+    failure: ['索引失效导致扫表拖垮实例', '长事务阻塞 purge 和 DDL', '主从延迟造成读己之写不一致'],
+    metrics: ['slow_sql_count', 'innodb_row_lock_time', 'replica_lag_seconds', 'buffer_pool_hit_rate'],
+  },
+  Redis: {
+    objects: ['Key 模型、TTL、热点 Key、缓存更新事件', 'Redis Cluster 槽位、哨兵、连接池', '本地缓存和远程缓存'],
+    architecture: ['缓存只做加速，正确性要有数据库或补偿兜底', '热点 Key 做拆分、本地缓存或请求合并', '缓存更新明确失效、双删、订阅通知或版本号策略'],
+    failure: ['缓存击穿导致数据库雪崩', '大 Key 阻塞主线程', '分布式锁误用造成并发写入'],
+    metrics: ['cache_hit_ratio', 'hot_key_qps', 'redis_latency_p99', 'key_evictions'],
+  },
+  Kafka: {
+    objects: ['Topic、分区、副本、消费者组、offset', '消息 Key、幂等表、重试队列、死信队列', '生产者确认和事务消息'],
+    architecture: ['分区键跟业务顺序要求对齐', '消费者以业务幂等为准，不依赖“只消费一次”幻想', '重试、死信和人工补偿要闭环'],
+    failure: ['分区倾斜导致单分区积压', '重复消费导致重复写库', '消费端慢查询拖垮整个消费者组'],
+    metrics: ['consumer_lag', 'produce_error_rate', 'rebalance_count', 'dead_letter_count'],
+  },
+  '分布式事务': {
+    objects: ['事务边界、业务流水、状态机、补偿任务', 'Saga/TCC/可靠消息/Outbox', '对账和差错处理'],
+    architecture: ['先缩小强一致边界，再用最终一致处理跨服务协作', '每个步骤都要可幂等、可查询、可补偿', '资金类链路必须有对账和人工兜底'],
+    failure: ['局部成功后补偿缺失', '消息发送和本地事务不一致', '接口重试造成状态回退或重复推进'],
+    metrics: ['pending_tx_count', 'compensation_success_rate', 'reconcile_diff_count', 'idempotent_hit_rate'],
+  },
+  '高可用': {
+    objects: ['多副本、健康检查、故障转移、备份恢复', 'RPO/RTO、演练脚本、依赖拓扑', '限流降级和回滚开关'],
+    architecture: ['核心服务按故障域部署，依赖按重要性分级', '预案必须脚本化并定期演练', '把恢复时间和数据丢失窗口量化'],
+    failure: ['单 AZ 或单实例成为隐性单点', '备份存在但恢复不可用', '故障转移后缓存或配置不一致'],
+    metrics: ['availability_slo', 'failover_seconds', 'backup_restore_success', 'dependency_error_rate'],
+  },
+  '稳定性治理': {
+    objects: ['SLO、错误预算、告警规则、变更记录', '容量水位、预案、开关、故障演练', '事故复盘和行动项'],
+    architecture: ['用 SLO 定义用户感知质量，用错误预算约束发布节奏', '高风险能力必须有动态开关和回滚预案', '复盘行动项要能落到 owner 和截止时间'],
+    failure: ['告警太多导致无人响应', '配置变更无审批和审计', '复盘只写原因不改系统'],
+    metrics: ['slo_compliance', 'error_budget_burn', 'mttr_minutes', 'change_failure_rate'],
+  },
+  '网关设计': {
+    objects: ['路由、鉴权、签名、限流、灰度标签', 'BFF/API 聚合、协议转换、统一错误码', '审计日志和访问控制'],
+    architecture: ['网关负责横切治理，业务语义下沉到服务', '鉴权和限流在入口前置，避免无效流量进入核心系统', '协议转换要保留 trace 和错误语义'],
+    failure: ['网关过度聚合变成业务单体', '鉴权缓存不一致导致越权', '统一重试放大下游故障'],
+    metrics: ['gateway_p99', 'auth_fail_rate', 'rate_limited_count', 'route_error_rate'],
+  },
+  '中台架构': {
+    objects: ['领域模型、聚合、应用服务、领域事件', '能力目录、租户/业务线差异、版本策略', '平台 SLA 和接入规范'],
+    architecture: ['中台沉淀稳定能力，差异化编排留在业务层', '领域边界通过数据所有权和变更频率划分', '平台接口要版本化、可观测、可治理'],
+    failure: ['把所有需求都塞进中台导致大泥球', '公共模型过度抽象不贴业务', '平台升级缺少兼容策略'],
+    metrics: ['platform_reuse_rate', 'api_compat_breaks', 'domain_change_lead_time', 'tenant_customization_count'],
+  },
+  '数据隔离': {
+    objects: ['租户、账号、角色、资源、数据范围', 'tenant_id、数据权限表达式、行列级权限', '审计日志、越权拦截和脱敏策略'],
+    architecture: ['租户上下文从网关透传到应用、缓存和数据库', '强隔离优先独立库表，弱隔离用租户字段和权限过滤', '权限校验前置到查询构造和领域服务边界'],
+    failure: ['缓存 Key 缺少租户维度造成串数据', '后台任务绕过权限过滤', 'SQL 拼接遗漏 tenant_id 导致越权查询'],
+    metrics: ['tenant_context_miss', 'authz_deny_count', 'cross_tenant_alarm', 'audit_log_coverage'],
+  },
+  '风控架构设计': {
+    objects: ['风险事件、规则、特征、名单、决策结果', '实时特征、离线画像、模型分、人工审核', '规则版本、命中原因和审计链路'],
+    architecture: ['高风险链路同步决策，低风险动作异步复核', '规则、模型和人工审核分层编排', '每次决策都记录特征快照和版本，便于追溯'],
+    failure: ['特征延迟导致误判', '规则发布无灰度造成大面积拦截', '模型服务降级没有兜底策略'],
+    metrics: ['decision_latency_p99', 'risk_hit_rate', 'false_positive_rate', 'rule_version_rollback_count'],
+  },
+  '安全架构': {
+    objects: ['身份、凭证、密钥、证书、权限、审计记录', '认证链路、授权策略、加解密和脱敏组件', '漏洞修复和密钥轮转流程'],
+    architecture: ['认证确认“你是谁”，授权确认“你能做什么”', '敏感数据最小化暴露，传输、存储、日志分别治理', '密钥和证书必须支持轮转、审计和应急吊销'],
+    failure: ['JWT 长期有效无法吊销', '日志打印明文敏感信息', '内部接口默认可信导致横向越权'],
+    metrics: ['auth_fail_rate', 'permission_deny_count', 'secret_rotation_age', 'sensitive_log_hits'],
+  },
+  '交易架构': {
+    objects: ['订单、支付单、账户流水、清结算单、对账差错', '状态机、幂等键、支付回调、补偿任务', '资金快照和审计凭证'],
+    architecture: ['资金状态以流水和状态机为准，禁止覆盖式更新', '外部回调必须幂等并可重复查询', '交易、清结算、对账分层，差错进入可追踪工单'],
+    failure: ['重复回调导致重复入账', '状态逆向流转导致资金错乱', '对账缺失让差错长期沉默'],
+    metrics: ['pay_callback_duplicate_rate', 'reconcile_diff_count', 'account_balance_mismatch', 'compensation_pending_count'],
+  },
+  '订单': {
+    objects: ['订单、订单项、履约单、支付单、售后单', '订单状态机、库存预占、超时取消任务', '幂等键和业务流水号'],
+    architecture: ['订单主状态收敛，履约、支付、售后用子状态协作', '创建、支付、取消、发货都要有非法状态拦截', '超时任务必须可重入并能补偿漏扫'],
+    failure: ['支付成功但订单未更新', '取消和支付并发导致状态冲突', '延迟任务丢失造成库存不释放'],
+    metrics: ['order_create_success_rate', 'state_conflict_count', 'timeout_cancel_lag', 'order_pay_diff_count'],
+  },
+  '供应链': {
+    objects: ['SKU、仓、库存、预占、释放、出入库流水', '库存分片、热点 SKU、补货和调拨任务', '库存快照和差异对账'],
+    architecture: ['可售库存、占用库存、实物库存分账管理', '热点 SKU 通过分片、预扣或队列串行化保护', '库存变更必须有流水，差异通过对账修复'],
+    failure: ['并发扣减导致超卖', '预占释放失败造成库存挂死', '缓存库存与真实库存长期不一致'],
+    metrics: ['oversell_count', 'stock_lock_timeout', 'inventory_diff_count', 'hot_sku_qps'],
+  },
+  'RAG 工程': {
+    objects: ['文档、切片、向量、倒排索引、召回结果', '权限过滤、重排模型、答案引用和反馈', '知识库版本和增量索引任务'],
+    architecture: ['先做权限过滤，再做召回和重排，避免越权知识进入上下文', '索引链路区分全量构建和增量更新', '答案必须带引用、置信度和无法回答策略'],
+    failure: ['权限过滤后置导致敏感信息泄露', '索引延迟造成回答过期', '召回噪声过大导致幻觉'],
+    metrics: ['retrieval_hit_rate', 'permission_filter_miss', 'index_freshness_seconds', 'answer_citation_rate'],
+  },
+  'Agent 架构': {
+    objects: ['用户意图、任务状态、工具调用、记忆、审计记录', '计划器、执行器、工具权限和人工确认点', '失败重试和回滚动作'],
+    architecture: ['Agent 负责决策编排，关键业务动作仍由确定性服务执行', '高风险工具调用要有权限、预算、确认和审计', '任务状态机要支持暂停、恢复、取消和补偿'],
+    failure: ['工具权限过大导致越权操作', '循环调用耗尽预算', '非确定性输出直接写入核心系统'],
+    metrics: ['tool_call_success_rate', 'agent_task_completion_rate', 'human_confirm_rate', 'token_cost_per_task'],
+  },
+  'Agent 工程化': {
+    objects: ['工具注册表、参数 schema、执行沙箱、审计日志', '任务状态、重试策略、人工确认和成本预算', '评测集和回放环境'],
+    architecture: ['工具要强 schema、强权限、强审计', '执行过程可中断、可恢复、可回放', '上线前用离线评测和线上灰度共同验证'],
+    failure: ['参数不校验导致危险调用', '调用链不可回放无法定位问题', '成本预算缺失导致调用失控'],
+    metrics: ['tool_schema_error_rate', 'replay_success_rate', 'agent_failure_reason_count', 'cost_budget_burn'],
+  },
+  '模型服务': {
+    objects: ['模型网关、推理实例、限流队列、缓存、计费记录', 'Prompt 模板、模型版本、降级模型', '调用日志和质量反馈'],
+    architecture: ['模型网关统一鉴权、限流、路由、熔断和成本统计', '按任务重要性选择模型和超时预算', '降级路径包括小模型、缓存答案和人工处理'],
+    failure: ['模型延迟拖垮主链路', '成本不受控', '模型版本切换导致质量回退'],
+    metrics: ['model_latency_p95', 'model_error_rate', 'cost_per_request', 'fallback_rate'],
+  },
+  default: {
+    objects: ['核心业务对象、状态机、读写链路、依赖拓扑', '幂等键、版本号、审计流水、补偿任务', '监控指标、压测模型、灰度开关'],
+    architecture: ['主链路保持简单可靠，非核心能力异步解耦', '状态变化必须有唯一约束、版本控制和补偿兜底', '所有关键方案都要能灰度、观测和回滚'],
+    failure: ['边界不清导致跨服务强耦合', '异常链路没有补偿和告警', '只优化技术指标但遗漏业务正确性'],
+    metrics: ['success_rate', 'latency_p99', 'error_rate', 'backlog_size'],
+  },
+};
+
+const profileOf = (subcategory) => domainProfiles[subcategory] || domainProfiles.default;
+
+const roundOne = (title, subcategory, tags) => {
+  const p = profileOf(subcategory);
+  const [primary, secondary, third] = tags;
+  return `## 七、第一轮优化：专项架构深挖
+
+这一题不要停在“知道 ${primary}”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+
+| 深挖点 | 回答要点 |
+|--------|----------|
+| 核心对象 | ${p.objects.join('；')} |
+| 设计主线 | ${p.architecture.join('；')} |
+| 失败模式 | ${p.failure.join('；')} |
+| 验证指标 | ${p.metrics.join('、')} |
+
+**架构拆解**：
+
+1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 ${secondary} 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
+2. **服务层**：把 ${title} 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
+3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
+4. **治理层**：为 ${third} 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+
+**高分回答细节**：
+
+- 不要只说“可以用 ${primary}”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
+- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
+- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
+- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+`;
+};
+
+const roundTwo = (title, subcategory, tags) => {
+  const p = profileOf(subcategory);
+  const [primary, secondary, third] = tags;
+  return `## 八、第二轮优化：场景追问与项目表达
+
+面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+
+### 追问 1：如果线上突然抖动，你怎么定位？
+
+先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“${title}”，重点看 ${p.metrics.slice(0, 3).join('、')}，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+
+### 追问 2：如果让你重构现有系统，你怎么控风险？
+
+我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 ${primary} 和 ${secondary} 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+
+### 追问 3：你如何判断这个方案值得做？
+
+从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 ${third} 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+
+### STAR 项目表达
+
+- **S（背景）**：原系统在 ${primary} 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
+- **T（任务）**：目标是在不影响业务连续性的前提下，把 ${title} 做到可扩展、可观测、可回滚。
+- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 ${p.metrics.slice(0, 2).join('、')} 看板。
+- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+
+### 二轮复盘清单
+
+- 这个方案最脆弱的单点在哪里？
+- 数据不一致时谁发现、谁补偿、谁对账？
+- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
+- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
+- 如何向非技术负责人解释这次架构改造的收益和风险？
+`;
+};
+
 const body = (index, title, subcategory, tags) => {
   const group = groupOf(subcategory);
   const difficulty = difficultyOf(index);
@@ -212,6 +421,9 @@ memory_points:
 - 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积。
 - 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率。
 - 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
+
+${roundOne(title, subcategory, tags)}
+${roundTwo(title, subcategory, tags)}
 `;
 };
 
