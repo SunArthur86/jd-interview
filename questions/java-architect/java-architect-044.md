@@ -9,259 +9,531 @@ tags:
 - 影子库
 - 隔离
 feynman:
-  essence: 全链路压测如何避免污染生产数据的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: "全链路压测在生产环境跑，最大风险是污染生产数据（产生假订单、扣真实库存、发假短信）。核心解法是\"压测流量打影子资源\"——压测请求带压测标（HTTP Header / ThreadLocal），全链路识别压测标后路由到影子库（orders_pt）、影子 MQ topic（order_events_pt）、影子 Redis key（pt_:）、影子 ES 索引（orders_pt）。压测流量和真实流量物理隔离，互不污染。"
+  analogy: 像 JD 双 11 前全链路压测——真实订单在"真仓库"（生产库），压测订单在"模拟仓库"（影子库）。压测请求贴"压测标"标签，全链路各环节识别标签后把货送到模拟仓库。真实用户和压测流量井水不犯河水。压测结束一键清理模拟仓库（影子表），不影响真仓库。
+  first_principle: 生产环境压测最真实（真流量形态、真数据规模、真依赖链），但污染生产数据不可接受。本质矛盾是"用真环境压测"vs"不污染真数据"。解法是"影子资源"——压测流量打影子资源（表/Topic/Key/Index），真流量打真资源。全链路识别压测标后路由分流，物理隔离保证不串台。代价是影子资源要建一套、压测标全链路传递（线程池/MQ/异步要透传）。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - "压测标：HTTP Header（X-Pressure-Test: true）或 ThreadLocal 标记，全链路透传"
+  - 影子表：DB 层 orders → orders_pt，压测流量写影子表
+  - 影子 Topic：MQ 层 order_events → order_events_pt
+  - 影子 Key：Redis 层 order:123 → pt_order:123（前缀隔离）
+  - 影子 Index：ES 层 orders → orders_pt
+  - 清理：压测结束一键 DROP/TRUNCATE 影子表、FLUSHDB 影子 key、DELETE 影子 index
 first_principle:
-  problem: 面对“全链路压测如何避免污染生产数据”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 在生产环境跑全链路压测最真实，但如何避免压测流量污染生产数据（假订单、扣真库存、发假短信）？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 生产环境压测最真实（真流量形态、真数据规模、真依赖链路）
+  - 但污染生产数据不可接受（假订单、扣真实库存、发虚假短信给真用户）
+  - 全链路有多跳（应用 → DB → MQ → 下游应用 → 缓存 → ES），每跳都可能污染
+  rebuild: "用\"压测标 + 影子资源\"做物理隔离。压测请求带压测标（HTTP Header X-Pressure-Test: true），网关识别后注入 ThreadLocal 标记。全链路每个环节识别 ThreadLocal 后路由到影子资源——DB 写 orders_pt 表、MQ 发 order_events_pt topic、Redis 写 pt_:key、ES 写 orders_pt 索引。真流量打真资源，压测流量打影子资源，井水不犯河水。难点是压测标全链路透传——线程池切换会丢 ThreadLocal（用 TransmittableThreadLocal）、MQ 消费时消费端也要恢复压测标、异步任务（@Async、定时任务）要透传。压测结束一键清理影子资源。"
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - 压测标怎么全链路透传？——HTTP Header 透传 + ThreadLocal（用 TransmittableThreadLocal 解决线程池丢失）+ MQ 消息属性（properties.put("pressureTest","true")）+ Redis/DB 数据本身带标。每跳都要透传，漏一跳就串台
+  - 线程池为什么丢 ThreadLocal？——ThreadLocal 绑定线程，线程池复用线程（任务 A 的 ThreadLocal 残留影响任务 B）。用 TransmittableThreadLocal + TtlExecutors 包装线程池解决
+  - 影子表怎么路由？——MyBatis 拦截器或动态数据源，识别 ThreadLocal 压测标后把表名 orders 改成 orders_pt。或 ShardingSphere 的 shadow rule
+  - 压测数据怎么清理？——压测前记录影子资源（影子表、影子 key、影子 index），压测结束 TRUNCATE 影子表、FLUSHDB 影子 key、DELETE 影子 index。或用带 TTL 的 key 自动过期
+  - 怎么验证压测真没污染生产？——压测后对账（生产订单数 vs 真实订单数，差异 = 0）、用户审计（无真实用户收到压测短信）、库存对账（真实库存无异常扣减）
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - "压测标：X-Pressure-Test: true Header + ThreadLocal，全链路透传"
+  - 影子资源：orders_pt 表 / order_events_pt topic / pt_:key / orders_pt index
+  - 线程池丢 ThreadLocal：用 TransmittableThreadLocal（阿里 TTL 框架）
+  - 清理：压测结束 TRUNCATE 影子表 + FLUSHDB 影子 key + DELETE 影子 index
+  - 验证：压测后对账生产数据，差异 = 0
 ---
 
-# 【Java 后端架构师】全链路压测如何避免污染生产数据？
+# 【Java 后端架构师】全链路压测如何避免污染生产数据
 
-> 适用场景：高并发高可用。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 双 11 大促前要在生产环境跑全链路压测，验证容量上限。但压测不能污染生产数据（产生假订单、扣真实库存、发虚假短信给真实用户）。架构师必须设计压测流量隔离方案——影子资源 + 压测标全链路透传。
 
-## 一、先明确问题边界
+## 一、概念层：全链路压测的数据污染风险
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**污染场景**（不加隔离的灾难）：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+```
+压测请求下单 → 写订单表（生产订单被假订单淹没）
+            → 扣库存（真实商品库存被扣光，真用户买不了）
+            → 发短信（真实手机号收到"下单成功"短信，用户懵）
+            → 调支付（产生真实支付请求，钱被扣）
+            → 写 ES（搜索结果混入压测数据）
+            → 发 MQ（下游消费者处理压测消息，污染下游）
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 全链路压测 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+污染后果：
+  - 业务数据脏（订单、库存、用户数据被污染，账对不上）
+  - 用户被骚扰（收到压测短信、push）
+  - 资金风险（真实支付被触发）
+  - 下游连锁污染（MQ 消息污染所有下游）
+```
 
-## 二、推荐架构思路
+**隔离核心：影子资源 + 压测标透传**：
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+```
+                    压测请求（带 X-Pressure-Test: true）
+                              │
+                       网关注入压测标
+                              │
+                       ThreadLocal 标记
+                              │
+          ┌──────────────┬────┴────┬──────────────┐
+          │              │         │              │
+       影子表          影子 MQ   影子 Redis    影子 ES
+    (orders_pt)  (events_pt)  (pt_:key)   (orders_pt)
+          │              │         │              │
+    真流量走真表     真流量走真 MQ  真流量走真 key  真流量走真 ES
+   压测流量走影子表  压测走影子    压测走 pt_    压测走影子 index
+```
 
-## 三、技术落地点
+**真流量 vs 压测流量路由分流**：
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+| 资源类型 | 真流量（无压测标） | 压测流量（带压测标） |
+|----------|--------------------|----------------------|
+| DB 表 | orders | orders_pt |
+| MQ Topic | order_events | order_events_pt |
+| Redis Key | order:123 | pt_order:123 |
+| ES Index | orders | orders_pt |
+| 短信/推送 | 真实发送 | 拦截/丢弃（mock） |
+| 支付 | 真实支付 | mock 返回成功 |
 
-## 四、常见坑
+## 二、机制层：压测标的设计与注入
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+**压测标的形式**：
 
-## 五、面试回答模板
+```http
+HTTP 请求头注入：
+GET /order/create HTTP/1.1
+Host: api.jd.com
+X-Pressure-Test: true          ← 压测标
+X-Pressure-Test-TraceId: pt_xxx ← 压测链路追踪
+```
 
-可以按下面结构作答：
+**网关注入压测标**（Spring Cloud Gateway）：
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“全链路压测如何避免污染生产数据”，核心是 全链路压测 与 影子库 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+```java
+@Component
+public class PressureTestGatewayFilter implements GlobalFilter, Ordered {
 
-## 六、加分点
+    @Override
+    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+        String pressureFlag = exchange.getRequest().getHeaders()
+            .getFirst("X-Pressure-Test");
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+        if ("true".equals(pressureFlag)) {
+            // 注入压测上下文到请求属性
+            exchange.getAttributes().put("PRESSURE_TEST", Boolean.TRUE);
+            // 透传 Header 到下游
+            exchange.getRequest().mutate()
+                .header("X-Pressure-Test", "true")
+                .build();
+        }
+        return chain.filter(exchange);
+    }
 
-## 七、企业级面试定位：从“会用”到“能负责”
+    @Override
+    public int getOrder() { return -100; }   // 最先执行
+}
+```
 
-企业级面试不会只问“全链路压测 是什么”，而是看你能不能对一条真实生产链路负责。回答“全链路压测如何避免污染生产数据”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+**应用层压测上下文**（ThreadLocal 透传）：
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 高并发高可用 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 全链路压测、影子库、隔离 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 success_rate、latency_p99、error_rate、backlog_size 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+```java
+// 压测上下文（用 TransmittableThreadLocal，解决线程池透传问题）
+public class PressureTestContext {
+    // 关键：用 TransmittableThreadLocal 而非 ThreadLocal
+    // 否则线程池复用线程时压测标丢失
+    private static final TransmittableThreadLocal<Boolean> FLAG =
+        new TransmittableThreadLocal<>();
 
-### 企业级回答骨架
+    public static void set(boolean isPressure) {
+        FLAG.set(isPressure);
+    }
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 全链路压测 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+    public static boolean isPressure() {
+        return Boolean.TRUE.equals(FLAG.get());
+    }
 
-### 面试中要主动补的生产细节
+    public static void clear() {
+        FLAG.remove();
+    }
+}
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+// Web 拦截器：从 HTTP Header 恢复压测标到 ThreadLocal
+@Component
+public class PressureTestInterceptor implements HandlerInterceptor {
 
-## 八、苏格拉底式面试追问
+    @Override
+    public boolean preHandle(HttpServletRequest req, HttpServletResponse resp, Object h) {
+        String flag = req.getHeader("X-Pressure-Test");
+        PressureTestContext.set("true".equals(flag));
+        return true;
+    }
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+    @Override
+    public void afterCompletion(HttpServletRequest req, HttpServletResponse resp,
+                                 Object h, Exception e) {
+        PressureTestContext.clear();   // 清理，防 ThreadLocal 泄漏
+    }
+}
+```
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“全链路压测如何避免污染生产数据”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 success_rate、latency_p99、error_rate、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 全链路压测 负责的范围，以及必须依赖 影子库、隔离 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 边界不清导致跨服务强耦合，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+## 三、机制层：线程池压测标透传（核心难点）
 
-### 现场对话示例
+**问题：线程池复用线程丢 ThreadLocal**：
 
-**面试官**：你说要做“全链路压测如何避免污染生产数据”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 success_rate、latency_p99、业务失败率和事故记录。
+```java
+// 错误：普通 ThreadLocal 在线程池下会丢失
+// 线程池线程复用，任务 A 的压测标残留可能污染任务 B
+ExecutorService pool = Executors.newFixedThreadPool(10);
+pool.submit(() -> {
+    // ThreadLocal 可能为 null（任务被另一线程执行）
+    // 或残留上次任务的值（污染）
+    Boolean flag = PressureTestContext.get();   // 不可靠！
+});
+```
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 success_rate 没有改善，或者 latency_p99 反而变差，就停止扩大范围，回到假设层重新复盘。
+**解法 1：TransmittableThreadLocal（阿里 TTL 框架）**：
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 success_rate、latency_p99、error_rate。这样它不是个人经验，而是团队机制。
+```java
+// 用 TransmittableThreadLocal + TtlExecutors 包装线程池
+import com.alibaba.ttl.TransmittableThreadLocal;
+import com.alibaba.ttl.threadpool.TtlExecutors;
 
-## 九、专项架构深挖：对象、链路、失败模式
+// 压测标用 TransmittableThreadLocal（见上文 PressureTestContext）
 
-这一题不要停在“知道 全链路压测”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+// 线程池用 TtlExecutors 包装
+ExecutorService pool = TtlExecutors.getTtlExecutorService(
+    Executors.newFixedThreadPool(10)
+);
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 核心业务对象、状态机、读写链路、依赖拓扑；幂等键、版本号、审计流水、补偿任务；监控指标、压测模型、灰度开关 |
-| 设计主线 | 主链路保持简单可靠，非核心能力异步解耦；状态变化必须有唯一约束、版本控制和补偿兜底；所有关键方案都要能灰度、观测和回滚 |
-| 失败模式 | 边界不清导致跨服务强耦合；异常链路没有补偿和告警；只优化技术指标但遗漏业务正确性 |
-| 验证指标 | success_rate、latency_p99、error_rate、backlog_size |
+// 现在 submit 任务时，TransmittableThreadLocal 会自动透传
+pool.submit(() -> {
+    Boolean flag = PressureTestContext.isPressure();   // 正确透传！
+});
+```
 
-**架构拆解**：
+**解法 2：@Async 异步任务的透传**：
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 影子库 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 全链路压测如何避免污染生产数据 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 隔离 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+```java
+@Configuration
+@EnableAsync
+public class AsyncConfig implements AsyncConfigurer {
 
-**高分回答细节**：
+    @Override
+    public Executor getAsyncExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(10);
+        // 关键：用 TtlExecutors 包装
+        executor.setTaskDecorator(runnable ->
+            TtlRunnable.get(runnable)   // 包装 Runnable，透传 TTL
+        );
+        executor.initialize();
+        return executor;
+    }
+}
 
-- 不要只说“可以用 全链路压测”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+// 业务代码无感，@Async 自动透传压测标
+@Async
+public void asyncProcess() {
+    Boolean flag = PressureTestContext.isPressure();   // 正确！
+}
+```
 
-## 十、二轮场景追问与项目表达
+## 四、机制层：影子资源路由
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+**影子表路由**（MyBatis 拦截器）：
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+```java
+@Intercepts({
+    @Signature(type = StatementHandler.class, method = "prepare",
+               args = {Connection.class, Integer.class})
+})
+public class ShadowTableInterceptor implements Interceptor {
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“全链路压测如何避免污染生产数据”，重点看 success_rate、latency_p99、error_rate，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+    // 影子表映射：真表 → 影子表
+    private static final Map<String, String> SHADOW_TABLES = Map.of(
+        "orders", "orders_pt",
+        "order_items", "order_items_pt",
+        "inventory", "inventory_pt"
+    );
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+    @Override
+    public Object intercept(Invocation invocation) throws Throwable {
+        if (!PressureTestContext.isPressure()) {
+            return invocation.proceed();   // 真流量，不改 SQL
+        }
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 全链路压测 和 影子库 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+        // 压测流量，改写 SQL 中的表名为影子表
+        StatementHandler handler = (StatementHandler) invocation.getTarget();
+        BoundSql boundSql = handler.getBoundSql();
+        String sql = boundSql.getSql();
 
-### 追问 3：你如何判断这个方案值得做？
+        // 简单示例：替换表名（生产用 SQL Parser 更严谨）
+        for (Map.Entry<String, String> entry : SHADOW_TABLES.entrySet()) {
+            sql = sql.replaceAll("\\b" + entry.getKey() + "\\b", entry.getValue());
+        }
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 隔离 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+        // 反射修改 BoundSql 的 sql
+        Field field = boundSql.getClass().getDeclaredField("sql");
+        field.setAccessible(true);
+        field.set(boundSql, sql);
 
-### STAR 项目表达
+        return invocation.proceed();
+    }
+}
+```
 
-- **S（背景）**：原系统在 全链路压测 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 全链路压测如何避免污染生产数据 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 success_rate、latency_p99 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+**或用 ShardingSphere Shadow Rule**（更标准）：
 
-### 二轮复盘清单
+```yaml
+# ShardingSphere 影子规则配置
+rules:
+- !SHADOW
+  dataSources:
+    shadowDataSource:
+      sourceDataSourceName: production_ds   # 真数据源
+      shadowDataSourceName: shadow_ds       # 影子数据源
+  tables:
+    orders:
+      dataSourceNames:
+        - shadowDataSource
+      shadowAlgorithmNames:
+        - pressure-test-algorithm
+  shadowAlgorithms:
+    pressure-test-algorithm:
+      type: REGEX_MATCH
+      props:
+        operation: insert|update|delete|select
+        # 根据 Hint（ThreadLocal）路由
+```
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+**影子 Redis Key**：
 
-## 十一、面试官 5 个企业级追问
+```java
+@Component
+public class PressureTestRedisTemplate {
 
-1. **你在真实项目里怎么判断“全链路压测如何避免污染生产数据”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 success_rate、latency_p99、error_rate。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+    @Autowired
+    private RedisTemplate<String, Object> redisTemplate;
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，全链路压测 是否真是瓶颈，影子库 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+    private static final String PT_PREFIX = "pt_";
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 边界不清导致跨服务强耦合。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 success_rate 和 latency_p99 做分钟级观察，一旦越过阈值立即止损。
+    public void set(String key, Object value) {
+        String realKey = PressureTestContext.isPressure()
+            ? PT_PREFIX + key    // 压测：加 pt_ 前缀
+            : key;               // 真流量：原 key
+        redisTemplate.opsForValue().set(realKey, value);
+    }
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 隔离，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+    public Object get(String key) {
+        String realKey = PressureTestContext.isPressure()
+            ? PT_PREFIX + key
+            : key;
+        return redisTemplate.opsForValue().get(realKey);
+    }
+}
+```
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“全链路压测如何避免污染生产数据”，至少要沉淀 核心业务对象、状态机、读写链路、依赖拓扑 的建模规范，以及 success_rate、latency_p99 的验收标准。
+**影子 MQ Topic**：
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
+```java
+// 生产端：压测流量发影子 topic
+@Component
+public class OrderEventProducer {
 
-1. **如果把“全链路压测如何避免污染生产数据”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 全链路压测 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
+    @Autowired
+    private RocketMQTemplate mqTemplate;
 
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“全链路压测如何避免污染生产数据”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 success_rate、latency_p99 对业务链路的影响。
+    public void sendOrderEvent(OrderEvent event) {
+        String topic = PressureTestContext.isPressure()
+            ? "order_events_pt"   // 影子 topic
+            : "order_events";     // 真 topic
 
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 边界不清导致跨服务强耦合，要能通过 trace、tool_call_id 和业务流水快速回放。
+        Message<OrderEvent> msg = MessageBuilder.withPayload(event).build();
 
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
+        // 关键：MQ 消息也带压测标（消费端恢复 ThreadLocal）
+        if (PressureTestContext.isPressure()) {
+            msg = MessageBuilder.withPayload(event)
+                .setHeader("X-Pressure-Test", "true")
+                .build();
+        }
 
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
+        mqTemplate.send(topic, msg);
+    }
+}
 
-## 十三、记忆口诀与面试现场表达
+// 消费端：从 MQ 消息恢复压测标到 ThreadLocal
+@RocketMQMessageListener(topic = {"order_events", "order_events_pt"})
+public class OrderEventConsumer implements RocketMQListener<MessageExt> {
+
+    @Override
+    public void onMessage(MessageExt message) {
+        try {
+            // 从消息属性恢复压测标
+            String ptFlag = message.getUserProperty("X-Pressure-Test");
+            PressureTestContext.set("true".equals(ptFlag));
+
+            // 业务处理（自动路由到影子资源）
+            processOrderEvent(message.getBody());
+        } finally {
+            PressureTestContext.clear();
+        }
+    }
+}
+```
+
+## 五、机制层：外部副作用的 mock
+
+**短信/推送/支付等外部调用必须拦截**：
+
+```java
+@Component
+public class SmsService {
+
+    public void sendSms(String phone, String content) {
+        if (PressureTestContext.isPressure()) {
+            // 压测流量：不发真短信，只记日志
+            log.info("[PT] mock sendSms to {}: {}", phone, content);
+            return;
+        }
+        // 真流量：调真实短信网关
+        smsGateway.send(phone, content);
+    }
+}
+
+@Component
+public class PaymentService {
+
+    public PayResult pay(Order order) {
+        if (PressureTestContext.isPressure()) {
+            // 压测流量：mock 支付成功
+            return PayResult.success("pt_mock_payment_" + order.getId());
+        }
+        // 真流量：调真实支付网关
+        return realPaymentGateway.pay(order);
+    }
+}
+```
+
+## 六、机制层：压测数据清理
+
+**清理脚本**（压测结束后执行）：
+
+```bash
+#!/bin/bash
+# 压测数据清理脚本
+
+echo "=== 1. 清理影子表 ==="
+mysql -h production-db <<'EOF'
+TRUNCATE TABLE orders_pt;
+TRUNCATE TABLE order_items_pt;
+TRUNCATE TABLE inventory_pt;
+TRUNCATE TABLE payment_records_pt;
+EOF
+
+echo "=== 2. 清理影子 Redis Key（pt_ 前缀）==="
+redis-cli --scan --pattern 'pt_*' | xargs -L 1000 redis-cli DEL
+
+echo "=== 3. 清理影子 ES Index ==="
+curl -X DELETE "http://es:9200/orders_pt"
+curl -X DELETE "http://es:9200/products_pt"
+
+echo "=== 4. 清理影子 MQ 消息（等消费完）==="
+# 影子 topic 的消息消费完即清空，不需手动删
+
+echo "=== 清理完成 ==="
+
+# 验证：生产数据无污染
+echo "=== 5. 对账验证 ==="
+mysql -h production-db <<'EOF'
+-- 生产订单数应与真实订单数一致（无压测订单混入）
+SELECT COUNT(*) AS real_order_count FROM orders WHERE create_time >= '压测开始';
+-- 影子表应为空
+SELECT COUNT(*) AS shadow_remaining FROM orders_pt;
+EOF
+```
+
+## 七、底层本质：为什么用影子资源而非独立环境
+
+回到第一性：**全链路压测要在生产环境跑最真实，但不能污染生产数据，影子资源是物理隔离的工程解**。
+
+**为什么不在测试环境压测**：测试环境的数据规模（几万条）、流量形态（手造流量）、依赖链（mock 的下游）都不真实，压出来的容量数据不可信。生产环境的真实数据规模（亿级订单）、真实流量形态（高峰长尾分布）、真实依赖链（几十个下游、真实网络延迟）才能压出真实瓶颈。所以全链路压测必须在生产环境跑，但必须隔离压测数据，影子资源是解法。
+
+**为什么用影子资源而非独立环境**：独立压测环境要复制全套生产（DB、MQ、Redis、ES + 所有下游），成本极高且依赖链不真实（下游还是 mock）。影子资源是"逻辑隔离"——同一套物理资源，用压测标区分真/压测流量，路由到影子表/影子 topic/影子 key。真流量打真资源、压测流量打影子资源，物理隔离互不污染。代价是压测标要全链路透传（漏一跳就串台），但这比独立环境成本低得多。
+
+**为什么 ThreadLocal 会丢**：Java 的 ThreadLocal 绑定线程，线程池复用线程（核心线程不销毁，任务排队执行）。任务 A 在线程 1 设了 ThreadLocal，任务 A 执行完线程 1 不销毁，下一个任务 B 也用线程 1——但 B 看到的是 A 残留的 ThreadLocal（脏数据），或者如果 B 不设则 B 拿到 null（丢失）。压测标透传时，压测任务和真任务可能复用同一线程，ThreadLocal 不可靠。TransmittableThreadLocal（阿里 TTL）在任务提交时快照当前 TTL 值，任务执行时恢复，任务完成后清理——正确解决线程池透传。
+
+**为什么必须清理影子数据**：压测产生海量影子数据（亿级订单_pt），不清理会撑爆存储、影响性能、后续压测混入旧数据。清理要彻底——影子表 TRUNCATE、影子 Redis key DEL、影子 ES index DELETE。带 TTL（pt_ key 设过期时间）能自动过期，但表和 index 需手动清理。清理后要对账验证生产数据无污染（生产订单数 = 真实订单数，差异 = 0）。
+
+## 八、AI 架构师加问：5 个 AI 相关问题
+
+1. **AI 怎么生成更真实的压测流量？**
+   传统压测脚本（Gatling/JMeter）的流量形态是手造的，不真实。AI 分析历史真实流量（订单高峰、长尾分布、用户行为路径），生成接近真实的压测流量。AI 还能生成"对抗性流量"（异常请求、边界 case），压测系统的异常处理能力。
+
+2. **AI 怎么自动识别压测数据污染？**
+   压测后 AI 对比生产数据特征——订单分布、用户行为模式、库存波动。如果生产数据出现异常（如凌晨突增大量小额订单），AI 标记为"疑似压测污染"，自动告警。比人工对账更快、覆盖更全。
+
+3. **AI Agent 的压测标透传怎么做？**
+   Agent 的多步骤任务可能跨多次调用（HTTP + MQ + 异步），压测标要全程透传。Agent 框架（LangGraph、Spring AI）要在每步调用的上下文（Context）里持久化压测标，调用下游时透传到 Header。Agent 的记忆（短期/长期）也要区分真/压测（压测记忆存影子记忆库）。
+
+4. **AI 怎么优化压测资源配置？**
+   压测要消耗大量资源（影子表、影子 topic）。AI 分析历史压测数据，预测本次压测需要的影子资源规模（表大小、topic 吞吐），自动扩容。压测后 AI 分析资源使用率，优化下次配置（避免过度分配）。
+
+5. **AI 推理服务怎么压测？**
+   AI 推理贵（GPU 资源），压测要算成本。影子 GPU（独立的推理实例）、影子模型（小模型 mock 大模型输出）。压测 prompt 流量打影子实例，不污染真模型的缓存（KV Cache）。AI 推理的压测标在 prompt 元数据里（system_prompt 注入 "PT" 标记），路由层识别后分发。
+
+## 九、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：经验丰富的值班负责人拿着工具箱、调度台和应急预案，在处理“业务流量和系统风险同时出现”。
+抓 **"压测标透传、影子资源隔离、外部副作用 mock、压测后清理"**。
 
-- **场景**：先说明“全链路压测如何避免污染生产数据”服务于什么业务目标，不要上来就堆 全链路压测。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 边界不清导致跨服务强耦合、异常链路没有补偿和告警。
-- **验证**：最后落到 success_rate、latency_p99、error_rate，让面试官感觉你真的上线过。
+- **压测标**：X-Pressure-Test: true Header + TransmittableThreadLocal，全链路透传
+- **影子资源**：orders_pt 表 / order_events_pt topic / pt_:key / orders_pt index
+- **线程池透传**：用 TransmittableThreadLocal（阿里 TTL）+ TtlExecutors 包装
+- **外部副作用**：短信/推送/支付 mock（压测标识别后不调真实网关）
+- **清理**：压测结束 TRUNCATE 影子表 + DEL pt_*:key + DELETE 影子 index
 
 ### 拟人化理解
 
-可以把“全链路压测如何避免污染生产数据”想成一个经验丰富的值班负责人：全链路压测 是他的工具箱、调度台和应急预案，影子库 是他面对的现场信号，隔离 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看指标，再控风险，最后谈优化。这样记，比死背组件名更稳。
+把全链路压测想成 **JD 双 11 演习**。真实订单在"真仓库"（生产库），压测订单在"模拟仓库"（影子库）。压测请求贴"压测标"标签（HTTP Header + ThreadLocal），全链路每个分拣员（应用、DB、MQ、Redis）识别标签后把货送到模拟仓库。真实用户和压测流量井水不犯河水。但有个陷阱——压测标是"胸牌"，员工换班（线程池复用）时胸牌可能摘错（ThreadLocal 丢失），要用"防丢胸牌"（TransmittableThreadLocal）保证换班不丢牌。压测结束一键清空模拟仓库（影子表 TRUNCATE），真仓库不受影响。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“全链路压测如何避免污染生产数据”，我会这样答：我会先确认业务目标、规模、SLA 和一致性要求，再选择合适的架构手段。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 边界不清导致跨服务强耦合，所以我会提前设计灰度、监控和止损阈值，重点看 success_rate、latency_p99。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 success_rate 或 latency_p99 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> 全链路压测要在生产跑最真实，但污染生产数据不可接受。核心方案是影子资源 + 压测标透传。压测请求带 X-Pressure-Test: true Header，网关注入后用 TransmittableThreadLocal 标记（不用 ThreadLocal，线程池会丢）。全链路每个环节识别压测标后路由到影子资源——MyBatis 拦截器改表名到 orders_pt、Redis 加 pt_ 前缀、MQ 发 order_events_pt topic、ES 写 orders_pt index。外部副作用（短信、支付）mock 返回。难点是压测标全链路透传——线程池用 TtlExecutors 包装、MQ 消息带 Header 消费端恢复、@Async 用 TtlRunnable 包装。压测结束 TRUNCATE 影子表 + DEL pt_ key + DELETE 影子 index 清理，对账验证生产数据差异 = 0。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司压测是生产环境全链路压测还是独立压测环境？影子资源怎么管理（手动建 vs 自动化）？压测标透传框架是自研还是用 TTL？压测后清理自动化程度？
 
+## 十、苏格拉底式面试追问
+
+每一问先回答"为什么"，再"怎么做"，最后"如何证明"。
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么不在测试环境压测，非要生产环境？ | 测试环境数据规模、流量形态、依赖链都不真实，压出来的容量数据不可信。生产环境有真实亿级数据、真实流量分布、真实下游依赖，才能压出真实瓶颈。代价是必须隔离压测数据，影子资源是工程解 |
+| 证据追问 | 怎么证明压测真没污染生产？ | 压测后对账——生产订单数 = 真实订单数（差异 = 0）、库存对账（真实库存无异常扣减）、用户审计（无真实用户收到压测短信）、支付对账（无真实支付被触发）。监控生产数据特征（订单分布），AI 异常检测 |
+| 边界追问 | 压测标透传最易在哪一跳丢？ | 线程池——ThreadLocal 绑线程，线程池复用线程会丢或污染。用 TransmittableThreadLocal + TtlExecutors 解决。MQ 消费——消息属性带 Header，消费端恢复 ThreadLocal。异步任务——@Async 用 TtlRunnable 包装 |
+| 反例追问 | 影子资源方案有什么缺点？ | ①影子表要建一套（DB、MQ、Redis、ES 都要影子），资源成本；②压测标透传复杂，漏一跳就串台；③影子资源规模要预估（太小压不准、太大浪费）；④清理要彻底，残留影响下次压测 |
+| 风险追问 | 压测标串台（真流量被当成压测）会怎样？ | 灾难——真订单被写进影子表（生产丢数据）、真用户收到 mock 短信（用户投诉）。防御：压测标只在网关注入（业务代码不能设）、压测流量来源 IP 白名单、监控生产订单异常突降（被路由到影子表） |
+| 验证追问 | 影子表路由怎么验证生效？ | 压测时监控——影子表 orders_pt 行数增长（应随压测流量增长）、生产表 orders 行数不增（无污染）、Redis pt_ key 数量增长、影子 topic 消息数增长。对账影子表数据 = 压测订单数 |
+| 沉淀追问 | 团队压测规范沉淀什么？ | 压测标透传规范（TTL 框架使用）、影子资源建表 SOP、压测流量注入工具（GoReplay/Gatling + Header 注入）、清理脚本自动化、压测后对账报告模板、压测污染事故复盘案例 |
+
+### 现场对话示例
+
+**面试官**：全链路压测怎么避免污染生产数据？
+
+**候选人**：核心是影子资源 + 压测标全链路透传。压测请求带 X-Pressure-Test: true Header，网关注入后用 TransmittableThreadLocal 标记到上下文。全链路每个环节识别压测标后路由到影子资源——MyBatis 拦截器把表名 orders 改成 orders_pt、Redis 加 pt_ 前缀、MQ 发 order_events_pt topic、ES 写 orders_pt index。真流量打真资源、压测流量打影子资源，物理隔离。外部副作用（短信、支付、推送）mock 返回，不调真实网关。压测结束 TRUNCATE 影子表 + DEL pt_ key + DELETE 影子 index 清理，对账验证生产数据差异 = 0。
+
+**面试官**：压测标透传最易出问题的是哪？
+
+**候选人**：线程池。ThreadLocal 绑定线程，线程池复用线程——任务 A（压测）设了 ThreadLocal，执行完线程不销毁，任务 B（真流量）复用同一线程，可能读到 A 残留的压测标（污染）或 null（丢失）。解法是 TransmittableThreadLocal（阿里 TTL 框架）——任务提交时快照当前 TTL，任务执行时恢复，完成后清理。线程池用 TtlExecutors.getTtlExecutorService 包装，@Async 用 TtlRunnable 包装。MQ 消费也要透传——生产端消息带 X-Pressure-Test Header，消费端 onMessage 时从 Header 恢复 ThreadLocal。漏一跳就串台，所以压测标透传是全链路压测最易出 bug 的地方。
+
+**面试官**：怎么验证压测真没污染生产？
+
+**候选人**：三层验证。第一层实时监控——压测时盯生产表 orders 的写入速率（应不随压测增长）、影子表 orders_pt 的行数（应随压测增长）、Redis 真 key vs pt_ key 的数量比、ES 真 index vs 影子 index 的文档数。如果生产表突增，立即停压测排查。第二层压测后对账——生产订单数 vs 真实业务订单数（差异 = 0）、库存对账（真实库存无异常扣减）、支付对账（无真实支付被触发）。第三层用户审计——抽查真实用户是否收到压测短信/push（应为 0）。任一层发现问题立即排查，严重的回滚（恢复生产数据快照）。
+
+## 常见考点
+
+1. **全链路压测为什么要在生产环境跑？**——测试环境的数据规模、流量形态、依赖链不真实，压出来的容量数据不可信。生产环境有真实亿级数据、真实流量分布、真实下游，才能压出真实瓶颈。
+2. **压测标怎么全链路透传？**——HTTP Header + TransmittableThreadLocal（不用 ThreadLocal，线程池会丢）。线程池用 TtlExecutors 包装、MQ 消息带 Header 消费端恢复、@Async 用 TtlRunnable。
+3. **影子资源有哪些？**——影子表（orders_pt）、影子 MQ topic（order_events_pt）、影子 Redis key（pt_:）、影子 ES index（orders_pt）。真流量打真资源、压测流量打影子资源。
+4. **压测数据怎么清理？**——TRUNCATE 影子表、DEL pt_ 前缀的 Redis key、DELETE 影子 ES index。压测前记录影子资源清单，压测后按清单清理。对账验证生产数据差异 = 0。
+5. **外部副作用（短信/支付）怎么处理？**——压测流量识别压测标后 mock 返回（不发真短信、不调真支付网关），只记日志。避免骚扰真实用户和产生真实资金风险。

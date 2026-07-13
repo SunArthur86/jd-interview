@@ -2,266 +2,393 @@
 id: java-architect-176
 difficulty: L2
 category: java-architect
-subcategory: 直播架构
+subcategory: 实时互动
 tags:
 - Java 架构师
 - 直播
 - 弹幕
 - 礼物
+- 高并发
 feynman:
-  essence: 直播间高并发弹幕与礼物链路的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: 直播弹幕的核心是"房间分片 + 多级消息总线 + 礼物连击合并"。百万级观众的消息不能全走 DB，靠 Redis Pub/Sub + 房间分片把消息路由到对应连接节点。礼物连击（combo）靠滑动窗口合并，减少渲染压力。
+  analogy: 像体育场大屏——观众喊话不能直接上大屏（百万声音会乱），要通过分区主持人（房间分片）收集，按主题过滤后（敏感词）上屏。礼物连击像团购——10 秒内多人送同款合并成一个"XX 送了 99 朵玫瑰"。
+  first_principle: 直播间的难点是"写放大"（百万观众，每人发消息都要广播给其他人）。单机扛不住，必须分片——房间路由到固定节点，节点内用本地广播。礼物连击是"读放大"（高频渲染），靠窗口合并降频。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 房间分片：roomId hash 到固定节点，节点内本地广播
+  - 消息总线：Redis Pub/Sub 或 Kafka 做节点间消息分发
+  - 礼物连击：滑动窗口（10s）合并同款礼物，combo count
+  - 敏感词过滤：发消息前 AC 自动机匹配，命中丢弃
+  - 消息限流：每用户每秒 N 条，防刷屏
 first_principle:
-  problem: 面对“直播间高并发弹幕与礼物链路”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 百万观众直播间如何让弹幕秒级广播、礼物连击不卡顿、还能过滤敏感词防违规？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 单直播间百万 QPS，单节点扛不住，必须分片
+  - 礼物连击（高频）直接渲染会卡，必须合并
+  - UGC 内容有违规风险，必须实时过滤
+  - 消息不能丢（礼物涉及钱），但弹幕可以容忍少量丢
+  rebuild: 房间按 hash 路由到固定节点（一致性 hash，节点扩缩容时迁移最小）。节点内维护"本节点连到该房间的所有用户 session"，消息到节点后本地广播。礼物连击用滑动窗口合并（10 秒内同款合并成一个 combo）。敏感词用 AC 自动机（多模式匹配 O(n)）。礼物走 Kafka 保可靠，弹幕走 Redis Pub/Sub 保低延迟。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - 房间怎么分片？——一致性 hash。roomId hash 到 hash 环，找最近的节点。扩容时只迁移相邻段。虚拟节点（每物理节点 150 个虚拟节点）解决数据倾斜。
+  - 用户连哪个节点？——网关查"房间→节点"路由表（Redis），返回节点 IP，用户 WebSocket 连该节点。
+  - 弹幕和礼物为什么分开通道？——礼物涉及钱走 Kafka（可靠，ack），弹幕容忍丢走 Redis Pub/Sub（低延迟，无 ack）。
+  - 礼物连击怎么实现？——Redis 滑动窗口。key=gift:combo:{roomId}:{giftId}，10 秒内累加 count。定时任务（每 500ms）扫描过期 combo 下发最终结果。
+  - 主播端消息太多怎么办？——聚合下发。主播端不是每条都收，而是每 200ms 聚合一批（最多 50 条）。监控 broadcast_latency。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 房间分片：一致性 hash，roomId → 节点，虚拟节点 150
+  - 消息总线：弹幕 Redis Pub/Sub（低延迟），礼物 Kafka（可靠）
+  - 礼物连击：滑动窗口 10s 合并，combo count
+  - 敏感词：AC 自动机 O(n) 多模式匹配
+  - 限流：用户级令牌桶（每秒 N 条），房间级 QPS 上限
 ---
 
-# 【Java 后端架构师】直播间高并发弹幕与礼物链路？
+# 【Java 后端架构师】直播间高并发弹幕与礼物链路
 
-> 适用场景：AI Agent/Infra。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 直播带货（京东直播）。主播开播瞬间几万观众涌入，弹幕 QPS 破万，礼物连击刷屏。架构师要设计的是"房间分片 + 消息总线 + 礼物连击合并 + 敏感词过滤"的实时互动链路。
 
-## 一、先明确问题边界
+## 一、概念层：整体架构
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+```
+观众 WebSocket → 网关（查房间路由）→ 房间节点（hash 路由）
+                                         ↓
+                                    本地 session 表
+                                         ↓
+弹幕：Redis Pub/Sub（房间频道）→ 各节点订阅 → 本地广播
+礼物：Kafka（礼物 topic）→ 消费 → 连击合并 → 下发
+```
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+## 二、机制层：房间分片路由
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 直播 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+```java
+@Service
+public class RoomRouterService {
 
-## 二、推荐架构思路
+    private final ConsistentHash<String> hashRing;      // 一致性 hash 环
+    private final RedisTemplate<String, String> redis;
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+    /**
+     * 网关：用户进入房间，返回该房间所在节点
+     */
+    public String routeNode(String roomId) {
+        // 先查缓存
+        String cached = redis.opsForValue().get("room:node:" + roomId);
+        if (cached != null) return cached;
 
-## 三、技术落地点
+        // 一致性 hash 计算节点
+        String node = hashRing.get(roomId);
+        redis.opsForValue().set("room:node:" + roomId, node,
+            Duration.ofMinutes(5));
+        return node;
+    }
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+    /**
+     * 节点扩容时重新分配房间
+     */
+    public void onNodeAdd(String newNode) {
+        hashRing.addNode(newNode);
+        // 通知受影响房间迁移
+        List<String> affected = hashRing.getMigrationRange(newNode);
+        for (String roomId : affected) {
+            redis.delete("room:node:" + roomId);    // 让路由重新计算
+            notifyMigration(roomId, newNode);
+        }
+    }
+}
 
-## 四、常见坑
+/**
+ * 一致性 hash（虚拟节点 150）
+ */
+public class ConsistentHash<T> {
+    private final TreeMap<Integer, T> ring = new TreeMap<>();
+    private static final int VIRTUAL_NODES = 150;
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+    public void addNode(T node) {
+        for (int i = 0; i < VIRTUAL_NODES; i++) {
+            int hash = hash(node.toString() + "-vn" + i);
+            ring.put(hash, node);
+        }
+    }
 
-## 五、面试回答模板
+    public T get(String key) {
+        if (ring.isEmpty()) return null;
+        int hash = hash(key);
+        // 顺时针找第一个节点
+        Map.Entry<Integer, T> entry = ring.ceilingEntry(hash);
+        return entry != null ? entry.getValue() : ring.firstEntry().getValue();
+    }
+}
+```
 
-可以按下面结构作答：
+## 三、机制层：弹幕消息总线（Redis Pub/Sub）
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“直播间高并发弹幕与礼物链路”，核心是 直播 与 弹幕 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+```java
+@Service
+@Slf4j
+public class DanmakuService {
 
-## 六、加分点
+    private final RedisMessageListenerContainer listenerContainer;
+    private final SessionManager sessionManager;       // 本节点的 session 表
+    private final AcTrieSensitiveFilter sensitiveFilter;
+    private final RateLimiter rateLimiter;
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+    /**
+     * 节点启动：订阅本节点负责的房间频道
+     */
+    public void subscribeRooms(List<String> roomIds) {
+        for (String roomId : roomIds) {
+            ChannelTopic topic = new ChannelTopic("danmaku:room:" + roomId);
+            listenerContainer.addMessageListener((message, pattern) -> {
+                Danmaku danmaku = JsonUtils.parse(message.getMessage(),
+                    Danmaku.class);
+                // 本地广播给该房间在本节点的所有连接
+                broadcast(danmaku);
+            }, topic);
+        }
+    }
 
-## 七、企业级面试定位：从“会用”到“能负责”
+    /**
+     * 观众发弹幕：限流 + 敏感词过滤 + 发布到频道
+     */
+    public void send(Danmaku danmaku) {
+        String userId = danmaku.getUserId();
+        String roomId = danmaku.getRoomId();
 
-企业级面试不会只问“直播 是什么”，而是看你能不能对一条真实生产链路负责。回答“直播间高并发弹幕与礼物链路”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+        // 1. 用户级限流（每秒 3 条）
+        if (!rateLimiter.tryAcquire("danmaku:user:" + userId, 3, 1)) {
+            throw new BizException("发送太频繁");
+        }
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 AI Agent/Infra 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 直播、弹幕、礼物 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 success_rate、latency_p99、error_rate、backlog_size 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+        // 2. 敏感词过滤（AC 自动机）
+        if (sensitiveFilter.contains(danmaku.getText())) {
+            log.warn("敏感词拦截: userId={} text={}", userId,
+                danmaku.getText());
+            throw new BizException("内容违规");
+        }
 
-### 企业级回答骨架
+        // 3. 消息长度限制
+        if (danmaku.getText().length() > 50) {
+            throw new BizException("弹幕过长");
+        }
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 直播 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+        // 4. 发布到房间频道（所有订阅该房间的节点都会收到）
+        redis.convertAndSend("danmaku:room:" + roomId,
+            JsonUtils.stringify(danmaku));
+    }
 
-### 面试中要主动补的生产细节
+    /**
+     * 本地广播：遍历本节点该房间的所有 session
+     */
+    private void broadcast(Danmaku danmaku) {
+        List<WebSocketSession> sessions = sessionManager
+            .getByRoom(danmaku.getRoomId());
+        for (WebSocketSession session : sessions) {
+            try {
+                session.sendMessage(new TextMessage(
+                    JsonUtils.stringify(danmaku)));
+            } catch (IOException e) {
+                sessionManager.remove(session.getId());
+            }
+        }
+    }
+}
+```
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+## 四、机制层：礼物连击队列（滑动窗口合并）
 
-## 八、苏格拉底式面试追问
+```java
+@Service
+@Slf4j
+public class GiftComboService {
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+    private final RedisTemplate<String, String> redis;
+    private final KafkaTemplate<String, String> kafka;
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“直播间高并发弹幕与礼物链路”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 success_rate、latency_p99、error_rate、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 直播 负责的范围，以及必须依赖 弹幕、礼物 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 边界不清导致跨服务强耦合，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+    private static final long COMBO_WINDOW_MS = 10_000;    // 10 秒连击窗口
+    private static final long FLUSH_INTERVAL_MS = 500;     // 500ms 刷新一次
 
-### 现场对话示例
+    /**
+     * 送礼：写 Kafka（可靠）+ 累加连击计数
+     */
+    public void send(Gift gift) {
+        // 1. 礼物消息写 Kafka（保证不丢，涉及钱）
+        kafka.send("gift-topic", gift.getRoomId(),
+            JsonUtils.stringify(gift));
 
-**面试官**：你说要做“直播间高并发弹幕与礼物链路”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 success_rate、latency_p99、业务失败率和事故记录。
+        // 2. 累加连击（滑动窗口）
+        String comboKey = "gift:combo:" + gift.getRoomId()
+            + ":" + gift.getGiftId();
+        redis.opsForValue().increment(comboKey);           // count++
+        redis.expire(comboKey, COMBO_WINDOW_MS,
+            TimeUnit.MILLISECONDS);                        // 10s 后自动过期
+    }
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 success_rate 没有改善，或者 latency_p99 反而变差，就停止扩大范围，回到假设层重新复盘。
+    /**
+     * 定时刷新连击：每 500ms 扫描活跃 combo 下发
+     */
+    @Scheduled(fixedDelay = FLUSH_INTERVAL_MS)
+    public void flushCombos() {
+        // 扫描最近有变动的 combo key（用 Sorted Set 记录活跃 combo）
+        Set<String> activeCombos = redis.opsForZSet()
+            .rangeByScore("gift:active_combos",
+                System.currentTimeMillis() - FLUSH_INTERVAL_MS,
+                System.currentTimeMillis());
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 success_rate、latency_p99、error_rate。这样它不是个人经验，而是团队机制。
+        for (String comboKey : activeCombos) {
+            String countStr = redis.opsForValue().get(comboKey);
+            if (countStr == null) continue;                // 已过期
 
-## 九、专项架构深挖：对象、链路、失败模式
+            int count = Integer.parseInt(countStr);
+            String[] parts = comboKey.split(":");
+            String roomId = parts[2];
+            String giftId = parts[3];
 
-这一题不要停在“知道 直播”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+            // 下发连击消息（合并后的）
+            ComboMessage msg = new ComboMessage(roomId, giftId, count);
+            redis.convertAndSend("gift:room:" + roomId,
+                JsonUtils.stringify(msg));
+        }
+    }
+}
+```
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 核心业务对象、状态机、读写链路、依赖拓扑；幂等键、版本号、审计流水、补偿任务；监控指标、压测模型、灰度开关 |
-| 设计主线 | 主链路保持简单可靠，非核心能力异步解耦；状态变化必须有唯一约束、版本控制和补偿兜底；所有关键方案都要能灰度、观测和回滚 |
-| 失败模式 | 边界不清导致跨服务强耦合；异常链路没有补偿和告警；只优化技术指标但遗漏业务正确性 |
-| 验证指标 | success_rate、latency_p99、error_rate、backlog_size |
+## 五、机制层：敏感词过滤（AC 自动机）
 
-**架构拆解**：
+```java
+/**
+ * AC 自动机：多模式匹配 O(n)，比逐个 contains 快百倍
+ */
+public class AcTrieSensitiveFilter {
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 弹幕 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 直播间高并发弹幕与礼物链路 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 礼物 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+    private final AcTrieNode root = new AcTrieNode();
 
-**高分回答细节**：
+    public void init(List<String> words) {
+        // 1. 构建 Trie
+        for (String word : words) {
+            AcTrieNode node = root;
+            for (char c : word.toCharArray()) {
+                node = node.children.computeIfAbsent(c,
+                    k -> new AcTrieNode());
+            }
+            node.isEnd = true;
+        }
+        // 2. 构建 fail 指针（BFS）
+        buildFailPointer();
+    }
 
-- 不要只说“可以用 直播”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+    public boolean contains(String text) {
+        AcTrieNode node = root;
+        for (char c : text.toCharArray()) {
+            while (node != root && !node.children.containsKey(c)) {
+                node = node.fail;       // fail 指针跳转
+            }
+            node = node.children.getOrDefault(c, root);
+            if (node.isEnd) return true;
+        }
+        return false;
+    }
 
-## 十、二轮场景追问与项目表达
+    private void buildFailPointer() {
+        Queue<AcTrieNode> queue = new LinkedList<>();
+        for (AcTrieNode child : root.children.values()) {
+            child.fail = root;
+            queue.offer(child);
+        }
+        while (!queue.isEmpty()) {
+            AcTrieNode curr = queue.poll();
+            for (Map.Entry<Character, AcTrieNode> e
+                : curr.children.entrySet()) {
+                AcTrieNode fail = curr.fail;
+                while (fail != root && !fail.children.containsKey(e.getKey())) {
+                    fail = fail.fail;
+                }
+                e.getValue().fail = fail.children.getOrDefault(e.getKey(), root);
+                queue.offer(e.getValue());
+            }
+        }
+    }
+}
+```
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+## 六、机制层：主播端聚合下发
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+```java
+/**
+ * 主播端：消息太多不能每条都收，按批次聚合
+ */
+@Service
+public class StreamerAggregator {
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“直播间高并发弹幕与礼物链路”，重点看 success_rate、latency_p99、error_rate，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+    private final Map<String, BlockingQueue<Danmaku>> buffers
+        = new ConcurrentHashMap<>();
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+    /**
+     * 收到弹幕先入 buffer
+     */
+    public void buffer(Danmaku danmaku) {
+        buffers.computeIfAbsent(danmaku.getRoomId(),
+            k -> new LinkedBlockingQueue<>(1000))   // 最多缓冲 1000 条
+            .offer(danmaku);
+    }
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 直播 和 弹幕 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+    /**
+     * 每 200ms 聚合一批下发（最多 50 条）
+     */
+    @Scheduled(fixedDelay = 200)
+    public void flushBatch() {
+        for (Map.Entry<String, BlockingQueue<Danmaku>> e
+            : buffers.entrySet()) {
+            List<Danmaku> batch = new ArrayList<>(50);
+            e.getValue().drainTo(batch, 50);
+            if (!batch.isEmpty()) {
+                sendToStreamer(e.getKey(), batch);
+            }
+        }
+    }
+}
+```
 
-### 追问 3：你如何判断这个方案值得做？
+## 七、底层本质：写放大与读放大
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 礼物 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+直播间的核心矛盾是**写放大**和**读放大**。
 
-### STAR 项目表达
+**写放大**：百万观众中哪怕只有 1% 发弹幕，也是 1 万 QPS。每条要广播给其他 99 万人 = 1 万 × 99 万 = 10 亿次"广播"。必须分片——每个节点只负责一部分观众，节点内本地广播（O(节点内连接数)），节点间靠 Pub/Sub 转发一次。
 
-- **S（背景）**：原系统在 直播 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 直播间高并发弹幕与礼物链路 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 success_rate、latency_p99 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+**读放大（礼物连击）**：热门礼物刷屏时，每秒上千次渲染。前端扛不住。靠滑动窗口合并——10 秒内的同款礼物累加成"送了 N 个"，渲染从 N 次降到 1 次。
 
-### 二轮复盘清单
+**为什么弹幕走 Pub/Sub 礼物走 Kafka？** 弹幕容忍丢（少几条不影响体验），Pub/Sub 无 ack 低延迟（< 10ms）。礼物涉及钱不能丢，Kafka 有 ack + 持久化 + 重放，延迟稍高（几十 ms）但可靠。这是**消息可靠性 vs 延迟**的 trade-off。
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+**一致性 hash 的本质**：传统 hash（hash(roomId) % N）在节点扩容时几乎所有 key 都要重映射。一致性 hash 让节点加入/退出只影响相邻段（约 1/N 的 key 迁移），减少迁移成本。虚拟节点解决数据倾斜（让 hash 分布更均匀）。
 
-## 十一、面试官 5 个企业级追问
+## 八、AI 工程化深挖
 
-1. **你在真实项目里怎么判断“直播间高并发弹幕与礼物链路”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 success_rate、latency_p99、error_rate。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+1. **弹幕内容审核怎么用 AI？** 规则（AC 自动机敏感词）+ LLM 兜底。规则快但召回低（变体如"米\*兔"漏检），LLM 准但慢（100ms+）。规则先过滤 99%，疑似难判的送 LLM 复审。监控 audit_pass_rate。
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，直播 是否真是瓶颈，弹幕 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+2. **怎么用 LLM 做弹幕情感分析？** 实时统计直播间情绪（正向/负向/中性比例）。负向比例突增可能主播说了不当言论或商品有问题，触发告警。但 LLM 推理慢，用轻量模型（BERT 微调）而非大 LLM。
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 边界不清导致跨服务强耦合。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 success_rate 和 latency_p99 做分钟级观察，一旦越过阈值立即止损。
+3. **怎么个性化弹幕展示？** 给用户看 ta 关注的人/同好发的弹幕优先展示（像抖音评论的"关注的人"）。需要实时计算用户关系图 + 弹幕排序。LLM 可生成"精选弹幕"摘要（"大家都在问尺码"）。
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 礼物，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+4. **怎么用 AI 检测刷屏机器人？** 异常模式检测：同一 IP 高频发同质内容（机器人特征）。训练分类模型（特征：发送频率/内容相似度/账号年龄）。命中的限流或封禁。监控 bot_block_rate。
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“直播间高并发弹幕与礼物链路”，至少要沉淀 核心业务对象、状态机、读写链路、依赖拓扑 的建模规范，以及 success_rate、latency_p99 的验收标准。
+5. **直播带货怎么用 AI 提转化？** 实时分析弹幕意图（"想买/疑问/比价"），主播端提示"现在有 50 人在问尺码"，引导主播讲解。LLM 实时摘要弹幕热点。监控 conversion_lift。
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“直播间高并发弹幕与礼物链路”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 直播 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“直播间高并发弹幕与礼物链路”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 success_rate、latency_p99 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 边界不清导致跨服务强耦合，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 九、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：经验丰富的值班负责人拿着工具箱、调度台和应急预案，在处理“业务流量和系统风险同时出现”。
+抓 **"分片、总线、连击、敏感词"** 四个词。
 
-- **场景**：先说明“直播间高并发弹幕与礼物链路”服务于什么业务目标，不要上来就堆 直播。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 边界不清导致跨服务强耦合、异常链路没有补偿和告警。
-- **验证**：最后落到 success_rate、latency_p99、error_rate，让面试官感觉你真的上线过。
-
-### 拟人化理解
-
-可以把“直播间高并发弹幕与礼物链路”想成一个经验丰富的值班负责人：直播 是他的工具箱、调度台和应急预案，弹幕 是他面对的现场信号，礼物 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看指标，再控风险，最后谈优化。这样记，比死背组件名更稳。
+- **分片**：一致性 hash（虚拟节点 150），roomId → 节点，节点内本地广播
+- **总线**：弹幕 Redis Pub/Sub（低延迟），礼物 Kafka（可靠）
+- **连击**：滑动窗口 10s 合并，count 累加，500ms 刷新
+- **敏感词**：AC 自动机 O(n) 多模式匹配
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“直播间高并发弹幕与礼物链路”，我会这样答：我会先确认业务目标、规模、SLA 和一致性要求，再选择合适的架构手段。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 边界不清导致跨服务强耦合，所以我会提前设计灰度、监控和止损阈值，重点看 success_rate、latency_p99。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
+> 直播弹幕我用房间分片 + 消息总线。用户进直播间，网关查"房间→节点"路由表（一致性 hash，虚拟节点 150 解决倾斜），返回节点 IP，用户 WebSocket 连该节点。节点维护"本节点连到该房间的所有 session"表。弹幕发送时走 Redis Pub/Sub（房间频道），所有订阅该房间的节点收到后本地广播——这是节点间一次转发 + 节点内 O(连接数) 广播，避免单点百万广播。弹幕走 Pub/Sub 因为容忍丢、要低延迟（<10ms）。礼物走 Kafka 因为涉及钱不能丢，有 ack + 持久化。礼物连击用滑动窗口合并——key=gift:combo:{roomId}:{giftId}，10 秒内累加 count，定时 500ms 扫描刷新下发，把 N 次渲染合并成 1 次。敏感词用 AC 自动机（多模式匹配 O(n)，比逐个 contains 快百倍）+ LLM 兜底复审。主播端聚合下发——不是每条都收，200ms 一批最多 50 条。用户级限流（令牌桶每秒 3 条）防刷屏。节点扩容时一致性 hash 只迁移相邻段。监控 broadcast_latency、combo_count、sensitive_block_rate。
 
-### 被追问时的转场话术
+## 十、常见考点
 
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 success_rate 或 latency_p99 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
-
-### 反问面试官
-
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
-
+1. **房间分片怎么做的？**——一致性 hash。roomId hash 到环上找最近节点。虚拟节点 150 解决倾斜。扩容只迁移相邻段（约 1/N）。路由表存 Redis（TTL 5 分钟）。
+2. **弹幕和礼物为什么分通道？**——弹幕容忍丢走 Pub/Sub（低延迟 <10ms 无 ack），礼物涉及钱走 Kafka（ack + 持久化 + 重放，延迟几十 ms 但可靠）。
+3. **礼物连击怎么实现？**——Redis 滑动窗口。key=gift:combo:{roomId}:{giftId}，increment 累加，expire 10s 过期。定时 500ms 扫描活跃 combo 下发合并结果。N 次渲染合并 1 次。
+4. **敏感词怎么过滤？**——AC 自动机（多模式匹配 O(n)，构建 Trie + fail 指针）。规则快但召回低，LLM 兜底复审疑似内容。
+5. **百万观众怎么扛？**——分片（每节点扛一部分观众）+ 本地广播（节点内 O(连接数)）+ 主播端聚合（200ms 一批）。单节点扛不住才分片。

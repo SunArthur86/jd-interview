@@ -9,259 +9,401 @@ tags:
 - 指标
 - SLO
 feynman:
-  essence: Micrometer 指标体系如何设计的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: Micrometer 是 Spring Boot 的"指标门面"（类似 SLF4J 之于日志），定义一套维度（name + tags + 数值）的指标模型，底层可对接 Prometheus / Datadog / NewRelic / CloudWatch。设计指标体系的核心是"少而准"——RED（Rate/Errors/Duration）+ USE（Utilization/Saturation/Errors）+ 业务核心指标（如订单量、支付成功率），用 SLO 倒推采集什么，不是"什么都能采"。
+  analogy: 像汽车仪表盘：油量表（Gauge，当前值）、里程表（Counter，单调递增）、转速表（Histogram，分布）、温度警告灯（报警规则）。Micrometer 是仪表盘的统一驱动，不论装在特斯拉还是比亚迪，仪表盘外观一致。
+  first_principle: 指标体系的本质是"用最小成本回答最重要的问题"——服务有没有问题（RED）、资源够不够用（USE）、业务正常吗（业务指标）。每个指标都要回答一个具体问题，没有问题的指标是浪费。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - Micrometer 是指标门面（SLF4J 模式），支持多后端
+  - 四种指标类型：Counter（递增）/Gauge（瞬时值）/Histogram（分布）/Timer（延迟+计数）
+  - RED 黄金信号：Rate（QPS）/Errors（错误率）/Duration（P99 延迟）
+  - USE 黄金信号：Utilization（利用率）/Saturation（饱和度）/Errors（错误）
+  - Histogram 优于 Summary（服务端聚合，跨实例合并）
 first_principle:
-  problem: 面对“Micrometer 指标体系如何设计”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 怎么设计一套既能告警又能定位问题的指标体系，且采集成本可控？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 指标是聚合数字（QPS/P99/错误率），低成本全量采集
+  - 不同信号有不同擅长：指标告警、日志排查、链路定位
+  - 指标要回答具体问题（"服务有问题吗" / "资源够吗" / "业务正常吗"）
+  rebuild: 用 RED + USE 框架设计指标。RED（服务视角）：Rate=QPS、Errors=错误率、Duration=P99 延迟，回答"服务有没有问题"。USE（资源视角）：Utilization=CPU/内存利用率、Saturation=线程池/连接池饱和度、Errors=GC/OOM，回答"资源够不够用"。加业务核心指标（订单量、支付成功率）。用 Micrometer 的 Histogram 类型（服务端聚合分位），采集全量但聚合后低成本。SLO 倒推采集：先定 SLO（如 P99 < 200ms），再设计指标（histogram_quantile）。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - Histogram 和 Summary 区别？——Histogram 在服务端聚合分位（多个实例可合并算 P99）；Summary 在客户端算分位（跨实例无法合并）。生产用 Histogram
+  - 指标命名怎么规范？——{domain}_{action}_{outcome}_{unit}，如 order_create_duration_seconds。Micrometer 自动规范化（点→下划线）
+  - 高基数标签（cardinality）怎么避免？——不要用 userId / orderId 当标签（每个 ID 一个时序，标签爆炸）。标签应该是有限集合（如 method、status、env）
+  - SLO 怎么定？——SLI（指标）→ SLO（目标，如 P99 < 200ms，错误率 < 0.1%）→ SLA（对外承诺）。SLO 是内部目标，SLA 是合同
+  - 自定义业务指标怎么写？——@Timed 注解 / MeterRegistry 自定义 / Micrometer 注解
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - Micrometer 是指标门面（SLF4J 模式），多后端
+  - 四类型：Counter（递增）/Gauge（瞬时）/Histogram（分布）/Timer（延迟+计数）
+  - RED：Rate（QPS）/Errors（错误率）/Duration（P99）
+  - USE：Utilization（利用率）/Saturation（饱和度）/Errors（错误）
+  - Histogram 优于 Summary（服务端聚合，跨实例合并）
+  - 高基数标签要避免（不用 userId/orderId 当标签）
+  - SLO 倒推：先定目标再设计指标
 ---
 
-# 【Java 后端架构师】Micrometer 指标体系如何设计？
+# 【Java 后端架构师】Micrometer 指标体系如何设计
 
-> 适用场景：高并发高可用。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。订单服务上线后，Prometheus 大盘有几百个指标但没人看，告警每天误报 100 次被忽视。架构师必须用 RED + USE 框架重新设计指标体系，让每个指标回答具体问题，告警准确率 > 95%。
 
-## 一、先明确问题边界
+## 一、概念层：指标的类型与门面模式
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**Micrometer 是什么**：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+```
+应用代码（Micrometer API）
+        │
+        ▼
+   MeterRegistry（门面）
+        │
+   ┌────┼────┬────────┬─────────┐
+   ▼    ▼    ▼        ▼         ▼
+Prometheus Datadog NewRelic CloudWatch Atlas
+```
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 Micrometer 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**Micrometer 是 SLF4J 模式**：定义统一 API（Counter/Gauge/Histogram/Timer），底层对接多个监控系统。换监控系统不改代码。
 
-## 二、推荐架构思路
+**四种指标类型**（这张表面试必问）：
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+| 类型 | 用途 | Prom 对应 | 例子 |
+|------|------|---------|------|
+| **Counter** | 单调递增计数 | `http_requests_total` | 总请求数、总错误数 |
+| **Gauge** | 瞬时值（可增可减） | `jvm_memory_used_bytes` | 当前内存、当前线程数、连接池活跃数 |
+| **Histogram（直方图）** | 分布统计 | `http_request_duration_seconds_bucket` | P99 延迟、P999 延迟 |
+| **Timer（计时器）** | 延迟 + 计数（Histogram + Counter） | 自动组合 | 方法耗时分布 |
+| **LongTaskTimer** | 长任务计时 | gauge + counter | 进行中的批处理任务 |
+| **DistributionSummary** | 任意值分布 | `_bucket` | 响应体大小分布 |
 
-## 三、技术落地点
+**Histogram vs Summary**（架构师必须答全）：
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+```
+Histogram（推荐）：
+  服务端（Prometheus）按 bucket 聚合分位
+  多个实例可合并算 P99
+  bucket 大小固定（如 50ms/100ms/200ms/500ms/1s）
 
-## 四、常见坑
+Summary（不推荐）：
+  客户端（应用）算分位（quantile 0.5/0.95/0.99）
+  跨实例无法合并（每个实例有自己的 P99）
+  资源消耗大（维护分位数据结构）
+```
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+## 二、机制层：Micrometer 代码示例
 
-## 五、面试回答模板
+**Spring Boot 自动配置 + 自定义指标**：
 
-可以按下面结构作答：
+```java
+// application.yml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  metrics:
+    tags:
+      application: order-service   # 全局标签（所有指标带）
+      env: ${spring.profiles.active:prod}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true                    # HTTP 自动开 Histogram
+      slo:
+        http.server.requests: 50ms,100ms,200ms,500ms,1s,2s   # SLO 分桶
+      percentiles:
+        http.server.requests: 0.5,0.95,0.99           # 客户端算分位（少用）
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“Micrometer 指标体系如何设计”，核心是 Micrometer 与 指标 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+// 自定义业务指标
+@Service
+public class OrderService {
+    private final Counter orderCreatedCounter;
+    private final Counter orderFailedCounter;
+    private final Timer orderCreateTimer;
+    private final Gauge inventoryGauge;
 
-## 六、加分点
+    public OrderService(MeterRegistry registry) {
+        // Counter：订单创建总数（带标签：type）
+        this.orderCreatedCounter = Counter.builder("order.created.total")
+            .tag("type", "normal")
+            .description("Total orders created")
+            .register(registry);
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+        this.orderFailedCounter = Counter.builder("order.failed.total")
+            .tag("reason", "unknown")    // 失败时按原因打标签
+            .register(registry);
 
-## 七、企业级面试定位：从“会用”到“能负责”
+        // Timer：订单创建耗时（Histogram）
+        this.orderCreateTimer = Timer.builder("order.create.duration")
+            .description("Order creation duration")
+            .publishPercentiles(0.5, 0.95, 0.99)
+            .register(registry);
 
-企业级面试不会只问“Micrometer 是什么”，而是看你能不能对一条真实生产链路负责。回答“Micrometer 指标体系如何设计”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+        // Gauge：当前库存（瞬时值）
+        this.inventoryGauge = Gauge.builder("inventory.level", () -> getInventory())
+            .register(registry);
+    }
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 高并发高可用 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 Micrometer、指标、SLO 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 success_rate、latency_p99、error_rate、backlog_size 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+    public Order createOrder(OrderDTO dto) {
+        return orderCreateTimer.record(() -> {     // 自动计时
+            try {
+                Order order = doCreate(dto);
+                orderCreatedCounter.increment();   // 计数 +1
+                return order;
+            } catch (Exception e) {
+                orderFailedCounter.increment();    // 失败计数
+                throw e;
+            }
+        });
+    }
+}
+```
 
-### 企业级回答骨架
+**注解方式（@Timed）**：
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 Micrometer 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+```java
+// 自动给 Spring MVC 接口加 Timer
+@Configuration
+public class MetricsConfig {
+    @Bean
+    public TimedAspect timedAspect(MeterRegistry registry) {
+        return new TimedAspect(registry);
+    }
+}
 
-### 面试中要主动补的生产细节
+@RestController
+public class OrderController {
+    @Timed(value = "order.api.duration",
+           description = "Order API duration",
+           percentiles = {0.5, 0.95, 0.99})
+    @PostMapping("/orders")
+    public Order create(@RequestBody OrderDTO dto) {
+        return orderService.createOrder(dto);
+    }
+}
+```
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+**多维度标签（cardinality 控制）**：
 
-## 八、苏格拉底式面试追问
+```java
+// 反例：高基数标签（不要这么做）
+Counter.builder("order.created")
+    .tag("userId", dto.getUserId())    // 100 万用户 = 100 万时序！
+    .register(registry);
+// 标签爆炸：Prometheus 卡死
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+// 正确：低基数标签
+Counter.builder("order.created")
+    .tag("type", dto.getType())        // normal / vip / enterprise（几种）
+    .tag("channel", dto.getChannel())  // web / app / miniapp（几种）
+    .tag("status", "success")          // success / failed（几种）
+    .register(registry);
+// 时序数 = type × channel × status 几十种，可控
+```
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“Micrometer 指标体系如何设计”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 success_rate、latency_p99、error_rate、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 Micrometer 负责的范围，以及必须依赖 指标、SLO 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 边界不清导致跨服务强耦合，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+## 三、实战层：RED + USE 指标体系
 
-### 现场对话示例
+**RED 黄金信号（服务视角）**：
 
-**面试官**：你说要做“Micrometer 指标体系如何设计”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 success_rate、latency_p99、业务失败率和事故记录。
+```yaml
+# application.yml（Spring Boot 自动暴露）
+management:
+  metrics:
+    web:
+      server:
+        request:
+          autotime:
+            enabled: true              # 自动给 HTTP 接口加 Timer
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 success_rate 没有改善，或者 latency_p99 反而变差，就停止扩大范围，回到假设层重新复盘。
+# Prometheus 查询
+# Rate：QPS
+rate(http_server_requests_seconds_count{app="order-service"}[1m])
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 success_rate、latency_p99、error_rate。这样它不是个人经验，而是团队机制。
+# Errors：错误率
+rate(http_server_requests_seconds_count{app="order-service", status=~"5.."}[1m])
+  / rate(http_server_requests_seconds_count{app="order-service"}[1m])
 
-## 九、专项架构深挖：对象、链路、失败模式
+# Duration：P99 延迟
+histogram_quantile(0.99,
+  rate(http_server_requests_seconds_bucket{app="order-service"}[5m])
+)
+```
 
-这一题不要停在“知道 Micrometer”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+**USE 黄金信号（资源视角）**：
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 核心业务对象、状态机、读写链路、依赖拓扑；幂等键、版本号、审计流水、补偿任务；监控指标、压测模型、灰度开关 |
-| 设计主线 | 主链路保持简单可靠，非核心能力异步解耦；状态变化必须有唯一约束、版本控制和补偿兜底；所有关键方案都要能灰度、观测和回滚 |
-| 失败模式 | 边界不清导致跨服务强耦合；异常链路没有补偿和告警；只优化技术指标但遗漏业务正确性 |
-| 验证指标 | success_rate、latency_p99、error_rate、backlog_size |
+```yaml
+# Spring Boot 自带的 JVM / 系统指标
+# Utilization：CPU/内存利用率
+process_cpu_usage                      # CPU 利用率
+jvm_memory_used_bytes{area="heap"}     # 堆内存使用
+jvm_memory_used_bytes{area="nonheap"}  # 非堆
 
-**架构拆解**：
+# Saturation：饱和度
+hikaricp_connections_active            # HikariCP 活跃连接
+hikaricp_connections_pending           # 等待连接数
+executor_active_threads{name="cpuExecutor"}  # 线程池活跃
+executor_queue_remaining_tasks{name="cpuExecutor"}  # 队列大小
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 指标 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 Micrometer 指标体系如何设计 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 SLO 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+# Errors：错误
+rate(jvm_gc_pause_seconds_count[1m])  # GC 频率
+jvm_threads_states_threads{state="blocked"}  # 阻塞线程数
+```
 
-**高分回答细节**：
+**业务核心指标**：
 
-- 不要只说“可以用 Micrometer”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+```java
+// 自定义业务指标
+@Service
+public class MetricsService {
+    private final Counter orderCreated;
+    private final Counter paymentSuccess;
+    private final Counter paymentFailed;
+    private final Gauge activeUsers;
 
-## 十、二轮场景追问与项目表达
+    public MetricsService(MeterRegistry registry) {
+        orderCreated = Counter.builder("business.order.created")
+            .tag("app", "order-service")
+            .register(registry);
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+        paymentSuccess = Counter.builder("business.payment.success")
+            .register(registry);
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+        paymentFailed = Counter.builder("business.payment.failed")
+            .tag("reason", "unknown")
+            .register(registry);
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“Micrometer 指标体系如何设计”，重点看 success_rate、latency_p99、error_rate，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+        activeUsers = Gauge.builder("business.active.users",
+                () -> userSessionManager.getActiveCount())
+            .register(registry);
+    }
+}
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+// Prometheus 业务告警
+# 支付成功率 < 95%
+rate(business_payment_success_total[5m])
+  / (rate(business_payment_success_total[5m]) + rate(business_payment_failed_total[5m]))
+  < 0.95
+```
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 Micrometer 和 指标 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+**SLO 设计**：
 
-### 追问 3：你如何判断这个方案值得做？
+```yaml
+# SLO 定义
+slo:
+  availability:
+    target: 99.9%              # 成功率
+    window: 30d
+    sli: |
+      1 - (
+        rate(http_server_requests_seconds_count{status=~"5.."}[30d])
+        / rate(http_server_requests_seconds_count[30d])
+      )
+  
+  latency:
+    target: 99%                # 99% 请求 P99 < 200ms
+    threshold: 200ms
+    window: 30d
+    sli: |
+      histogram_quantile(0.99,
+        rate(http_server_requests_seconds_bucket{le="0.2"}[30d])
+      )
+      / histogram_quantile(0.99,
+        rate(http_server_requests_seconds_bucket[30d])
+      )
+```
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 SLO 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+## 四、底层本质：为什么是 RED + USE
 
-### STAR 项目表达
+回到第一性：**为什么不是"采集所有指标"，要按 RED + USE 框架选？**
 
-- **S（背景）**：原系统在 Micrometer 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 Micrometer 指标体系如何设计 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 success_rate、latency_p99 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+- **采集成本**：每个指标 = 一条时序数据，Prometheus 存储有上限（百万时序就吃力）。无脑采集导致"指标通胀"——几百个指标没人看，告警天天误报。
+- **指标要回答问题**：RED 回答"服务有没有问题"（用户视角），USE 回答"资源够不够用"（系统视角）。业务指标回答"业务正常吗"。每个指标都要对应一个"问题"，没有问题的指标删掉。
+- **Histogram 优于 Summary 的本质**：
+  - Summary 在客户端算分位，每个实例独立——10 个实例每个 P99=50ms，但合并 P99 可能 200ms（长尾在某个实例）。Summary 看不到这个。
+  - Histogram 在服务端聚合，把所有实例的 bucket 合并算分位——全局 P99 准确。代价是服务端计算量大（Prometheus）。
+  - 所以生产用 Histogram，Summary 只在单实例场景（如 CLI 工具）用。
 
-### 二轮复盘清单
+**SLO 倒推采集**：
+- 先定 SLO（如 P99 < 200ms，错误率 < 0.1%）
+- 再定 SLI（指标公式）
+- 再设计采集（HTTP Histogram + 错误 Counter）
+- 最后建告警（基于 SLO 违反）
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+**为什么 Micrometer 是门面模式**：
+- Spring Boot 默认用 Micrometer 作为指标门面
+- 应用代码只调 Micrometer API（Counter.increment、Timer.record）
+- MeterRegistry 决定推送到哪个监控系统（Prometheus / Datadog / NewRelic）
+- 换监控系统只改配置（spring.metrics.export.prometheus.enabled），不改代码
 
-## 十一、面试官 5 个企业级追问
+## 五、AI 架构师加问：5 个
 
-1. **你在真实项目里怎么判断“Micrometer 指标体系如何设计”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 success_rate、latency_p99、error_rate。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+1. **AI 推理服务的指标体系怎么设计？**
+   RED：推理 QPS、推理错误率、推理 P99 延迟。USE：GPU 利用率、显存占用、模型加载时间。业务：tokens_per_second（吞吐）、cost_per_request（成本）、cache_hit_rate（缓存命中）。SLO：P99 < 1s、错误率 < 1%、tokens_per_second > 100。
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，Micrometer 是否真是瓶颈，指标 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+2. **AI 能自动推荐指标体系吗？**
+   AI 分析服务的业务特征（API 列表、依赖、关键流程），按 RED + USE 框架推荐基础指标 + 业务专属指标。结合历史事故库（这个业务常出什么问题），补充专项指标（如"曾发生 OOM，加 memory 监控"）。AI 输出指标清单 + 告警规则，人工 review。
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 边界不清导致跨服务强耦合。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 success_rate 和 latency_p99 做分钟级观察，一旦越过阈值立即止损。
+3. **大模型推理的 tokens_per_second 指标怎么设计？**
+   Gauge 类型，每次推理更新。tag：model_version（不同模型不同吞吐）、batch_size、gpu_type。配合 Histogram 看 tokens/s 的分布（P50/P99）。SLO：P50 > 50 tokens/s（用户体验阈值）。
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 SLO，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+4. **AI Agent 的 tool_call 指标怎么记录？**
+   Counter：tool_call_total（按 tool_name/status 打标签，区分成功失败）。Timer：tool_call_duration（按 tool_name 打标签，看哪个工具最慢）。Gauge：active_tool_calls（当前进行中的工具调用数，防止 N+1 调用拖垮）。配合 traceId 关联，AI 分析时能下钻到具体工具调用。
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“Micrometer 指标体系如何设计”，至少要沉淀 核心业务对象、状态机、读写链路、依赖拓扑 的建模规范，以及 success_rate、latency_p99 的验收标准。
+5. **AI 怎么做指标异常检测？**
+   AI 学习历史指标模式（正常基线），实时检测异常：QPS 突变（环比/同比）、错误率突升、P99 抖动、长尾分布异常。比固定阈值告警更智能（适应业务季节性，如大促期间 QPS 高是正常的）。AI 给异常分级（P0/P1/P2）和归因（关联哪些指标一起异常），人工确认。
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“Micrometer 指标体系如何设计”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 Micrometer 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“Micrometer 指标体系如何设计”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 success_rate、latency_p99 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 边界不清导致跨服务强耦合，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 六、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：经验丰富的值班负责人拿着工具箱、调度台和应急预案，在处理“业务流量和系统风险同时出现”。
+抓 **"门面模式、四类型、RED+USE、Histogram 优于 Summary、低基数标签"**。
 
-- **场景**：先说明“Micrometer 指标体系如何设计”服务于什么业务目标，不要上来就堆 Micrometer。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 边界不清导致跨服务强耦合、异常链路没有补偿和告警。
-- **验证**：最后落到 success_rate、latency_p99、error_rate，让面试官感觉你真的上线过。
+- **门面**：Micrometer = SLF4J for metrics，多后端（Prometheus/Datadog/...）
+- **四类型**：Counter（递增）/Gauge（瞬时）/Histogram（分布）/Timer（延迟+计数）
+- **RED**：Rate（QPS）/Errors（错误率）/Duration（P99）
+- **USE**：Utilization（利用率）/Saturation（饱和度）/Errors（错误）
+- **Histogram > Summary**：服务端聚合分位，跨实例合并
+- **低基数标签**：标签值有限集合（不用 userId/orderId 当标签）
+- **SLO 倒推**：先定 SLO，再设计 SLI 指标
 
 ### 拟人化理解
 
-可以把“Micrometer 指标体系如何设计”想成一个经验丰富的值班负责人：Micrometer 是他的工具箱、调度台和应急预案，指标 是他面对的现场信号，SLO 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看指标，再控风险，最后谈优化。这样记，比死背组件名更稳。
+把 Micrometer 想成**汽车仪表盘的统一驱动**。Counter 是里程表（单调递增）、Gauge 是油量表（瞬时值，可增可减）、Histogram 是转速分布表（统计分布）、Timer 是单圈计时器（耗时 + 计数）。Micrometer 不论装在特斯拉还是比亚迪（Prometheus / Datadog），仪表盘外观一致，司机（业务代码）不用关心底层实现。RED 是"速度表 + 警告灯 + 油耗"（服务视角），USE 是"发动机温度 + 油量 + 故障灯"（资源视角）。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“Micrometer 指标体系如何设计”，我会这样答：我会先确认业务目标、规模、SLA 和一致性要求，再选择合适的架构手段。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 边界不清导致跨服务强耦合，所以我会提前设计灰度、监控和止损阈值，重点看 success_rate、latency_p99。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 success_rate 或 latency_p99 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> Micrometer 是 Spring Boot 的指标门面（SLF4J 模式），四种类型：Counter（递增）、Gauge（瞬时值）、Histogram（分布）、Timer（延迟+计数）。设计指标体系用 RED + USE 框架：RED（服务视角）= Rate/QPS + Errors/错误率 + Duration/P99 延迟，回答"服务有没有问题"；USE（资源视角）= Utilization/CPU 内存 + Saturation/连接池线程池 + Errors/GC OOM，回答"资源够不够"。加业务核心指标（订单量、支付成功率）。Histogram 优于 Summary（服务端聚合分位，跨实例合并算 P99）。低基数标签（标签值有限集合，不用 userId/orderId 当标签防爆）。SLO 倒推：先定 SLO（如 P99 < 200ms），再设计指标。告警准确率 > 95%。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司指标栈是 Prometheus + Grafana 吗？SLO 定了吗？指标数量级多少（万级、十万级）？这决定我聊指标体系设计还是高基数治理。
 
+## 七、苏格拉底式面试追问
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 已经有日志了，为什么还要指标？ | 指标是聚合数字（QPS/P99），低成本全量采集，适合告警和趋势分析。日志是离散事件，昂贵，适合具体排查。告警靠指标，定位靠日志。两者分工 |
+| 证据追问 | 怎么证明指标体系设计合理？ | 告警准确率（误报 < 5%）、MTTR（平均定位时间 < 10 分钟）、指标使用率（> 80% 指标有人看）、SLO 覆盖率（核心服务 100% 有 SLO） |
+| 边界追问 | 指标能解决所有监控吗？ | 不能。业务逻辑 bug 看代码 + 日志；JVM 问题看 dump + JFR；网络问题抓包；性能问题 profile。指标主要解决"大盘监控 + 告警" |
+| 反例追问 | 什么场景不要上指标？ | 单次脚本、CLI 工具、内部小工具、研发阶段（用日志即可）。指标有采集成本（Prometheus 存储 + 查询），ROI 低不要上 |
+| 风险追问 | 指标体系最大风险？ | ① 高基数标签导致 Prometheus 卡死（userId 当标签）；② 指标通胀（几百指标没人看）；③ 告警疲劳（误报多被忽视）。治法：低基数、SLO 倒推、告警分级 |
+| 验证追问 | 怎么证明 SLO 真的有用？ | SLO 违反触发告警 → 工程师响应 → 修复；SLO 达成率统计（如本月可用性 99.95%）；SLO 调整频率（按业务调整，不是一成不变） |
+| 沉淀追问 | 团队指标规范沉淀什么？ | 指标命名规范（domain_action_outcome_unit）、RED + USE 必采清单、低基数标签规则、SLO 模板、Grafana 大盘模板、告警规则 SOP |
+
+### 现场对话示例
+
+**面试官**：Micrometer 和直接用 Prometheus client 区别？
+
+**候选人**：Micrometer 是门面（SLF4J 模式），底层可对接 Prometheus / Datadog / NewRelic。代码用 Micrometer API（Counter/Gauge/Timer），换监控系统只改配置不改代码。直接用 Prometheus client 锁死了 Prometheus。生产推荐 Micrometer——灵活、生态成熟（Spring Boot 默认）。
+
+**面试官**：Histogram 为什么比 Summary 好？
+
+**候选人**：两个原因。第一，Histogram 在服务端（Prometheus）聚合分位，多个实例可合并算全局 P99；Summary 在客户端算分位，每个实例独立 P99，跨实例无法合并。第二，Histogram 的 bucket 是可后处理聚合的（histogram_quantile 函数），Summary 的 quantile 是固定的（客户端配置）。生产场景 10 个实例每个 P99=50ms，但合并 P99 可能 200ms（长尾在某实例）——只有 Histogram 能看到这个。
+
+**面试官**：高基数标签为什么是问题？
+
+**候选人**：Prometheus 时序数据库按标签组合存储——每个标签值组合 = 一条时序。如果用 userId 当标签，100 万用户 × 10 个其他标签 = 千万条时序，Prometheus 内存爆炸、查询慢。所以标签必须是有限集合（如 type=NORMAL/VIP、status=success/failed），基数控制在几十种内。userId 这种业务数据放日志查，不放指标。
+
+## 常见考点
+
+1. **Micrometer 是什么？**——Spring Boot 的指标门面（SLF4J 模式），多后端对接（Prometheus/Datadog/NewRelic）。
+2. **四种指标类型？**——Counter（递增）、Gauge（瞬时值）、Histogram（分布）、Timer（延迟+计数）。生产推荐 Histogram 和 Timer。
+3. **Histogram 和 Summary 区别？**——Histogram 服务端聚合分位，跨实例可合并；Summary 客户端算分位，跨实例无法合并。生产用 Histogram。
+4. **RED 和 USE 黄金信号？**——RED：Rate/Errors/Duration（服务视角）；USE：Utilization/Saturation/Errors（资源视角）。
+5. **高基数标签怎么避免？**——标签值必须是有限集合（如 type/status/channel），不用 userId/orderId 当标签。每个标签组合 = 一条时序。

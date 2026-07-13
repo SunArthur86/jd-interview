@@ -9,259 +9,431 @@ tags:
 - mTLS
 - 最小权限
 feynman:
-  essence: 零信任架构在 Java 后端中的落地的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: 零信任的核心是"Never trust, always verify"——不再有"内网默认可信"假设。每个请求（无论来自内网还是外网）都要经过身份认证、设备验证、策略授权三道关。Java 后端落地三个抓手：(1) 服务间 mTLS 双向证书认证（替代 IP 白名单）；(2) 每个请求带 JWT/OAuth2 token，业务系统按 token + 上下文做策略授权（OPA/Cedar）；(3) 最小权限——默认拒绝，按需授权，定期回收。
+  analogy: 传统安全像"城堡护城河"——外敌进不来，城堡内畅通无阻。零信任像"机场安检"——不论你是机长还是乘客，每个登机口都要验票、查证件、过 X 光。城堡模型一旦内网被渗透（如钓鱼员工），攻击者畅通；零信任每个跳转都重新验，攻击者拿一个 token 只能做一个事。
+  first_principle: 为什么"内网默认可信"假设失效？因为云原生时代服务间调用复杂、移动办公、第三方集成、容器化部署——内网边界早已模糊。一个被钓鱼的员工笔记本就是内网跳板。零信任放弃"位置信任"，转向"身份 + 设备 + 上下文"信任。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 三道关：身份（Identity）+ 设备（Device）+ 上下文（Context/Policy）
+  - 服务间认证：mTLS（双向 TLS，证书由内部 CA 签发）
+  - 用户认证：OAuth2/OIDC token，每次请求验签
+  - 授权策略：OPA/Cedar 策略引擎，按属性（ABAC）而非角色（RBAC）
+  - 最小权限：默认拒绝、按需授权、定期审计回收
 first_principle:
-  problem: 面对“零信任架构在 Java 后端中的落地”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 在云原生时代，如何让"被钓鱼的员工笔记本"不能横向移动到核心交易系统？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 内网边界早已模糊（云、容器、移动办公、第三方集成）
+  - 位置（IP）不等于身份，身份不等于权限
+  - 单点凭证泄露是不可避免的，要靠"每跳验证 + 最小权限"限制爆炸半径
+  rebuild: 服务间全部 mTLS（证书由内部 CA 签发，证书带 service identity），每个请求带 OAuth2/JWT token（验签 + 验 scope），授权用 OPA 策略引擎按 user+resource+context 三元组判定。默认拒绝，所有 allow 必须显式策略授权。证书自动化签发和轮转（SPIFFE/SPIRE 或 Istio）。这样攻击者拿到一个 token 只能做一个事，拿到一个证书只能伪装一个服务，爆炸半径被收敛。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - mTLS 证书怎么签发和轮转？——内部 CA（如 cfssl、HashiCorp Vault）签发，SPIFFE/SPIRE 自动化注入；Istio/Linkerd 通过控制面自动签发和轮转（默认 24 小时轮转）。
+  - 内网服务调内网服务也要 mTLS？——是的，这是零信任核心。即使内网也要 mTLS，因为"内网不可信"。
+  - 零信任对性能影响？——mTLS 握手有开销（首次 RTT），但 TLS 1.3 + session resumption + 长连接复用能降到纳秒级；策略引擎 OPA 决策 < 1ms（in-process）。
+  - 怎么渐进式落地零信任？——从敏感服务（资金、用户数据）开始，逐步扩散；先 mTLS（基础设施层），再 OAuth2（应用层），最后 OPA（策略层）；不一次重构。
+  - OPA 和 Cedar 怎么选？——OPA（Rego 语言）生态成熟、复杂场景强；Cedar（AWS 推出）语法简洁、易学；新项目选 Cedar，存量选 OPA。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 三道关：Identity + Device + Policy
+  - mTLS：服务间双向认证，内部 CA 签发
+  - 每个请求验 JWT：scope + audience + expiration
+  - 策略引擎 OPA/Cedar：ABAC 优于 RBAC
+  - 最小权限：默认拒绝 + 按需授权 + 定期回收
 ---
 
-# 【Java 后端架构师】零信任架构在 Java 后端中的落地？
+# 【Java 后端架构师】零信任架构在 Java 后端中的落地
 
-> 适用场景：架构设计。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。京东内部 5000+ 微服务，传统"内网默认可信 + IP 白名单"模式在云原生环境下崩溃——一个被钓鱼的员工笔记本就是内网跳板，能横向移动到支付系统。零信任落地后，服务间 mTLS + 每请求 JWT + OPA 策略授权，攻击者拿到一个 token 只能做一个事，爆炸半径收敛到单点。
 
-## 一、先明确问题边界
+## 一、概念层
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**传统城堡模型 vs 零信任模型**：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+| 维度 | 城堡模型（旧） | 零信任模型（新） |
+|------|---------------|----------------|
+| 信任边界 | 内网可信，外网不可信 | 无边界，每跳验证 |
+| 认证粒度 | 网络层（IP 白名单） | 应用层（身份 + 设备 + 上下文） |
+| 一旦被渗透 | 内网横向移动畅通 | 每跳重新验，爆炸半径收敛 |
+| 授权方式 | RBAC（基于角色） | ABAC（基于属性，更细粒度） |
+| 默认策略 | 默认允许（白名单拒绝） | 默认拒绝（白名单允许） |
+| 证书管理 | 单向 TLS（服务端证） | 双向 mTLS（双方互证） |
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 零信任 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**零信任的"三道关"**（NIST SP 800-207）：
 
-## 二、推荐架构思路
+```
+请求（来自任何地方） ──► 1. Identity 验证（你是谁）
+                              │ JWT/OAuth2 token + MFA
+                              ▼
+                        2. Device 验证（你的设备可信吗）
+                              │ 设备证书 + 健康度（patch level）
+                              ▼
+                        3. Policy 授权（你能做什么）
+                              │ OPA/Cedar 策略引擎
+                              ▼
+                          允许 / 拒绝
+```
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+## 二、机制层：mTLS 服务间认证
 
-## 三、技术落地点
+**Istio 自动 mTLS 配置**：
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+```yaml
+# PeerAuthentication: 强制整个 mesh 使用 mTLS
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: payment
+spec:
+  mtls:
+    mode: STRICT         # STRICT = 强制 mTLS，PERMISSIVE = 兼容期
+---
+# AuthorizationPolicy: 限定谁能调支付服务
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: payment-policy
+  namespace: payment
+spec:
+  selector:
+    matchLabels:
+      app: payment-service
+  action: ALLOW
+  rules:
+    # 只允许 order-service 调用支付服务
+    - from:
+        - source:
+            principals: ["cluster.local/ns/订单/sa/order-service"]
+            # SPIFFE ID：服务身份标识
+      to:
+        - operation:
+            methods: ["POST"]
+            paths: ["/payment/charge"]
+      when:
+        - key: request.auth.claims[scope]
+          values: ["payment.write"]   # 还要 token scope 匹配
+```
 
-## 四、常见坑
+**SPIFFE ID 格式**（必背）：
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+```
+spiffe://<trust-domain>/<path>
+例：
+spiffe://cluster.local/ns/payment/sa/payment-service
+        │                │            │
+        trust domain     namespace    service account
+```
 
-## 五、面试回答模板
+每个服务在 mesh 内有唯一 SPIFFE ID，mTLS 证书带这个 ID，调用方知道"对面真的是 payment-service"。
 
-可以按下面结构作答：
+**Java 应用层获取 mTLS 上下文**：
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“零信任架构在 Java 后端中的落地”，核心是 零信任 与 mTLS 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+```java
+// 通过 Istio 注入的 header 获取调用方身份
+@Component
+public class PeerAuthFilter extends OncePerRequestFilter {
 
-## 六、加分点
+    @Override
+    protected void doFilterInternal(HttpServletRequest req, HttpServletResponse resp,
+                                     FilterChain chain) throws ServletException, IOException {
+        // Istio 注入 mTLS 证书信息
+        String callerSpiffe = req.getHeader("X-Forwarded-Client-Cert");
+        // XFCC header 包含 SPIFFE ID、证书指纹、SAN 等
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+        if (!validateCaller(callerSpiffe)) {
+            resp.setStatus(403);
+            return;
+        }
 
-## 七、企业级面试定位：从“会用”到“能负责”
+        // 同时验证 JWT（用户/客户端 token）
+        String auth = req.getHeader("Authorization");
+        if (auth == null || !auth.startsWith("Bearer ")) {
+            resp.setStatus(401);
+            return;
+        }
+        Jwt jwt = jwtDecoder.decode(auth.substring(7));
 
-企业级面试不会只问“零信任 是什么”，而是看你能不能对一条真实生产链路负责。回答“零信任架构在 Java 后端中的落地”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+        // 把身份信息塞到请求上下文
+        req.setAttribute("callerService", extractServiceId(callerSpiffe));
+        req.setAttribute("userContext", new UserContext(jwt));
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 架构设计 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 零信任、mTLS、最小权限 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 auth_fail_rate、permission_deny_count、secret_rotation_age、sensitive_log_hits 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+        chain.doFilter(req, resp);
+    }
+}
+```
 
-### 企业级回答骨架
+## 三、机制层：OPA 策略引擎授权
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 零信任 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+**OPA Rego 策略代码**（按属性授权）：
 
-### 面试中要主动补的生产细节
+```rego
+# policy.rego - 支付服务授权策略
+package payment.authz
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+# 默认拒绝
+default allow := false
 
-## 八、苏格拉底式面试追问
+# 主授权规则
+allow {
+    # 输入：user + resource + action + context
+    input.action == "payment.charge"
+    input.resource.service == "payment-service"
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+    # 规则 1：用户必须有 payment.write scope
+    token.scope[_] == "payment.write"
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“零信任架构在 Java 后端中的落地”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 auth_fail_rate、permission_deny_count、secret_rotation_age、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 零信任 负责的范围，以及必须依赖 mTLS、最小权限 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 JWT 长期有效无法吊销，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+    # 规则 2：用户只能操作自己的订单
+    token.sub == resource.owner_id
 
-### 现场对话示例
+    # 规则 3：金额超过 10000 需要额外审核
+    input.amount <= 10000
+}
 
-**面试官**：你说要做“零信任架构在 Java 后端中的落地”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 auth_fail_rate、permission_deny_count、业务失败率和事故记录。
+# 或者：大额需要 manager 审批
+allow {
+    input.action == "payment.charge"
+    input.amount > 10000
+    token.roles[_] == "manager"     # 大额必须 manager
+    token.scope[_] == "payment.write"
+}
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 auth_fail_rate 没有改善，或者 permission_deny_count 反而变差，就停止扩大范围，回到假设层重新复盘。
+# 紧急情况：风控角色可以阻止任何支付
+deny {
+    input.action == "payment.charge"
+    token.roles[_] == "risk_control"
+    input.risk_level == "HIGH"
+}
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 auth_fail_rate、permission_deny_count、secret_rotation_age。这样它不是个人经验，而是团队机制。
+# 输出 helper
+reason[msg] {
+    not allow
+    msg := "默认拒绝：不满足授权策略"
+}
 
-## 九、专项架构深挖：对象、链路、失败模式
+reason[msg] {
+    deny
+    msg := "风控拒绝：高风险交易"
+}
+```
 
-这一题不要停在“知道 零信任”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+**Java 集成 OPA**（每次请求查询策略）：
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 身份、凭证、密钥、证书、权限、审计记录；认证链路、授权策略、加解密和脱敏组件；漏洞修复和密钥轮转流程 |
-| 设计主线 | 认证确认“你是谁”，授权确认“你能做什么”；敏感数据最小化暴露，传输、存储、日志分别治理；密钥和证书必须支持轮转、审计和应急吊销 |
-| 失败模式 | JWT 长期有效无法吊销；日志打印明文敏感信息；内部接口默认可信导致横向越权 |
-| 验证指标 | auth_fail_rate、permission_deny_count、secret_rotation_age、sensitive_log_hits |
+```java
+@Service
+public class AuthzService {
 
-**架构拆解**：
+    @Autowired private OpaClient opaClient;
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 mTLS 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 零信任架构在 Java 后端中的落地 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 最小权限 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+    public void check(UserContext user, String action, Resource resource, Map<String, Object> ctx) {
+        // 构造 OPA 输入
+        Map<String, Object> input = Map.of(
+            "action", action,
+            "resource", Map.of(
+                "service", resource.getService(),
+                "owner_id", resource.getOwnerId()
+            ),
+            "token", Map.of(
+                "sub", user.getUserId(),
+                "scope", user.getScopes(),
+                "roles", user.getRoles()
+            ),
+            "amount", ctx.getOrDefault("amount", 0),
+            "risk_level", ctx.getOrDefault("risk_level", "LOW")
+        );
 
-**高分回答细节**：
+        // 查询 OPA（in-process 或 HTTP）
+        OpaDecision decision = opaClient.query("payment/authz/allow", input);
 
-- 不要只说“可以用 零信任”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+        if (!decision.isAllow()) {
+            throw new AccessDeniedException(decision.getReason());
+        }
+    }
+}
 
-## 十、二轮场景追问与项目表达
+// 切面拦截
+@Aspect
+@Component
+public class AuthzAspect {
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+    @Autowired private AuthzService authzService;
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+    @Around("@annotation(authz)")
+    public Object check(ProceedingJoinPoint pjp, RequireAuthz authz) throws Throwable {
+        UserContext user = currentUser();
+        authzService.check(user, authz.action(), extractResource(pjp), buildContext(pjp));
+        return pjp.proceed();
+    }
+}
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“零信任架构在 Java 后端中的落地”，重点看 auth_fail_rate、permission_deny_count、secret_rotation_age，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+// 使用
+@RequireAuthz(action = "payment.charge")
+@PostMapping("/payment/charge")
+public ChargeResponse charge(@RequestBody ChargeRequest req) {
+    // ...
+}
+```
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+## 四、机制层：最小权限 + 默认拒绝
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 零信任 和 mTLS 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+**默认拒绝的策略实现**：
 
-### 追问 3：你如何判断这个方案值得做？
+```java
+// Spring Security 配置：任何请求默认拒绝
+@Configuration
+@EnableWebSecurity
+public class ZeroTrustSecurityConfig {
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 最小权限 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+            // 默认拒绝所有请求
+            .authorizeHttpRequests(auth -> auth
+                .anyRequest().authenticated()        // 默认拒绝匿名
+            )
+            .oauth2ResourceServer(oauth2 -> oauth2
+                .jwt(jwt -> jwt.decoder(jwtDecoder()))  // 强制 JWT 验证
+            )
+            // 强制 HTTPS
+            .requiresChannel(channel -> channel.anyRequest().requiresSecure())
+            // 安全 headers
+            .headers(headers -> headers
+                .contentSecurityPolicy(csp -> csp.policyDirectives("default-src 'self'"))
+                .frameOptions(fo -> fo.deny())
+                .httpStrictTransportSecurity(hsts -> hsts
+                    .includeSubDomains(true)
+                    .maxAgeInSeconds(31536000)
+                )
+            )
+            // CSRF（state-changing 请求必须带 CSRF token）
+            .csrf(csrf -> csrf.csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse()))
+            // rate limit
+            .addFilterBefore(rateLimitFilter(), UsernamePasswordAuthenticationFilter.class);
+        return http.build();
+    }
+}
+```
 
-### STAR 项目表达
+**权限定期审计与回收**（自动化）：
 
-- **S（背景）**：原系统在 零信任 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 零信任架构在 Java 后端中的落地 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 auth_fail_rate、permission_deny_count 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+```java
+// 每周扫描用户 scope，回收未使用的
+@Scheduled(cron = "0 0 2 * * MON")
+public void auditAndRevokeStaleScopes() {
+    List<UserScope> allScopes = scopeRepo.findAllActive();
 
-### 二轮复盘清单
+    for (UserScope scope : allScopes) {
+        // 6 个月未使用的 scope 标记为 stale
+        LocalDateTime lastUsed = auditLogService.findLastUse(scope);
+        if (lastUsed.isBefore(LocalDateTime.now().minusMonths(6))) {
+            scope.setStatus("STALE");
+            notifyOwner(scope);  // 邮件通知 owner
+            // 30 天无响应自动回收
+            scheduleRevoke(scope, 30);
+        }
+    }
+}
+```
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+## 五、实战层/选型：渐进式落地路径
 
-## 十一、面试官 5 个企业级追问
+**零信任落地四阶段**：
 
-1. **你在真实项目里怎么判断“零信任架构在 Java 后端中的落地”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 auth_fail_rate、permission_deny_count、secret_rotation_age。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+| 阶段 | 内容 | 周期 |
+|------|------|------|
+| 1. 资产清点 | 梳理服务、调用关系、数据流、权限矩阵 | 1 月 |
+| 2. 身份统一 | 部署 IdP，所有系统接入 OIDC SSO | 2 月 |
+| 3. 服务间 mTLS | 部署 Service Mesh（Istio），逐步切 mTLS | 3 月 |
+| 4. 策略授权 | 部署 OPA，关键服务接入策略引擎 | 持续 |
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，零信任 是否真是瓶颈，mTLS 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+**关键决策点**：
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 JWT 长期有效无法吊销。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 auth_fail_rate 和 permission_deny_count 做分钟级观察，一旦越过阈值立即止损。
+| 决策 | 选项 | 推荐 |
+|------|------|------|
+| Mesh 选型 | Istio / Linkeder / 自研 | Istio（生态最大） |
+| 证书 CA | cfssl / Vault / SPIRE | Vault（密钥管理一体） |
+| 策略引擎 | OPA / Cedar / 自研 | OPA（生态成熟） |
+| IdP | Keycloak / Auth0 / 自研 | Keycloak（开源可控） |
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 最小权限，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+## 六、底层本质：信任的重新定义
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“零信任架构在 Java 后端中的落地”，至少要沉淀 身份、凭证、密钥、证书、权限、审计记录 的建模规范，以及 auth_fail_rate、permission_deny_count 的验收标准。
+回到第一性：**零信任不是"不信任"，而是"信任基于持续验证而非位置假设"**。
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
+- **位置信任失效的本质**：云原生时代"内网"边界模糊——K8s pod、混合云、VPN、第三方集成。员工笔记本 + VPN 就是内网，但笔记本被钓鱼就成跳板。位置（IP）不等于身份。
+- **mTLS 替代 IP 白名单的本质**：IP 白名单是"网络层信任"（IP 对就放行），mTLS 是"应用层信任"（证书证明服务身份）。前者易伪造（IP 欺骗），后者需要私钥（破解成本高）。
+- **最小权限的本质**：默认拒绝让"攻击者拿到凭证的爆炸半径"最小化。如果默认允许，攻击者一个 token 能调所有接口；默认拒绝，一个 token 只能做策略明确允许的事。
+- **OPA ABAC vs RBAC**：RBAC（基于角色）颗粒度粗（manager 能看所有订单）；ABAC（基于属性）能表达"manager 只能看自己部门的订单"这种细粒度策略。
 
-1. **如果把“零信任架构在 Java 后端中的落地”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 零信任 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
+**零信任的代价**：复杂度上升（mTLS + OAuth2 + OPA 三层）、性能开销（首次握手延迟）、运维成本（证书轮转、策略维护）。所以不是所有场景都要上零信任——低风险内部系统可以"轻量零信任"（只 OAuth2，不做 mTLS）。
 
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“零信任架构在 Java 后端中的落地”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 auth_fail_rate、permission_deny_count 对业务链路的影响。
+## 七、AI 架构师加问：5 个
 
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 JWT 长期有效无法吊销，要能通过 trace、tool_call_id 和业务流水快速回放。
+1. **LLM Agent 调内部 API，零信任怎么管？**
+   Agent 用 service account 拿 token（client_credentials），scope 限定能调的接口；高危操作（修改数据）要 user-in-loop（用户显式授权一次）。所有 Agent 调用进审计日志，关联 traceId + tool_call_id。
 
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
+2. **用 LLM 自动生成 OPA 策略？**
+   LLM 读业务规则（如"manager 只能审批 1 万以下的支付"）→ 生成 Rego 策略草案。需要人工 review 业务语义。LLM 擅长结构化翻译，不擅长捕捉隐性规则。
 
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
+3. **零信任 + RAG，AI 怎么访问用户私有数据？**
+   AI 服务用 OAuth2 token exchange（RFC 8693）拿用户降级 token，scope 限定 read:user_data。AI 调数据 API 时带 token，数据 API 验签后按 user_id 过滤返回。AI 不能跨用户读数据。
 
-## 十三、记忆口诀与面试现场表达
+4. **用 LLM 检测异常授权模式？**
+   LLM 读 OPA 决策日志（allow/deny + user + resource），识别异常模式（如某用户突然开始访问大量敏感资源、非工作时间访问），触发风控（强制重新 MFA 或临时吊销）。
+
+5. **AI 在零信任里的新角色？**
+   "持续验证"用 AI 增强——传统零信任是"每次请求验一次"，AI 能做"持续行为分析"（用户/服务的访问模式偏离基线时自动降权）。这就是自适应零信任（Adaptive Zero Trust）。
+
+## 八、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：机场安检负责人拿着证件、闸机、黑名单和安检记录，在处理“高峰期既要快又不能放错人”。
+抓 **"三道关、mTLS 服务互信、OPA 策略授权、默认拒绝"**。
 
-- **场景**：先说明“零信任架构在 Java 后端中的落地”服务于什么业务目标，不要上来就堆 零信任。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 JWT 长期有效无法吊销、日志打印明文敏感信息。
-- **验证**：最后落到 auth_fail_rate、permission_deny_count、secret_rotation_age，让面试官感觉你真的上线过。
+- **三道关**：Identity + Device + Policy
+- **mTLS**：服务间双向认证，内部 CA 签发，SPIFFE ID 标识服务身份
+- **每请求 JWT**：scope + audience + expiration
+- **OPA/Cedar**：ABAC 策略引擎，按 user+resource+context 授权
+- **最小权限**：默认拒绝 + 按需授权 + 定期审计回收
 
 ### 拟人化理解
 
-可以把“零信任架构在 Java 后端中的落地”想成一个机场安检负责人：零信任 是他的证件、闸机、黑名单和安检记录，mTLS 是他面对的现场信号，最小权限 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先验身份，再按风险分流。这样记，比死背组件名更稳。
+把零信任想成**机场安检**。传统城堡模型是"进了大门就畅通"，零信任是"每个登机口都重新验票"。Identity 是机票（JWT 证明你是谁），Device 是身份证（mTLS 证明你的飞机注册过），Policy 是登机牌（OPA 判定你能上这个航班）。默认拒绝是"不在登机名单上的不让上"，最小权限是"经济舱的不能进商务舱休息室"。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“零信任架构在 Java 后端中的落地”，我会这样答：我会先把身份、权限、数据范围和审计链路讲清楚，安全题不能只停留在鉴权组件。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 JWT 长期有效无法吊销，所以我会提前设计灰度、监控和止损阈值，重点看 auth_fail_rate、permission_deny_count。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 auth_fail_rate 或 permission_deny_count 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> 零信任的核心是"Never trust, always verify"——放弃"内网默认可信"假设。我们落地三道关：(1) 服务间 mTLS（Istio 自动签发证书，SPIFFE ID 标识服务身份），(2) 每个请求带 OAuth2 JWT，业务系统验签拿用户身份和 scope，(3) 授权走 OPA 策略引擎，按 user + resource + context 三元组判定，默认拒绝。最小权限靠两条：策略默认 deny all（所有 allow 必须显式）+ 周期审计回收 6 个月未用的 scope。落地分四阶段：资产清点 → OIDC SSO → mTLS mesh → OPA 接入。最大坑是性能（mTLS 握手开销），用 TLS 1.3 + session resumption + 长连接复用降到纳秒级。渐进式落地从敏感服务（支付/用户数据）开始，不一次重构。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司有 Service Mesh 基础吗？mTLS 全 mesh 还是部分？OPA 还是自研策略引擎？落地节奏怎么样，先从哪类服务切？
 
+## 九、苏格拉底式面试追问（7 层表格 + 现场对话）
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么传统 IP 白名单不够？ | 用钓鱼攻击场景说话：员工被钓鱼笔记本成内网跳板，IP 白名单看 IP 对就放行，攻击者横向移动畅通；零信任每跳重新验身份，爆炸半径收敛 |
+| 证据追问 | 怎么证明零信任有效？ | 模拟钓鱼演练：拿被钓鱼员工凭证尝试横向访问核心系统，应被拒绝；MTTD（攻击检测时间）应从天级降到分钟级；事故爆炸半径（受影响服务数）应 < 3 |
+| 边界追问 | 零信任能完全防住吗？ | 不能。零信任收敛爆炸半径，不能阻止"凭证泄露 + 政策允许范围内的操作"。所以还要配合 UEBA（用户行为分析）、动态降权、审计告警 |
+| 反例追问 | 什么场景不上零信任？ | 创业初期服务少（< 10 个）、纯外部 API（用 API Key 更简单）、低风险内部工具（轻量 OAuth2 即可，不做 mTLS） |
+| 风险追问 | 零信任最大风险？ | 主动点出：复杂度上升导致运维出错（一条策略配错全挂）；性能开销（mTLS 握手）；Mesh 故障（Istio 控制面挂了所有 mTLS 失败） |
+| 验证追问 | 怎么验证 mTLS 真的生效？ | 抓包看 TLS 握手是否双向证书；用未授权服务尝试调用应被拒绝（403）；定期跑"零信任合规扫描"（每个服务是否强制 mTLS、是否在 OPA 后面） |
+| 沉淀追问 | 团队零信任治理沉淀什么？ | Mesh 部署 SOP、OPA 策略库（公共规则集）、证书轮转流程、策略审计 dashboards、零信任接入 checklist |
+
+### 现场对话示例
+
+**面试官**：mTLS 证书怎么管理？总不能手动签发吧？
+
+**候选人**：自动化是必须的。Istio 控制面（istiod）内置 CA，自动给每个 pod 签发证书，默认 24 小时轮转一次。pod 启动时通过 SDS（Secret Discovery Service）从 istiod 拉证书，证书轮转也是 SDS 自动推。这样开发者完全不感知证书存在。如果不用 Istio，用 SPIFFE/SPIRE 做服务身份，Vault 做密钥管理，配合 cron job 自动轮转。证书短生命周期（24h）的好处是：即使私钥泄露，24 小时后自动失效。
+
+**面试官**：OPA 策略维护会不会爆炸？
+
+**候选人**：会，这是零信任落地的最大痛点。治理上：(1) 策略代码化，进 Git，PR 评审；(2) 策略分层——通用规则（所有服务共用）+ 业务规则（业务团队自己写）；(3) 策略测试——每个策略配 unit test，CI 强制；(4) 策略 dry-run——新策略先 dry-run 模式跑（只记录决策不拦截），观察一段时间再切 enforce。京东有 100+ 通用策略 + 1000+ 业务策略，分层管理才能持续运维。
+
+**面试官**：mTLS 性能开销多大？值得吗？
+
+**候选人**：性能开销主要在握手——首次 RTT 比 TCP 多 1-2 个 RTT（TLS 1.3 优化到 1 个）。但 mTLS 长连接复用 + session resumption 能让后续请求零握手开销。我们测过：Istio mTLS 全 mesh 开启后，业务 P99 延迟增加约 0.5-1ms（主要是代理层），可接受。值得不值得看场景——金融、医疗等高敏感场景 1ms 完全可换安全；普通内部工具不一定值。所以落地要分优先级，先敏感服务。
+
+## 常见考点
+
+1. **mTLS 和 TLS 区别？**——TLS 只验服务端证书（客户端匿名）；mTLS 双方互验证书（服务端 + 客户端都签发证书）。
+2. **零信任必须用 Service Mesh 吗？**——不是必须，但 Mesh 大幅简化 mTLS 落地（自动签发、轮转、策略）。不用 Mesh 要在应用层手动集成证书管理（如 Spring Boot + cfssl）。
+3. **SPIFFE 是什么？**——Service Identity 框架，定义服务身份格式（SPIFFE ID）和证书规范（SPIFFE SVID）。SPIRE 是 SPIFFE 的开源实现。
+4. **OPA 在请求路径上有性能影响吗？**——in-process 模式（OPA 作为 Java 库嵌入）决策 < 1ms；HTTP 模式（独立 OPA 服务）有网络开销（约 5ms）。生产推荐 in-process。
+5. **BeyondCorp 是什么？**——Google 的零信任实现，业界最早大规模落地的零信任架构。核心思想：从"VPN + 内网"转向"每次访问基于身份 + 设备 + 上下文决策"。

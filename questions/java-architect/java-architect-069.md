@@ -5,263 +5,500 @@ category: java-architect
 subcategory: 特征平台设计
 tags:
 - Java 架构师
-- 特征平台
-- 实时计算
+- 实时特征
 - 低延迟
+- Flink
+- 特征工程
 feynman:
-  essence: 实时特征平台与低延迟计算链路的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: 实时特征平台是"用流式计算实时算特征，秒级更新到在线存储"。核心矛盾是"低延迟（< 10ms 查询）vs 计算复杂（滑窗/聚合/关联）"。解法是"流批一体 + 分层计算"——Flink 流计算实时聚合（写 Redis），在线服务从 Redis 秒级查询。典型特征："用户近 5 分钟点击数""商品实时销量""搜索实时热度"——这些特征时间窗口短（分钟级），需实时算。
+  analogy: 像股票行情。股价（特征）实时变化，投资者（模型）要实时拿到最新价决策。股票系统用流式计算（实时聚合交易数据）+ 内存缓存（行情推送）保证低延迟。实时特征平台一样——事件流（点击/下单）实时聚合（Flink），结果写 Redis（内存），模型查询毫秒级返回。
+  first_principle: 为什么实时特征不能在线查询时实时算？因为计算复杂（如"近 5 分钟点击数"要扫 5 分钟事件流，每次查都算是灾难）。解法是"预计算 + 缓存"——Flink 实时监听事件流，增量更新聚合值（每来一条事件 INCR Redis），查询时直接读 Redis（预计算结果）。这是"写时计算，读时直接取"。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 实时特征：短窗口（分钟/小时级）的聚合特征（点击数/销量/热度）
+  - 流批一体：Flink 流（实时增量）+ 批（历史回填），同口径
+  - 分层计算：Flink 算 → Redis 存 → 在线查
+  - 滑动窗口：时间窗口聚合（5 分钟/1 小时），Flink Window
+  - 特征服务：低延迟查询（Redis MGET），< 10ms
 first_principle:
-  problem: 面对“实时特征平台与低延迟计算链路”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 模型预测需要实时特征（近 5 分钟行为），怎么在毫秒级提供？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 实时计算复杂（扫事件流聚合），在线实时算太慢
+  - 预计算 + 缓存：Flink 增量算，Redis 存结果
+  - 流批口径一致（Flink 和 Spark 同特征同口径）
+  - 低延迟查询（模型预测实时取，< 10ms）
+  rebuild: Flink 流计算 + Redis 存储 + 特征服务。Flink 消费事件流（点击/下单），按时间窗口（5min/1h）增量聚合，结果写 Redis（INCR/LIST）。特征服务从 Redis 查询（MGET 批量），< 10ms。流批一体——Flink 流和 Spark 批同口径（DSL 生成），离线训练和在线预测一致。监控 feature_freshness（特征新鲜度，秒级）和 query_rt（查询延迟）。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - 滑动窗口怎么实现（不是翻滚）？——Flink sliding window（滑动，窗口重叠）或 Redis ZSet（按 timestamp 范围查）。
+  - 特征怎么去重（同一事件多次触发）？——事件 ID 去重（Flink 状态去重）或 Redis SET 去重。
+  - 大促时事件量暴增，Flink 怎么扩容？——增加并发度（parallelism）+ Kafka 分区匹配。
+  - 特征怎么回填（新上线补历史）？——Spark 批回算历史事件流，写离线特征仓库。
+  - 实时特征和离线特征怎么组合？——查询时合并（Redis 实时 + MySQL 离线），模型同时用。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 实时特征：短窗口聚合（5min/1h）
+  - Flink 流计算 + Redis 存储
+  - 写时预计算，读时直接取
+  - 流批一体（Flink + Spark 同口径）
+  - 查询 < 10ms（Redis MGET）
 ---
 
-# 【Java 后端架构师】实时特征平台与低延迟计算链路？
+# 【Java 后端架构师】实时特征平台与低延迟计算链路
 
-> 适用场景：架构设计。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 推荐风控实时特征。用户近 5 分钟点击了什么、商品最近 1 小时销量、搜索词实时热度——这些特征时间窗口短、需实时更新。在线查询时实时算太慢（扫事件流），解法是"Flink 流式预计算 + Redis 缓存 + 低延迟查询"。
 
-## 一、先明确问题边界
+## 一、概念层：实时特征全景
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**实时 vs 离线特征**：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+| 维度 | 实时特征 | 离线特征 |
+|------|----------|----------|
+| 窗口 | 短（5min/1h） | 长（7d/30d） |
+| 计算 | Flink 流（实时） | Spark 批（每日） |
+| 存储 | Redis（内存） | MySQL/Hive（磁盘） |
+| 新鲜度 | 秒级 | 天级 |
+| 查询延迟 | < 10ms | < 100ms |
+| 示例 | 近 5min 点击数 | 近 30d 消费总额 |
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 特征平台 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**实时特征计算链路**：
 
-## 二、推荐架构思路
+```
+事件源（点击/下单/搜索）
+       │ Kafka
+       ▼
+┌──────────────────────────────────────────────┐
+│ Flink 流计算（实时聚合）                        │
+│                                                │
+│  消费事件流 → 窗口聚合 → 写 Redis               │
+│                                                │
+│  示例：                                        │
+│  - 用户近5min点击数：COUNT(userId) window 5min │
+│  - 商品1h销量：SUM(itemId) window 1h           │
+│  - 搜索词热度：COUNT(query) window 1h           │
+└──────────────────────────────────────────────┘
+       │ 写 Redis（增量更新）
+       ▼
+┌──────────────────────────────────────────────┐
+│ Redis（特征存储）                               │
+│                                                │
+│  feature:user:123:click_5min → 42              │
+│  feature:item:456:sales_1h → 158               │
+│  feature:query:手机:hot_1h → 892               │
+└──────────────────────────────────────────────┘
+       │ MGET 批量查询
+       ▼
+┌──────────────────────────────────────────────┐
+│ 特征服务（低延迟，< 10ms）                      │
+│                                                │
+│  模型预测时批量取特征                           │
+│  缺失按需实时算（降级）                          │
+└──────────────────────────────────────────────┘
+```
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+## 二、机制层：Flink 实时特征计算
 
-## 三、技术落地点
+**Flink 作业（用户近 5 分钟点击数）**：
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+```java
+public class UserClickFeatureJob {
 
-## 四、常见坑
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env =
+            StreamExecutionEnvironment.getExecutionEnvironment();
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+        // 1. 消费点击事件（Kafka）
+        DataStream<ClickEvent> clicks = env.addSource(
+            new FlinkKafkaConsumer<>("click-event",
+                new ClickEventSchema(), kafkaProps()));
 
-## 五、面试回答模板
+        // 2. 按用户分组，滑动窗口聚合（5 分钟窗口，每 10 秒滑动）
+        DataStream<FeatureUpdate> features = clicks
+            .keyBy(ClickEvent::getUserId)
+            .window(SlidingProcessingTimeWindows.of(
+                Time.minutes(5),     // 窗口大小 5 分钟
+                Time.seconds(10)))   // 每 10 秒滑动一次
+            .aggregate(new ClickCountAgg());
 
-可以按下面结构作答：
+        // 3. 写 Redis（每个窗口结果更新）
+        features.addSink(new RedisSink<>(redisConfig(),
+            new FeatureRedisMapper()));
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“实时特征平台与低延迟计算链路”，核心是 特征平台 与 实时计算 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+        env.execute("User Click 5min Feature");
+    }
 
-## 六、加分点
+    /**
+     * 聚合函数：COUNT
+     */
+    static class ClickCountAgg implements AggregateFunction<
+            ClickEvent, Long, FeatureUpdate> {
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+        @Override
+        public Long createAccumulator() { return 0L; }
 
-## 七、企业级面试定位：从“会用”到“能负责”
+        @Override
+        public Long add(ClickEvent event, Long acc) {
+            return acc + 1;   // 每来一条事件 +1
+        }
 
-企业级面试不会只问“特征平台 是什么”，而是看你能不能对一条真实生产链路负责。回答“实时特征平台与低延迟计算链路”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+        @Override
+        public FeatureUpdate getResult(Long count) {
+            return new FeatureUpdate("click_5min", count);
+        }
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 架构设计 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 特征平台、实时计算、低延迟 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 success_rate、latency_p99、error_rate、backlog_size 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+        @Override
+        public Long merge(Long a, Long b) { return a + b; }
+    }
 
-### 企业级回答骨架
+    /**
+     * Redis Sink：写特征
+     */
+    static class FeatureRedisMapper implements RedisMapper<FeatureUpdate> {
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 特征平台 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+        @Override
+        public RedisCommandDescription getCommandDescription() {
+            return new RedisCommandDescription(RedisCommand.SET);
+        }
 
-### 面试中要主动补的生产细节
+        @Override
+        public String getKeyFromData(FeatureUpdate data) {
+            // feature:{entityType}:{entityId}:{featureName}
+            return "feature:user:" + data.getEntityId() + ":" + data.getName();
+        }
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+        @Override
+        public String getValueFromData(FeatureUpdate data) {
+            return String.valueOf(data.getValue());
+        }
+    }
+}
+```
 
-## 八、苏格拉底式面试追问
+**商品实时销量特征（SUM 聚合）**：
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+```java
+public class ItemSalesFeatureJob {
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“实时特征平台与低延迟计算链路”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 success_rate、latency_p99、error_rate、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 特征平台 负责的范围，以及必须依赖 实时计算、低延迟 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 边界不清导致跨服务强耦合，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env =
+            StreamExecutionEnvironment.getExecutionEnvironment();
 
-### 现场对话示例
+        DataStream<OrderEvent> orders = env.addSource(
+            new FlinkKafkaConsumer<>("order-event",
+                new OrderEventSchema(), kafkaProps()));
 
-**面试官**：你说要做“实时特征平台与低延迟计算链路”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 success_rate、latency_p99、业务失败率和事故记录。
+        // 按 SKU 分组，1 小时窗口聚合 SUM（金额）
+        DataStream<FeatureUpdate> sales = orders
+            .keyBy(OrderEvent::getSkuId)
+            .window(TumblingProcessingTimeWindows.of(Time.minutes(60)))
+            .aggregate(new SalesSumAgg());
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 success_rate 没有改善，或者 latency_p99 反而变差，就停止扩大范围，回到假设层重新复盘。
+        sales.addSink(new RedisSink<>(redisConfig(),
+            new FeatureRedisMapper()));
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 success_rate、latency_p99、error_rate。这样它不是个人经验，而是团队机制。
+        env.execute("Item Sales 1h Feature");
+    }
 
-## 九、专项架构深挖：对象、链路、失败模式
+    static class SalesSumAgg implements AggregateFunction<
+            OrderEvent, BigDecimal, FeatureUpdate> {
 
-这一题不要停在“知道 特征平台”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+        @Override
+        public BigDecimal createAccumulator() { return BigDecimal.ZERO; }
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 核心业务对象、状态机、读写链路、依赖拓扑；幂等键、版本号、审计流水、补偿任务；监控指标、压测模型、灰度开关 |
-| 设计主线 | 主链路保持简单可靠，非核心能力异步解耦；状态变化必须有唯一约束、版本控制和补偿兜底；所有关键方案都要能灰度、观测和回滚 |
-| 失败模式 | 边界不清导致跨服务强耦合；异常链路没有补偿和告警；只优化技术指标但遗漏业务正确性 |
-| 验证指标 | success_rate、latency_p99、error_rate、backlog_size |
+        @Override
+        public BigDecimal add(OrderEvent order, BigDecimal acc) {
+            return acc.add(order.getAmount());
+        }
 
-**架构拆解**：
+        @Override
+        public FeatureUpdate getResult(BigDecimal total) {
+            return new FeatureUpdate("sales_1h", total);
+        }
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 实时计算 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 实时特征平台与低延迟计算链路 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 低延迟 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+        @Override
+        public BigDecimal merge(BigDecimal a, BigDecimal b) {
+            return a.add(b);
+        }
+    }
+}
+```
 
-**高分回答细节**：
+## 三、机制层：低延迟特征服务
 
-- 不要只说“可以用 特征平台”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+**特征查询服务**：
 
-## 十、二轮场景追问与项目表达
+```java
+@Service
+public class RealtimeFeatureService {
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+    @Autowired private RedisTemplate redis;
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+    /**
+     * 批量查询实时特征（MGET，一次网络往返）
+     */
+    public Map<String, Object> batchGet(FeatureQuery query) {
+        long start = System.currentTimeMillis();
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“实时特征平台与低延迟计算链路”，重点看 success_rate、latency_p99、error_rate，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+        // 构建所有 key
+        List<String> keys = new ArrayList<>();
+        for (String featureName : query.getFeatureNames()) {
+            keys.add(buildKey(query.getEntityType(), query.getEntityId(), featureName));
+        }
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+        // 批量查询（MGET）
+        List<Object> values = redis.opsForValue().multiGet(keys);
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 特征平台 和 实时计算 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+        // 组装结果
+        Map<String, Object> result = new HashMap<>();
+        for (int i = 0; i < query.getFeatureNames().size(); i++) {
+            String name = query.getFeatureNames().get(i);
+            Object value = values.get(i);
+            if (value == null) {
+                // 特征缺失：降级（默认值 or 实时算）
+                value = handleMissing(name, query.getEntityId());
+                monitor.record("feature_missing", name);
+            }
+            result.put(name, value);
+        }
 
-### 追问 3：你如何判断这个方案值得做？
+        long rt = System.currentTimeMillis() - start;
+        monitor.record("feature_query_rt", rt);
+        return result;
+    }
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 低延迟 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+    private String buildKey(String entityType, Long entityId, String featureName) {
+        return "feature:" + entityType + ":" + entityId + ":" + featureName;
+    }
 
-### STAR 项目表达
+    /**
+     * 特征缺失降级：按需实时算（慢但保可用）
+     */
+    private Object handleMissing(String featureName, Long entityId) {
+        FeatureSpec spec = featureMetaRepo.findByName(featureName);
+        if (spec == null) return getDefault(featureName);
 
-- **S（背景）**：原系统在 特征平台 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 实时特征平台与低延迟计算链路 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 success_rate、latency_p99 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+        // 从事件流临时算（降级，延迟高）
+        return realtimeComputeService.compute(spec, entityId);
+    }
+}
+```
 
-### 二轮复盘清单
+**特征预热（冷启动）**：
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+```java
+@Service
+public class FeatureWarmupService {
 
-## 十一、面试官 5 个企业级追问
+    /**
+     * 用户进入推荐页时，预热特征（预取到本地缓存）
+     */
+    public void warmup(Long userId) {
+        CompletableFuture.runAsync(() -> {
+            // 预查常用特征，缓存到本地（Caffeine）
+            Map<String, Object> features = realtimeFeatureService.batchGet(
+                new FeatureQuery("user", userId, getCommonFeatures()));
+            localCache.put("user_features:" + userId, features,
+                Duration.ofMinutes(1));
+        });
+    }
+}
+```
 
-1. **你在真实项目里怎么判断“实时特征平台与低延迟计算链路”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 success_rate、latency_p99、error_rate。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+## 四、机制层：流批一体（口径一致）
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，特征平台 是否真是瓶颈，实时计算 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+**统一 DSL 生成 Flink + Spark**：
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 边界不清导致跨服务强耦合。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 success_rate 和 latency_p99 做分钟级观察，一旦越过阈值立即止损。
+```java
+@Service
+public class FeatureJobGenerator {
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 低延迟，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+    /**
+     * 从 DSL 生成 Flink（流）和 Spark（批）作业
+     */
+    public void generate(FeatureSpec spec) {
+        // 1. 生成 Flink 作业（在线实时算）
+        String flinkCode = generateFlink(spec);
+        flinkJobService.deploy(spec.getName() + "_stream", flinkCode);
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“实时特征平台与低延迟计算链路”，至少要沉淀 核心业务对象、状态机、读写链路、依赖拓扑 的建模规范，以及 success_rate、latency_p99 的验收标准。
+        // 2. 生成 Spark 作业（离线回填）
+        String sparkSql = generateSpark(spec);
+        sparkJobService.submit(spec.getName() + "_batch", sparkSql);
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
+        // 3. 对账任务（流批一致性）
+        scheduleConsistencyCheck(spec);
+    }
 
-1. **如果把“实时特征平台与低延迟计算链路”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 特征平台 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
+    private String generateFlink(FeatureSpec spec) {
+        // 根据 agg 类型生成对应算子
+        String aggOperator = "";
+        switch (spec.getAgg()) {
+            case COUNT:
+                aggOperator = ".aggregate(new CountAgg())";
+                break;
+            case SUM:
+                aggOperator = ".aggregate(new SumAgg(\"" + spec.getAggField() + "\"))";
+                break;
+            case AVG:
+                aggOperator = ".aggregate(new AvgAgg(\"" + spec.getAggField() + "\"))";
+                break;
+        }
 
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“实时特征平台与低延迟计算链路”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 success_rate、latency_p99 对业务链路的影响。
+        return String.format(
+            "DataStream<FeatureUpdate> features = events" +
+            "    .keyBy(e -> e.get%s())" +
+            "    .window(SlidingProcessingTimeWindows.of(" +
+            "        Time.minutes(%d), Time.seconds(%d)))" +
+            "    %s;" +
+            "features.addSink(new RedisSink<>(...));",
+            capitalize(spec.getEntityType()),
+            spec.getWindow().toMinutes(),
+            spec.getSlideInterval().getSeconds(),
+            aggOperator
+        );
+    }
 
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 边界不清导致跨服务强耦合，要能通过 trace、tool_call_id 和业务流水快速回放。
+    private String generateSpark(FeatureSpec spec) {
+        // 生成等价 Spark SQL（同口径）
+        return String.format(
+            "SELECT %s, %s(%s) as %s " +
+            "FROM %s " +
+            "WHERE event_time BETWEEN " +
+            "    DATE_SUB('{{date}}', %d) AND '{{date}}' " +
+            "GROUP BY %s",
+            spec.getEntityType(),
+            spec.getAgg().name(),
+            spec.getAggField(),
+            spec.getName(),
+            spec.getSourceEvent(),
+            spec.getWindow().toDays(),
+            spec.getEntityType()
+        );
+    }
+}
+```
 
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
+## 五、机制层：滑动窗口（Redis ZSet 实现）
 
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
+**精确滑动窗口（Redis ZSet）**：
 
-## 十三、记忆口诀与面试现场表达
+```java
+/**
+ * 精确滑动窗口（适用于短窗口 + 高精度）
+ * Flink sliding window 是近似（窗口跳跃），ZSet 是精确（逐秒）
+ */
+@Service
+public class SlidingWindowFeatureService {
+
+    @Autowired private RedisTemplate redis;
+
+    /**
+     * 增量更新：事件来了加入 ZSet
+     */
+    public void recordEvent(String featureKey, String eventId, long timestamp) {
+        // ZADD featureKey timestamp eventId
+        redis.opsForZSet().add(featureKey, eventId, timestamp);
+        // 清理过期（保留窗口内）
+        long windowStart = timestamp - Duration.ofMinutes(5).toMillis();
+        redis.opsForZSet().removeRangeByScore(featureKey, 0, windowStart);
+    }
+
+    /**
+     * 查询窗口内事件数（精确 COUNT）
+     */
+    public long count(String featureKey, Duration window) {
+        long now = System.currentTimeMillis();
+        long start = now - window.toMillis();
+        // ZCOUNT featureKey start now
+        return redis.opsForZSet().count(featureKey, start, now);
+    }
+
+    /**
+     * 查询窗口内去重数（DISTINCT）
+     */
+    public long countDistinct(String featureKey, Duration window) {
+        long now = System.currentTimeMillis();
+        long start = now - window.toMillis();
+        Set<String> events = redis.opsForZSet()
+            .rangeByScore(featureKey, start, now);
+        // 去重（事件 ID 唯一，这里举例按字段去重）
+        return new HashSet<>(events).size();
+    }
+}
+```
+
+## 六、底层本质：实时特征的本质是"写时计算"
+
+回到第一性：**实时特征的本质是"把计算从读时移到写时——事件来了就增量算，查询时直接取结果"**。
+
+- **写时计算**：每来一条事件，Flink 增量更新聚合值（COUNT +1，SUM +amount），结果写 Redis。查询时直接读 Redis（预计算结果），毫秒级。这是"预聚合"——把昂贵计算分摊到每条事件（增量算），查询变 O(1)。
+- **读时计算 vs 写时计算**：读时算（查询时扫事件流聚合）延迟高（O(N)，N 是事件数）；写时算（事件来了增量更新）延迟低（O(1) 查询，O(1) 写入）。实时特征选写时算，代价是存储（每特征存一份聚合值）。
+- **增量计算的本质是"状态"**：Flink 维护聚合状态（累加器），每来一条事件更新状态。窗口结束时状态即为结果。这是"有状态流处理"——状态让 Flink 不用重算历史，增量更新。
+- **流批一体的本质是"口径统一"**：Flink（流）和 Spark（批）实现同一特征，必须口径一致（窗口/聚合/过滤完全相同），否则训练预测不一致（见 065 题）。统一 DSL 从源头保证——一份定义生成两套代码。
+
+**滑动窗口的本质是"时间切片"**：滑动窗口（5 分钟窗口，每 10 秒滑动）是重叠的时间片——每 10 秒产生一个"过去 5 分钟"的聚合值。比翻滚窗口（不重叠）更精细（每 10 秒更新一次 vs 每 5 分钟更新一次），但计算量更大（窗口重叠部分重复算）。权衡——实时性要求高用滑动（10 秒更新），要求低用翻滚（5 分钟更新）。
+
+**低延迟的本质是"内存 + 批量"**：Redis 内存查询（μs 级）+ MGET 批量（一次网络往返取多特征），两者结合实现 < 10ms 查询。如果每特征单独查（N 次网络往返），延迟 N 倍。批量是"减少网络开销"的关键优化。
+
+## 七、AI 架构师加问：5 个
+
+1. **用向量数据库存实时 Embedding 特征，怎么做？**
+   实时 Embedding（如"用户实时兴趣向量"）用向量库存（Milvus/FAISS），支持近邻查询（找相似用户/商品）。但传统数值特征用 Redis。混合存储——数值 Redis，向量 Milvus，查询时分别取合并。京东推荐：实时兴趣向量 Milvus，支持秒级找相似用户。
+
+2. **AI 做特征自动发现（从事件流提取新特征），怎么做？**
+   AI 分析事件流，自动发现有用模式——如"用户连续浏览同一商品 3 次后购买概率高"，AI 提取"连续浏览次数"特征。用 AutoML（自动特征工程）。京东实践：AI 发现特征占新增特征的 30%。
+
+3. **用 AI 预测特征值（缺失特征补全），怎么做？**
+   特征缺失时（新用户/新商品），AI 根据已有特征预测缺失值——如新用户无历史，用相似用户的特征代替（协同过滤）。这避免"特征缺失模型失效"。监控 feature_imputation_accuracy（补全准确率）。
+
+4. **AI 做特征异常检测（特征值异常告警），怎么做？**
+   AI 监控特征分布——某特征突然偏离（如某用户 5min 点击数从 10 突增到 1000），可能是 bug 或刷量。AI 用异常检测（3-sigma/孤立森林）识别，告警。京东风控：AI 检测特征异常，拦截刷量。
+
+5. **用 Flink + AI 做实时特征+模型预测一体化，怎么做？**
+   Flink 算实时特征后，直接在 Flink 作业内调模型预测（flink-ml）——特征算完立即预测，无需写 Redis 再读。延迟更低（特征→预测同进程）。但耦合高（特征和模型绑死）。适用：实时性极高的场景（如实时竞价）。
+
+## 七、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：经验丰富的值班负责人拿着工具箱、调度台和应急预案，在处理“业务流量和系统风险同时出现”。
+抓 **"Flink 流算 Redis 存、写时预计算读时取、滑动窗口流批一体、MGET 批量低延迟"**。
 
-- **场景**：先说明“实时特征平台与低延迟计算链路”服务于什么业务目标，不要上来就堆 特征平台。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 边界不清导致跨服务强耦合、异常链路没有补偿和告警。
-- **验证**：最后落到 success_rate、latency_p99、error_rate，让面试官感觉你真的上线过。
-
-### 拟人化理解
-
-可以把“实时特征平台与低延迟计算链路”想成一个经验丰富的值班负责人：特征平台 是他的工具箱、调度台和应急预案，实时计算 是他面对的现场信号，低延迟 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看指标，再控风险，最后谈优化。这样记，比死背组件名更稳。
+- **实时特征**：短窗口（5min/1h）聚合（COUNT/SUM/AVG）
+- **Flink 流计算**：消费事件流，窗口聚合，增量更新 Redis
+- **写时预计算**：事件来了就算，查询时直接取（O(1)）
+- **滑动窗口**：5 分钟窗口每 10 秒滑动（重叠时间片）
+- **流批一体**：DSL 生成 Flink + Spark，口径一致
+- **低延迟查询**：Redis MGET 批量，< 10ms
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“实时特征平台与低延迟计算链路”，我会这样答：我会先确认业务目标、规模、SLA 和一致性要求，再选择合适的架构手段。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 边界不清导致跨服务强耦合，所以我会提前设计灰度、监控和止损阈值，重点看 success_rate、latency_p99。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
+> 实时特征平台核心是 Flink 流计算 + Redis 存储 + 低延迟服务。实时特征是短窗口（5min/1h）聚合特征——用户近 5 分钟点击数、商品 1 小时销量、搜索词热度。不能查询时实时算（扫事件流太慢），解法是写时预计算——Flink 消费事件流（Kafka），按时间窗口聚合（COUNT/SUM/AVG），结果增量写 Redis（每来一条事件 INCR/ADD）。查询时模型从 Redis 批量取（MGET 一次网络往返），< 10ms。Flink 作业——keyBy 分组（按 userId/itemId），SlidingProcessingTimeWindows（5 分钟窗口，10 秒滑动），aggregate 聚合，addSink 写 Redis。滑动窗口比翻滚更实时（10 秒更新 vs 5 分钟），但计算量大（窗口重叠）。流批一体——特征 DSL 生成 Flink（流）和 Spark（批），保证离线训练和在线预测口径一致（见 065 题特征一致性）。特征缺失降级——按需实时算（慢但保可用）或默认值。特征预热——用户进入推荐页预取特征到本地缓存（Caffeine），减少 Redis 查询。精确滑动窗口用 Redis ZSet（ZADD 按时间戳，ZCOUNT 范围统计）。监控 feature_freshness（新鲜度，秒级）、query_rt（查询延迟，< 10ms）、feature_missing_rate（缺失率，< 1%）。最关键的是"写时预计算——事件来了增量算，查询 O(1) 取"，这是实时特征低延迟的根本。
 
-### 被追问时的转场话术
+## 八、苏格拉底式面试追问
 
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 success_rate 或 latency_p99 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么不在线查询时实时算（要 Flink 预计算）？ | 实时算要扫事件流聚合（O(N)），高 QPS 下 DB/ES 扛不住；预计算把算分摊到写入（O(1) 每事件），查询 O(1)。用 query_rt（查询延迟，预计算 < 10ms vs 实时算 > 100ms）和 write_cost（写入成本，增量 O(1)）量化 |
+| 证据追问 | 怎么证明实时特征新鲜（秒级更新）？ | 监控特征时间戳（Redis 值带更新时间）+ 端到端测试（发事件后查特征，验证延迟）+ Flink 水位线监控。监控 feature_freshness（新鲜度，< 10 秒）和 event_to_feature_latency（事件到特征延迟） |
+| 边界追问 | Flink 流计算能处理所有特征吗？ | 不能。长窗口特征（30 天）用 Flink 状态太大，用 Spark 批 + MySQL 查。复杂关联特征（多表 JOIN）Flink 难处理，用 Spark。实时特征限于短窗口简单聚合 |
+| 反例追问 | 什么场景不需要实时特征（离线够用）？ | 低频业务（B 端/后台报表）、长周期特征（用户年度消费）、冷启动（无实时数据）。这些离线批算够，不需要 Flink 流 |
+| 风险追问 | 实时特征平台最大风险？ | 主动点出：Flink 故障（特征不更新）、Redis 故障（特征不可查）、数据倾斜（热点 key 聚合慢）、流批不一致（训练预测偏移）。靠 Flink HA + Redis 集群 + key 分散 + 流批对账 |
+| 验证追问 | 怎么验证流批一致（Flink vs Spark 同值）？ | 对账——同 entity 同时间点，Flink 实时值 vs Spark 批值，差异率 < 0.1%。监控 stream_batch_consistency（一致性率，> 99.9%） |
+| 沉淀追问 | 实时特征平台沉淀什么？ | Flink 作业模板（DSL 生成）、特征存储（Redis schema）、特征服务（查询 SDK）、流批对账框架、监控大盘（新鲜度/延迟/缺失率/一致性） |
 
-### 反问面试官
+### 现场对话示例
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+**面试官**：大促时点击事件量暴增 10 倍，Flink 作业积压（特征延迟从秒级到分钟级），怎么办？
 
+**候选人**：三层应急。第一层，扩容——增加 Flink TaskManager（横向扩容），提高 parallelism（并发度），Kafka 分区数匹配（消费者并行）。京东双 11 Flink 集群弹性扩容 5 倍。第二层，降级——非关键特征（低优先级）暂停计算，优先保证关键特征（推荐/风控用的）。第三层，背压控制——如果 Kafka 积压严重，前端限流（限制事件产生速率），保护 Flink 不崩。长期优化——窗口优化（大窗口拆小窗口减少状态）、增量聚合（用 AggregateFunction 增量算，不用 ProcessWindowFunction 全量缓存）、状态后端优化（RocksDB 增量 checkpoint）。京东双 11：点击事件 QPS 百万级，Flink 集群 100+ 节点，特征延迟 < 5 秒。监控 flink_lag（Flink 积压）和 feature_freshness（新鲜度，超 10 秒告警）。极端情况 Flink 崩——降级用旧特征（Redis 兜底，虽不新鲜但可用）。
+
+**面试官**：实时特征算出来写入 Redis 了，但模型预测时查不到（延迟），怎么办？
+
+**候选人**：这是"写读时间差"问题——Flink 写了但模型读时还没生效（Redis 主从延迟/网络）。第一层，读写一致性——Flink 写主节点，模型读主节点（不读副本，避免主从延迟）。但这牺牲了读扩展性（所有读压主节点）。第二层，读时校验——模型读不到特征时，不直接用默认值，而是"等待重试"（100ms 内重试 3 次），大概率能读到。第三层，最终一致——接受秒级延迟，用"上一秒的特征"（虽不最新但接近）。实时特征本身允许微小延迟（5 分钟窗口的特征，1-2 秒延迟可接受）。第四层，监控——监控 feature_write_to_read_delay（写到读延迟），超阈值告警。京东实践：实时特征写读延迟 < 1 秒（Redis 主节点直读 + 重试），不影响模型效果（5min 窗口特征 1 秒延迟可忽略）。监控 feature_availability（特征可用率，> 99.99%）。
+
+**面试官**：新特征上线（如"用户近 1 小时加购数"），怎么保证流批一致（Flink 和 Spark 算的一样）？
+
+**候选人**：这是 065 题的特征一致性问题在实时场景的体现。第一步，统一 DSL——特征用 DSL 定义（聚合 COUNT、窗口 1 小时、来源事件加购），平台自动生成 Flink 和 Spark 代码，从源头保证口径一致。第二步，对账验证——新特征上线后，抽样 entity，比对 Flink 实时值（Redis）和 Spark 批值（离线仓库），差异率应 < 0.1%。第三步，根因分析——如果不一致，查差异点。常见根因：时间窗口边界（Flink 含边界，Spark 不含）、事件过滤不同（Flink 过滤了失败事件，Spark 没过滤）、时区差异（Flink 用 UTC，Spark 用本地）。第四步，修复——统一 DSL 配置，重新生成代码，重新对账。第五步，预防——特征上线有"一致性门禁"（对账通过才上线）。京东实践：新特征上线一致性校验自动化，不一致不让上。监控 stream_batch_consistency（流批一致性率，> 99.9%）和 consistency_check_passed（一致性校验通过率）。
+
+## 常见考点
+
+1. **实时特征和离线特征怎么组合？**——查询时合并。实时特征（Redis，短窗口）+ 离线特征（MySQL，长窗口），模型同时用。实时反映当下，离线反映历史，互补。
+2. **Flink 和 Spark Streaming 区别？**——Flink 真流处理（逐条），Spark Streaming 微批（批处理模拟流）。Flink 延迟低（毫秒），Spark Streaming 延迟高（秒级，批间隔）。实时特征选 Flink。
+3. **怎么做特征的"时间旅行"（查历史某时刻特征值）？**——特征存时间版本（feature:user:123:click@1700000000），查指定时间点的值。用于离线训练（用历史时刻的特征）。
+4. **特征平台 Feast 是什么？**——Feast 是开源特征平台（Gojek/Google 出），统一特征定义/离线在线服务。提供特征注册/推送/查询 API，解决特征一致性。京东自研类似平台（定制化强）。

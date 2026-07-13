@@ -9,259 +9,377 @@ tags:
 - 状态机
 - 补偿
 feynman:
-  essence: Agent 多步骤任务的状态机与补偿的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: Agent 多步骤任务的本质是"有限状态机 + Saga 补偿"——每个步骤是一个状态，步骤间有明确流转规则，任何一步失败都要能从上一个 checkpoint 恢复或反向补偿已执行的副作用。和分布式事务的 Saga 模式同构，区别是 Agent 的步骤由 LLM 动态决策而非预先编排。
+  analogy: 像一个会自主规划的旅行团导游——他决定先去 A 景点再去 B 酒店（动态规划），但如果 B 酒店订满了，他要能取消 A 景点的门票（补偿）或改订 C 酒店（重试）。每一步都有备案，不会卡死在半路。
+  first_principle: Agent 多步执行有三个工程难点：(1) 中间失败要恢复不能从头重来（已执行的副作用不能重复）；(2) 步骤间有数据依赖（B 步骤要 A 的结果）；(3) LLM 决策可能跳步或回退。状态机解决流转约束，checkpoint 解决恢复，Saga 解决副作用补偿。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 状态机：CREATED → RUNNING → PAUSED → SUCCEEDED / FAILED，每步有明确前驱后继
+  - checkpoint：每步执行后持久化（taskId + step + state + history），失败从最近 checkpoint 恢复
+  - Saga 补偿：每个步骤注册补偿动作（refund 的补偿是 reverse_refund），失败时反向执行已成功步骤的补偿
+  - 幂等：每个步骤必须幂等（重复执行无副作用），靠 idempotency_key 兜底
+  - 恢复策略：重试（瞬时失败）、补偿（业务失败）、人工介入（无法自动恢复）
 first_principle:
-  problem: 面对“Agent 多步骤任务的状态机与补偿”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: Agent 执行一个跨 5 个工具调用的多步任务，第 4 步失败，前 3 步已产生副作用（扣了库存、发了券），怎么恢复一致性？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 从头重来会重复执行前 3 步的副作用（重复扣库存、重复发券）
+  - 不恢复会留下不一致状态（库存扣了但订单没建成）
+  - 每个步骤的副作用可能是不可逆的（退款已到账无法撤回）
+  - 恢复时间窗口有限（用户不会等 30 分钟）
+  rebuild: 把任务建模为状态机 + Saga。每个步骤有前置条件和补偿动作，状态每步 checkpoint。第 4 步失败时，反向执行第 3、2、1 步的补偿（反向用券、回滚库存），恢复到初始状态；或暂停任务人工介入。对不可逆操作（已退款）标记为"需人工处理"，不自动补偿。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - Saga 补偿和分布式事务的 TCC 区别？——TCC 是 TRY-CONFIRM-CANCEL 三阶段，资源预留；Saga 是正向执行 + 反向补偿，不预留。Agent 适合 Saga（步骤由 LLM 动态决策，无法预知全部步骤）。
+  - 怎么知道哪些步骤需要补偿？——所有有副作用的步骤都要注册补偿动作。执行时把 (step, action, compensateAction) 记录到 saga_log，失败时按逆序执行 compensateAction。
+  - 补偿也失败了怎么办？——补偿失败重试 3 次，仍失败标记为"需人工介入"，告警并暂停任务。人工处理后标记任务为 SUCCEEDED_MANUAL 或 FAILED。
+  - LLM 决策跳步怎么办？——状态机强制校验前置条件。LLM 想从 step1 跳到 step4，但 step4 的前置是 step3，状态机拒绝跳转并提示 LLM"必须先执行 step3"。
+  - checkpoint 存什么？——taskId、currentStep、stepResults（每步的输出）、history（完整对话）、sagaLog（已执行的副作用及补偿动作）。history 要完整存，因为 LLM 恢复后需要上下文继续决策。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 状态机：CREATED → RUNNING → PAUSED → SUCCEEDED/FAILED，每步前置校验
+  - checkpoint：每步持久化（taskId+step+history+sagaLog），失败恢复
+  - Saga 补偿：有副作用的步骤注册 compensateAction，失败逆序执行
+  - 幂等：idempotency_key 兜底，重复执行无副作用
+  - 恢复策略：重试（瞬时）/补偿（业务）/人工（不可逆）
 ---
 
-# 【Java 后端架构师】Agent 多步骤任务的状态机与补偿？
+# 【Java 后端架构师】Agent 多步骤任务的状态机与补偿
 
-> 适用场景：AI Agent/Infra。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。客服 Agent 处理"帮我退货退款"——查订单 → 校验退货资格 → 生成退货单 → 退款 → 释放库存，跨 5 个工具调用。第 4 步退款失败，前 3 步已生成退货单、已通知仓库。架构师要设计的是一套"可恢复、可补偿、可审计"的多步骤任务框架。
 
-## 一、先明确问题边界
+## 一、概念层：Agent 任务的状态机
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+```
+                       ┌──────────┐
+                       │ CREATED  │ (任务创建)
+                       └────┬─────┘
+                            │ start()
+                            ▼
+    ┌──────────────────────────────────────────┐
+    │              RUNNING                      │
+    │  ┌──────┐  ┌──────┐  ┌──────┐  ┌──────┐ │
+    │  │STEP_1│→ │STEP_2│→ │STEP_3│→ │STEP_4│ │  (LLM 决策每步)
+    │  └──┬───┘  └──┬───┘  └──┬───┘  └──┬───┘ │
+    │     │ckpt     │ckpt     │ckpt     │ckpt  │  (每步 checkpoint)
+    └─────┼─────────┼─────────┼─────────┼─────┘
+          │         │         │         │
+          ▼         ▼         ▼         ▼
+    ┌──────────┐  ┌──────────┐  ┌──────────────┐
+    │ PAUSED   │  │ FAILED   │  │  SUCCEEDED   │
+    │ (等审批)  │  │ (已补偿)  │  │  (任务完成)   │
+    └──────────┘  └──────────┘  └──────────────┘
+```
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+## 二、机制层：状态机与 checkpoint 实现
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 Agent 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+### 2.1 任务状态持久化
 
-## 二、推荐架构思路
+```java
+@Entity
+@Table(name = "t_agent_task")
+public class AgentTask {
+    @Id
+    private String taskId;
+    private String userId;
+    private String intent;                    // 用户意图（退货退款）
+    private TaskStatus status;                // CREATED/RUNNING/PAUSED/SUCCEEDED/FAILED
+    private int currentStep;
+    private int stepCount;
+    private Instant startTime;
+    private Instant lastActiveTime;
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+    @Lob
+    private String history;                   // 完整对话历史（JSON）
+    @Lob
+    private String stepResults;               // 每步输出（JSON）
 
-## 三、技术落地点
+    @OneToMany(cascade = ALL)
+    private List<SagaStep> sagaLog;           // 已执行的副作用步骤（含补偿动作）
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+    private String pendingApprovalId;
+    private Integer version;                  // 乐观锁
+}
 
-## 四、常见坑
+public enum TaskStatus {
+    CREATED, RUNNING, PAUSED_APPROVAL, PAUSED_ERROR, SUCCEEDED, FAILED, COMPENSATED
+}
+```
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+### 2.2 Saga 步骤记录（补偿依据）
 
-## 五、面试回答模板
+```java
+@Entity
+@Table(name = "t_saga_step")
+public class SagaStep {
+    @Id
+    private String stepId;
+    private String taskId;
+    private int stepOrder;                    // 执行顺序
+    private String toolName;                  // 执行的工具（如 refundService）
+    private String action;                    // 正向动作
+    @Lob
+    private String actionInput;               // 动作输入参数
+    private String compensateAction;          // 补偿动作（如 reverseRefund）
+    @Lob
+    private String compensateInput;           // 补偿参数
+    private StepStatus status;                // EXECUTED / COMPENSATED / FAILED
+    private Instant executeTime;
+}
+```
 
-可以按下面结构作答：
+### 2.3 状态机流转与 checkpoint
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“Agent 多步骤任务的状态机与补偿”，核心是 Agent 与 状态机 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+```java
+@Service
+@Slf4j
+public class AgentTaskExecutor {
 
-## 六、加分点
+    private final StateMachine<AgentTask> stateMachine;
+    private final AgentTaskRepository taskRepo;
+    private final SagaCompensator compensator;
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+    private static final int MAX_STEPS = 20;
+    private static final int MAX_RETRY = 3;
 
-## 七、企业级面试定位：从“会用”到“能负责”
+    public TaskResult execute(AgentTask task) {
+        stateMachine.transition(task, RUNNING);
 
-企业级面试不会只问“Agent 是什么”，而是看你能不能对一条真实生产链路负责。回答“Agent 多步骤任务的状态机与补偿”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+        while (task.notFinished()) {
+            // 1. 上限检查
+            checkLimits(task, MAX_STEPS);
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 AI Agent/Infra 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 Agent、状态机、补偿 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 tool_schema_error_rate、replay_success_rate、agent_failure_reason_count、cost_budget_burn 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+            try {
+                // 2. LLM 决策下一步工具调用
+                ToolCall call = llm.decideNextStep(task.getHistory(),
+                    task.getStepResults());
 
-### 企业级回答骨架
+                // 3. 执行（注册补偿动作）
+                SagaStep step = executeWithCompensation(call, task);
+                task.getSagaLog().add(step);
+                task.setCurrentStep(task.getCurrentStep() + 1);
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 Agent 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+                // 4. checkpoint（关键：每步持久化）
+                taskRepo.checkpoint(task);
 
-### 面试中要主动补的生产细节
+                // 5. 判断是否完成
+                if (llm.isTaskComplete(task)) {
+                    stateMachine.transition(task, SUCCEEDED);
+                    return TaskResult.success(task.getStepResults());
+                }
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+            } catch (RetryableException e) {
+                // 瞬时失败：重试
+                if (task.getRetryCount() < MAX_RETRY) {
+                    task.incrementRetry();
+                    sleep(backoff(task.getRetryCount()));
+                    continue;
+                }
+                // 重试耗尽：触发补偿
+                return handleFailure(task, e);
 
-## 八、苏格拉底式面试追问
+            } catch (BusinessException e) {
+                // 业务失败：不可重试，直接补偿
+                return handleFailure(task, e);
+            }
+        }
+        return TaskResult.failure("超出步数上限");
+    }
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+    /**
+     * 执行工具调用并注册补偿动作
+     */
+    private SagaStep executeWithCompensation(ToolCall call, AgentTask task) {
+        // 注册补偿（执行前准备好，防执行后崩溃无法补偿）
+        SagaStep step = SagaStep.builder()
+            .stepId(generateStepId())
+            .taskId(task.getTaskId())
+            .toolName(call.getName())
+            .action(call.getName())
+            .actionInput(toJson(call.getArguments()))
+            .compensateAction(registry.getCompensateAction(call.getName()))
+            .compensateInput(buildCompensateInput(call))
+            .build();
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“Agent 多步骤任务的状态机与补偿”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 tool_schema_error_rate、replay_success_rate、agent_failure_reason_count、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 Agent 负责的范围，以及必须依赖 状态机、补偿 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 参数不校验导致危险调用，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+        // 幂等执行
+        ToolResult result = toolExecutor.executeIdempotent(call,
+            idempotencyKey(task.getTaskId(), step.getStepId()));
 
-### 现场对话示例
+        step.setStatus(StepStatus.EXECUTED);
+        step.setExecuteTime(Instant.now());
+        return step;
+    }
 
-**面试官**：你说要做“Agent 多步骤任务的状态机与补偿”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 tool_schema_error_rate、replay_success_rate、业务失败率和事故记录。
+    /**
+     * 失败处理：反向补偿已执行的步骤
+     */
+    private TaskResult handleFailure(AgentTask task, Exception e) {
+        log.error("任务失败，触发补偿 taskId={}", task.getTaskId(), e);
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 tool_schema_error_rate 没有改善，或者 replay_success_rate 反而变差，就停止扩大范围，回到假设层重新复盘。
+        List<SagaStep> executed = task.getSagaLog().stream()
+            .filter(s -> s.getStatus() == EXECUTED)
+            .sorted(Comparator.comparing(SagaStep::getStepOrder).reversed())  // 逆序
+            .collect(toList());
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 tool_schema_error_rate、replay_success_rate、agent_failure_reason_count。这样它不是个人经验，而是团队机制。
+        boolean allCompensated = true;
+        for (SagaStep step : executed) {
+            try {
+                compensator.compensate(step);            // 执行补偿
+                step.setStatus(StepStatus.COMPENSATED);
+            } catch (Exception ex) {
+                log.error("补偿失败 step={}", step.getStepId(), ex);
+                step.setStatus(StepStatus.FAILED);
+                allCompensated = false;
+                // 补偿失败：告警人工介入
+                alertService.send("补偿失败 taskId=" + task.getTaskId()
+                    + " step=" + step.getStepId());
+            }
+        }
 
-## 九、专项架构深挖：对象、链路、失败模式
+        if (allCompensated) {
+            stateMachine.transition(task, COMPENSATED);
+            return TaskResult.compensated("任务失败已自动回滚");
+        } else {
+            stateMachine.transition(task, PAUSED_ERROR);
+            return TaskResult.needsManualIntervention("部分补偿失败，需人工处理");
+        }
+    }
+}
+```
 
-这一题不要停在“知道 Agent”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+### 2.4 补偿动作注册表
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 工具注册表、参数 schema、执行沙箱、审计日志；任务状态、重试策略、人工确认和成本预算；评测集和回放环境 |
-| 设计主线 | 工具要强 schema、强权限、强审计；执行过程可中断、可恢复、可回放；上线前用离线评测和线上灰度共同验证 |
-| 失败模式 | 参数不校验导致危险调用；调用链不可回放无法定位问题；成本预算缺失导致调用失控 |
-| 验证指标 | tool_schema_error_rate、replay_success_rate、agent_failure_reason_count、cost_budget_burn |
+```java
+@Component
+public class CompensateActionRegistry {
 
-**架构拆解**：
+    private final Map<String, CompensateAction> actions = new HashMap<>();
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 状态机 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 Agent 多步骤任务的状态机与补偿 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 补偿 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+    public CompensateActionRegistry(RefundService refundService,
+                                     InventoryService inventoryService,
+                                     CouponService couponService) {
+        // 每个有副作用的工具注册补偿
+        register("refund", "reverseRefund", refundService::reverse);
+        register("deductInventory", "rollbackInventory", inventoryService::rollback);
+        register("useCoupon", "releaseCoupon", couponService::release);
+        register("createShipment", "cancelShipment", shipmentService::cancel);
+        // 无副作用的工具无需补偿
+        // register("queryOrder", null, null);  -- 不注册
+    }
 
-**高分回答细节**：
+    public String getCompensateAction(String toolName) {
+        CompensateAction a = actions.get(toolName);
+        return a != null ? a.actionName : null;
+    }
+}
+```
 
-- 不要只说“可以用 Agent”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+## 三、机制层：幂等执行
 
-## 十、二轮场景追问与项目表达
+```java
+@Service
+public class IdempotentToolExecutor {
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+    private final RedisTemplate<String, String> redis;
+    private final ToolRegistry toolRegistry;
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+    public ToolResult executeIdempotent(ToolCall call, String idempotencyKey) {
+        // 1. 幂等检查：key 已存在直接返回缓存结果
+        String cached = redis.opsForValue().get("idem:" + idempotencyKey);
+        if (cached != null) {
+            return fromJson(cached);                // 重复执行返回上次结果
+        }
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“Agent 多步骤任务的状态机与补偿”，重点看 tool_schema_error_rate、replay_success_rate、agent_failure_reason_count，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+        // 2. 抢占 key（SETNX，TTL 24h）
+        Boolean acquired = redis.opsForValue().setIfAbsent(
+            "idem:" + idempotencyKey, "PROCESSING", Duration.ofHours(24));
+        if (Boolean.FALSE.equals(acquired)) {
+            // 其他线程正在执行，等待
+            return waitForResult(idempotencyKey);
+        }
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+        // 3. 执行工具
+        try {
+            ToolResult result = toolRegistry.execute(call);
+            redis.opsForValue().set("idem:" + idempotencyKey,
+                toJson(result), Duration.ofHours(24));
+            return result;
+        } catch (Exception e) {
+            redis.delete("idem:" + idempotencyKey);  // 失败释放 key 允许重试
+            throw e;
+        }
+    }
+}
+```
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 Agent 和 状态机 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+## 四、实战层：失败恢复场景
 
-### 追问 3：你如何判断这个方案值得做？
+**场景**：Agent 退货退款任务，5 个步骤，第 4 步退款失败
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 补偿 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+```
+Step 1: queryOrder(orderId=888)         → 已执行（无副作用，无需补偿）
+Step 2: checkReturnEligibility(orderId)  → 已执行（无副作用）
+Step 3: createReturnOrder(orderId)       → 已执行（有副作用，补偿=cancelReturnOrder）
+Step 4: refund(orderId, amount=1200)     → 失败（网络超时）
+Step 5: releaseInventory(orderId)        → 未执行
+```
 
-### STAR 项目表达
+**补偿流程**：
+```java
+// handleFailure 触发，逆序补偿 EXECUTED 且有 compensateAction 的步骤
+// Step 3 的补偿：cancelReturnOrder(orderId) → 退货单标记取消
+// Step 1/2 无 compensateAction，跳过
+// 补偿完成，任务状态 COMPENSATED，通知用户"退货退款失败，已取消退货单，请稍后重试"
+```
 
-- **S（背景）**：原系统在 Agent 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 Agent 多步骤任务的状态机与补偿 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 tool_schema_error_rate、replay_success_rate 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+**如果补偿也失败**（cancelReturnOrder 超时）：
+- 重试 3 次
+- 仍失败标记 PAUSED_ERROR，告警人工
+- 人工在后台手动取消退货单，标记任务 FAILED_MANUAL_RESOLVED
 
-### 二轮复盘清单
+## 五、底层本质：状态机 + Saga 是把非确定过程约束成可控系统
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+Agent 的多步执行和分布式事务（Saga）同构，但有三个特殊点：
 
-## 十一、面试官 5 个企业级追问
+1. **步骤动态决策**：传统 Saga 步骤预先编排，Agent 步骤由 LLM 每步动态决定。所以补偿动作不能预编译，要运行时注册（工具白名单里每个工具有对应补偿）。
 
-1. **你在真实项目里怎么判断“Agent 多步骤任务的状态机与补偿”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 tool_schema_error_rate、replay_success_rate、agent_failure_reason_count。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+2. **非确定重试**：LLM 决策可能失败后换工具（退款失败改用优惠券），不一定走补偿。要给 LLM 选择权——补偿 or 换路径，但都在状态机约束内。
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，Agent 是否真是瓶颈，状态机 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+3. **长任务中断恢复**：Agent 任务可能跑几分钟，期间服务重启。checkpoint 保证重启后能加载状态继续，但已执行的副作用要先查当前状态（退款是否真的没成功），避免重复执行或误补偿。
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 参数不校验导致危险调用。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 tool_schema_error_rate 和 replay_success_rate 做分钟级观察，一旦越过阈值立即止损。
+**核心设计原则**：每步执行前注册补偿（防执行后崩溃）、每步 checkpoint（防重启丢失）、工具幂等（防重试副作用）、补偿可重试（防补偿自身失败）。
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 补偿，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+## 六、AI 工程化深挖
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“Agent 多步骤任务的状态机与补偿”，至少要沉淀 工具注册表、参数 schema、执行沙箱、审计日志 的建模规范，以及 tool_schema_error_rate、replay_success_rate 的验收标准。
+1. **怎么用 LLM 辅助决策"补偿还是重试"？**
+   失败后把错误信息喂给 LLM，让它判断是瞬时故障（网络超时 → 重试）还是业务失败（余额不足 → 补偿或换路径）。LLM 输出决策（retry/compensate/abort），状态机执行。但高敏操作（资金）仍走规则，不信任 LLM 的"重试"建议。
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
+2. **多 Agent 协作的 Saga 怎么设计？**
+   多个 Agent 各负责一段流程（客服 Agent + 仓库 Agent + 财务 Agent），用分布式 Saga。每个 Agent 的任务有自己的 saga_log，全局协调者记录跨 Agent 的补偿链。一致性靠最终一致 + 对账兜底，不用强一致分布式事务。
 
-1. **如果把“Agent 多步骤任务的状态机与补偿”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 Agent 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
+3. **怎么评估 Agent 任务的可靠性？**
+   核心指标：task_completion_rate（成功率）、compensation_rate（触发补偿的比例，过高说明工具不稳）、compensation_success_rate（补偿自身成功率）、manual_intervention_rate（需人工介入的比例）、recovery_time（平均恢复时间）。
 
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“Agent 多步骤任务的状态机与补偿”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 tool_schema_error_rate、replay_success_rate 对业务链路的影响。
+4. **Agent 任务跑太久怎么处理？**
+   硬超时（如 10 分钟）强制终止 + 补偿。对于确实需要长时间的任务（如批量处理），拆成子任务 + 异步执行，用回调通知用户而非让用户等。监控 task_duration_p99，超阈值告警。
 
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 参数不校验导致危险调用，要能通过 trace、tool_call_id 和业务流水快速回放。
+5. **怎么回放 Agent 任务排查问题？**
+   checkpoint 完整保存 history（每步 LLM 的 thought + action + observation）和 saga_log。排查时按 taskId 加载完整轨迹，逐步重放看 LLM 决策链。traceId 贯穿所有工具调用，能下钻到下游服务。
 
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 七、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：带实习生的值班组长拿着任务清单、权限卡、审批单和操作记录，在处理“实习生很聪明但不能让他直接动生产”。
+抓 **"状态机、checkpoint、Saga 补偿、幂等"** 四个词。
 
-- **场景**：先说明“Agent 多步骤任务的状态机与补偿”服务于什么业务目标，不要上来就堆 Agent。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 参数不校验导致危险调用、调用链不可回放无法定位问题。
-- **验证**：最后落到 tool_schema_error_rate、replay_success_rate、agent_failure_reason_count，让面试官感觉你真的上线过。
-
-### 拟人化理解
-
-可以把“Agent 多步骤任务的状态机与补偿”想成一个带实习生的值班组长：Agent 是他的任务清单、权限卡、审批单和操作记录，状态机 是他面对的现场信号，补偿 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先限定工具，再逐步授权。这样记，比死背组件名更稳。
+- **状态机**：CREATED → RUNNING → PAUSED → SUCCEEDED/FAILED/COMPENSATED
+- **checkpoint**：每步持久化（history + sagaLog），失败从最近点恢复
+- **Saga 补偿**：有副作用工具注册 compensateAction，失败逆序补偿
+- **幂等**：idempotency_key 兜底，重复执行无副作用
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“Agent 多步骤任务的状态机与补偿”，我会这样答：我会先把 Agent 当成会建议、会调用工具但必须受控的执行体，重点讲权限、审批、状态和回放。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 参数不校验导致危险调用，所以我会提前设计灰度、监控和止损阈值，重点看 tool_schema_error_rate、replay_success_rate。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
+> Agent 多步任务我用状态机 + Saga 补偿。状态机是 CREATED → RUNNING → PAUSED → SUCCEEDED/FAILED/COMPENSATED，每步有前置校验防 LLM 跳步。每步执行后 checkpoint 到数据库（taskId + currentStep + history + sagaLog），服务重启能从最近 checkpoint 恢复。每个有副作用的工具注册补偿动作（refund 的补偿是 reverseRefund），执行前先注册到 sagaLog 防执行后崩溃无法补偿。第 4 步失败时，逆序补偿已执行的步骤（cancelReturnOrder），补偿失败重试 3 次仍失败告警人工。工具调用用 idempotency_key 幂等（SETNX Redis），重复执行返回上次结果不重复扣库存。失败策略分三档：瞬时失败重试（指数退避）、业务失败补偿、不可逆失败人工介入。核心指标 task_completion_rate、compensation_rate、manual_intervention_rate。
 
-### 被追问时的转场话术
+## 常见考点
 
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 tool_schema_error_rate 或 replay_success_rate 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
-
-### 反问面试官
-
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
-
+1. **Saga 和 TCC 区别？**——TCC 是 TRY-CONFIRM-CANCEL 三阶段预留资源；Saga 是正向执行 + 反向补偿不预留。Agent 适合 Saga（步骤动态决策无法预知全部步骤）。
+2. **补偿动作怎么保证执行？**——补偿失败重试 + 死信队列 + 告警人工。补偿动作本身要幂等（重复 cancelReturnOrder 不报错）。
+3. **checkpoint 太频繁影响性能怎么办？**——异步 checkpoint（执行不阻塞，写 DB 异步）。或每 N 步一次 checkpoint（牺牲恢复粒度换性能）。关键里程碑必 checkpoint。
+4. **Agent 决策跳步怎么拦？**——状态机强制前置校验。LLM 想 step1→step4，但 step4 前置是 step3，拒绝并提示"必须先完成 step3"。状态机配置 Map<step, prerequisites>。

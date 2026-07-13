@@ -1,6 +1,6 @@
 ---
 id: java-architect-126
-difficulty: L3
+difficulty: L2
 category: java-architect
 subcategory: 系统解耦
 tags:
@@ -9,259 +9,372 @@ tags:
 - 契约优先
 - 接口治理
 feynman:
-  essence: API 契约优先设计与 OpenAPI 治理的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: API 契约优先设计（Design-First）是指先写 OpenAPI 规范作为"机器可读的契约"，再生成桩代码、Mock、文档、SDK，最后双方按契约并行开发；OpenAPI 治理是在企业内部把"契约版本化、兼容性校验、Linter 规则、Mock/Stub、文档中心、SDK 自动下发"串成一条流水线，让契约成为服务端与客户端、上游与下游协作的唯一真相源（single source of truth）。
+  analogy: 像盖楼先出施工图纸（OpenAPI YAML），所有工种（前端、后端、QA、网关、文档）都按同一张图纸作业，不允许私自改承重墙。图纸变了要走变更评审（breaking change check），不兼容变更要发新版本号（v2），旧版本号保留 6 个月兼容期。
+  first_principle: 为什么不写完代码再用 swagger 注解生成文档？因为代码生成文档是"事后描述"，已经丢失了"契约约束力"——上游按旧接口调，下游改了字段没通知，集成阶段才发现不兼容。契约优先把"接口"从代码里抽出来变成独立工件，在 PR 阶段就能用 spectral/openapi-diff 拦截破坏性变更。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - Design-First：OpenAPI YAML 是工件，进 Git，参与 Code Review，先于代码
+  - 兼容性三类：non-breaking（加可选字段）、breaking（删字段/改类型/改必填）、risky（语义变化）
+  - 治理四件套：Linter（spectral）、Diff（openapi-diff）、Mock（prism/ventus）、SDK 生成（openapi-generator）
+  - "版本化：URL 路径版本（/v1/v2）最简单；媒体类型版本（Accept: application/vnd.x.v1+json）更优雅但难调试"
+  - 弃用流程：deprecated 标记 → sunset header → 监控调用方 → 邮件/合同通知 → 下线
 first_principle:
-  problem: 面对“API 契约优先设计与 OpenAPI 治理”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 微服务团队如何在不阻塞对方的前提下，保证 API 修改不破坏既有调用方？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 任何"代码即文档"的方案都滞后于真实集成——集成在代码完成前就开始了
+  - 大多数"线上事故"是隐性契约被破坏（字段必填变可选、枚举值删除、状态机迁移）
+  - API 一旦发布就有外部依赖，破坏性变更的成本随调用方数量指数增长
+  rebuild: 把 OpenAPI YAML 当作 Git 里的第一公民工件，PR 阶段跑 spectral 规则集（命名、错误码、分页、鉴权）+ openapi-diff 识别破坏性变更，CI 通过后用 prism 起 Mock 让前端先联调，用 openapi-generator 生成多语言 SDK 发到内网 Nexus。契约变更走独立的"契约 PR"，业务 PR 依赖契约 PR 合并。这样把"接口不兼容"从事故降为编译期失败。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - 为什么不用 GraphQL 替代 OpenAPI？——GraphQL 适合"客户端驱动、字段灵活、聚合多源"场景（如 App 首页），OpenAPI 适合"服务端主导、稳定契约、强类型"场景（如开放平台、内部 RPC）。两者并存，不是替代关系。
+  - 破坏性变更怎么平滑迁移？——双端点并行（/v1 和 /v2 共存）+ 流量比例监控 + sunset header + 调用方迁移 checklist + 强制下线日历。JD 开放平台要求 ISV 在 90 天内迁移，否则 sunset 后 401。
+  - OpenAPI 怎么跟 gRPC/Protobuf 协同？——内部用 gRPC（proto 是契约），网关用 grpc-gateway 或 buf 生成 OpenAPI 暴露给外部 REST 调用方。proto 是源头，OpenAPI 是派生工件。
+  - OpenAPI 文档怎么跟代码不漂移？——Design-First 模式下代码只是契约的实现，CI 跑 contract test（Pact/spring-cloud-contract）保证实现符合契约；Code-First 模式下用 swagger-inline 注解 + CI 校验注解和 YAML 一致。
+  - LLM Agent 接 API 用 OpenAPI 还是 Function Calling？——OpenAPI 可以自动转成 Function Calling Schema（如 OpenAI 的 actions / plugins），所以 OpenAPI 是 LLM 时代的"机器可读契约"基础，治理好的企业能直接把 API 喂给 Agent。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - Design-First：YAML 先行，PR 拦截 breaking change
+  - 治理流水线：spectral（lint）→ openapi-diff（兼容性）→ prism（mock）→ openapi-generator（SDK）
+  - 兼容性三档：non-breaking / breaking / risky；breaking 必须 bump version
+  - 版本策略：URL 路径版本（/v2）最常用，Sunset header 配合 90 天弃用窗口
+  - 工具链：Stoplight Studio / Redocly / Apifox 是商业方案，spectral/prism/openapi-generator 是开源
 ---
 
-# 【Java 后端架构师】API 契约优先设计与 OpenAPI 治理？
+# 【Java 后端架构师】API 契约优先设计与 OpenAPI 治理
 
-> 适用场景：高并发高可用。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。京东开放平台对外暴露 3000+ OpenAPI，ISV、商家工具、自营 App 都依赖这些接口；一次破坏性变更（如把 sku_id 从 Long 改成 String）会让数万个 ISV 应用集体挂掉。架构师面试不是问"OpenAPI 是什么"，而是看你能不能把契约做成 PR 期拦截的工件、把 breaking change 治理成可度量可下线的流程。
 
-## 一、先明确问题边界
+## 一、概念层
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**契约优先（Design-First）vs 代码优先（Code-First）**：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+| 维度 | Code-First（旧） | Design-First（推荐） |
+|------|-----------------|-------------------|
+| 工件来源 | Spring `@RestController` + swagger 注解生成 | 手写 OpenAPI YAML，再生成接口 stub |
+| 评审时机 | 代码合并后（已落地，难改） | YAML PR 阶段（轻量、易改） |
+| Mock 可用性 | 必须等服务启动 | YAML 一确定 prism 立刻起 Mock |
+| 兼容性校验 | 事后发现 | openapi-diff 在 CI 拦截 |
+| 客户端 SDK | 手写或脚手架 | openapi-generator 自动多语言 |
+| 文档漂移 | 注解和 YAML 容易不一致 | YAML 是唯一真相源 |
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 OpenAPI 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**OpenAPI 3.1 的关键能力**（面试加分）：
+- 3.1 完全对齐 JSON Schema 2020-12（之前是 OpenAPI 自定义子集）
+- 支持 `webhooks`（服务端推送契约）
+- 支持 `nullable` 已废弃，改用 `type: ["string", "null"]`
+- 支持 `oneOf/anyOf/allOf` 复杂建模
 
-## 二、推荐架构思路
+## 二、机制层：OpenAPI YAML 完整示例
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+**一份符合治理规范的 OpenAPI YAML**（JD 风格的订单查询接口）：
 
-## 三、技术落地点
+```yaml
+openapi: 3.1.0
+info:
+  title: JD Order OpenAPI
+  version: 2.1.0
+  contact: { email: order-openapi@jd.com }
+  license: { name: JD-Internal }
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+servers:
+  - url: https://api.jd.com/order/v2
+    description: prod
 
-## 四、常见坑
+tags:
+  - name: Order
+    description: 订单查询与状态流转
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+paths:
+  /orders/{orderId}:
+    get:
+      operationId: getOrderById
+      tags: [Order]
+      summary: 查询订单详情
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema: { type: string, pattern: '^JD\d{18}$' }
+        - name: X-Trace-Id
+          in: header
+          required: true
+          schema: { type: string, minLength: 8 }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+      security: [ { apiKeyAuth: [] } ]
+      deprecated: false
 
-## 五、面试回答模板
+components:
+  securitySchemes:
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-JD-Access-Token
+  responses:
+    BadRequest:
+      description: 参数错误
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    RateLimited:
+      description: 限流
+      headers:
+        X-RateLimit-Limit: { schema: { type: integer } }
+        X-RateLimit-Remaining: { schema: { type: integer } }
+        Sunset: { schema: { type: string } }
+  schemas:
+    Order:
+      type: object
+      required: [orderId, status, amount]
+      properties:
+        orderId: { type: string }
+        status:
+          type: string
+          enum: [CREATED, PAID, SHIPPED, DELIVERED, CLOSED]
+        amount:
+          type: number
+          format: double
+          minimum: 0
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/OrderItem' }
+    OrderItem:
+      type: object
+      required: [skuId, quantity]
+      properties:
+        skuId: { type: string }
+        quantity: { type: integer, minimum: 1 }
+    Error:
+      type: object
+      required: [code, message, traceId]
+      properties:
+        code: { type: string, example: 'ORDER_NOT_FOUND' }
+        message: { type: string }
+        traceId: { type: string }
+```
 
-可以按下面结构作答：
+## 三、机制层：治理流水线四件套
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“API 契约优先设计与 OpenAPI 治理”，核心是 OpenAPI 与 契约优先 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+```
+开发者写 YAML ─┬─► spectral lint（规则集校验）
+               │
+               ├─► openapi-diff（识别 breaking change，CI 失败）
+               │
+               ├─► prism mock（前端立刻联调）
+               │
+               └─► openapi-generator（生成 Java/Go/TS SDK，发 Nexus）
+```
 
-## 六、加分点
+**1. Spectral Lint 规则集**（强制规范）：
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+```yaml
+# .spectral.yaml
+extends: [[spectral:oas, all]]
+rules:
+  jd-operation-id-required:
+    description: 必须 operationId
+    given: $.paths.*.*.operationId
+    severity: error
+    then: { function: truthy }
+  jd-error-response:
+    description: 4xx/5xx 必须用 Error schema
+    given: $.paths.*.*.responses.[*].content.*.schema
+    severity: error
+    then:
+      function: schema
+      functionOptions:
+        $ref: '#/components/schemas/Error'
+  jd-naming-kebab-case:
+    description: path 用 kebab-case
+    given: $.paths.*~
+    severity: warn
+    then: { function: pattern, functionOptions: { match: '^(/[a-z0-9-]+|/{[^}]+})+$' } }
+```
 
-## 七、企业级面试定位：从“会用”到“能负责”
+```bash
+spectral lint order-openapi.yaml
+# 输出：3 errors, 1 warning → CI 失败，PR 拒绝合并
+```
 
-企业级面试不会只问“OpenAPI 是什么”，而是看你能不能对一条真实生产链路负责。回答“API 契约优先设计与 OpenAPI 治理”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+**2. openapi-diff 识别破坏性变更**：
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 高并发高可用 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 OpenAPI、契约优先、接口治理 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 success_rate、latency_p99、error_rate、backlog_size 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+```bash
+oasdiff breaking old.yaml new.yaml
+# 输出：
+# - BREAKING: Removed property 'Order.amount' (required)
+# - BREAKING: Changed type of 'OrderItem.skuId' from integer to string
+# - NON-BREAKING: Added optional property 'Order.couponCode'
+```
 
-### 企业级回答骨架
+破坏性变更分类（这是治理的核心，必须能背）：
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 OpenAPI 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+| 变更类型 | 例子 | 处理 |
+|---------|------|------|
+| Breaking（必须 bump version） | 删字段、改类型、required 变化、删 enum 值、改 URL 路径 | 新版本 v2，旧版本保留 90 天 |
+| Non-breaking | 加可选字段、加新接口、加 enum 值 | 同版本迭代即可 |
+| Risky（人工评审） | 字段语义变化（status 含义改了）、限流阈值降低 | 标记并通知调用方 |
 
-### 面试中要主动补的生产细节
+**3. Prism Mock 起本地联调**：
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+```bash
+prism mock order-openapi.yaml --port 4010
+# 前端立刻能调 http://localhost:4010/orders/JD001，返回 example 数据
+# 还能用 prism proxy 录制真实请求做 contract test
+```
 
-## 八、苏格拉底式面试追问
+**4. openapi-generator 生成多语言 SDK**：
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+```bash
+openapi-generator-cli generate \
+  -i order-openapi.yaml \
+  -g java \
+  -o sdk-java \
+  --additional-properties=useJakartaEe=true,library=resttemplate
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“API 契约优先设计与 OpenAPI 治理”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 success_rate、latency_p99、error_rate、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 OpenAPI 负责的范围，以及必须依赖 契约优先、接口治理 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 边界不清导致跨服务强耦合，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+# CI 自动发到内网 Nexus：
+# <dependency>
+#   <groupId>com.jd.openapi</groupId>
+#   <artifactId>order-sdk</artifactId>
+#   <version>2.1.0</version>
+# </dependency>
+```
 
-### 现场对话示例
+## 四、实战层/选型：版本化与弃用流程
 
-**面试官**：你说要做“API 契约优先设计与 OpenAPI 治理”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 success_rate、latency_p99、业务失败率和事故记录。
+**版本化策略对比**：
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 success_rate 没有改善，或者 latency_p99 反而变差，就停止扩大范围，回到假设层重新复盘。
+| 策略 | 例子 | 优点 | 缺点 |
+|------|------|------|------|
+| URL 路径版本（最常用） | `/orders/v2/{id}` | 直观、易路由、CDN 缓存友好 | 版本污染 URL |
+| Header 版本 | `Accept: application/vnd.jd.v2+json` | URL 干净 | 难调试、CDN 不友好 |
+| Query 版本 | `?version=2` | 简单 | 易被忽略、缓存坑 |
+| 日期版本（AWS 风格） | `?api-version=2024-01-15` | 自带发布日期 | 学习成本 |
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 success_rate、latency_p99、error_rate。这样它不是个人经验，而是团队机制。
+JD 开放平台用 URL 路径版本，原因是 ISV 接入文档更直观。
 
-## 九、专项架构深挖：对象、链路、失败模式
+**弃用（Sunset）流程**（RFC 8594）：
 
-这一题不要停在“知道 OpenAPI”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+```
+1. 新版本上线 v2，旧版本 v1 标记 deprecated: true
+2. v1 响应头加 Sunset: Sat, 31 Dec 2025 23:59:59 GMT
+3. 监控 v1 调用方列表（按 appKey 维度统计）
+4. 邮件 + 控制台告警通知未迁移 ISV
+5. 90 天后下线 v1，返回 410 Gone
+```
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 核心业务对象、状态机、读写链路、依赖拓扑；幂等键、版本号、审计流水、补偿任务；监控指标、压测模型、灰度开关 |
-| 设计主线 | 主链路保持简单可靠，非核心能力异步解耦；状态变化必须有唯一约束、版本控制和补偿兜底；所有关键方案都要能灰度、观测和回滚 |
-| 失败模式 | 边界不清导致跨服务强耦合；异常链路没有补偿和告警；只优化技术指标但遗漏业务正确性 |
-| 验证指标 | success_rate、latency_p99、error_rate、backlog_size |
+**Spring 服务端实现契约**（用 springdoc 强制 Design-First）：
 
-**架构拆解**：
+```java
+// 不允许写 @RestController 后再用 @Operation 注解生成文档
+// 必须先有 YAML，再用接口 stub 实现
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 契约优先 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 API 契约优先设计与 OpenAPI 治理 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 接口治理 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+// openapi-generator 生成的 stub：
+@Generated
+public interface OrderApi {
+    @GetMapping(value = "/orders/{orderId}")
+    Order getOrderById(@PathVariable String orderId,
+                       @RequestHeader("X-Trace-Id") String traceId);
+}
 
-**高分回答细节**：
+// 业务实现：
+@RestController
+public class OrderController implements OrderApi {
+    @Autowired private OrderService orderService;
 
-- 不要只说“可以用 OpenAPI”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+    @Override
+    public Order getOrderById(String orderId, String traceId) {
+        return orderService.query(orderId);
+    }
+}
+```
 
-## 十、二轮场景追问与项目表达
+## 五、底层本质：契约即权力分配
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+回到第一性：**API 契约的本质是组织协作的"权力分配工具"**。
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+- **没有契约治理**：服务端团队单方面改接口，客户端被动适配，事故在集成阶段爆发，责任不清。
+- **有契约治理**：契约变更走 PR 评审，破坏性变更必须 bump version，调用方有 90 天窗口迁移。契约成了"双方签字的合同"。
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“API 契约优先设计与 OpenAPI 治理”，重点看 success_rate、latency_p99、error_rate，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+**为什么 OpenAPI 比 GraphQL/Thrift IDL/Protobuf 在外部开放场景更主流**：因为 OpenAPI 用 JSON/YAML 描述、生态最大（生成器、Linter、文档、Mock、API 网关、APM 全部原生支持）、HTTP 兼容性最好（ISV 用 curl 都能调）。Protobuf 是内部 RPC 高效契约，但外部开放场景的"通用语言"仍是 OpenAPI。
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+**LLM 时代的新角色**：OpenAPI YAML 现在可以直接转成 Function Calling 的 JSON Schema（OpenAI Plugins、Anthropic Tool Use 都支持），所以治理好的 OpenAPI 库 = LLM Agent 可以即插即用的工具集。这是为什么 OpenAPI 治理在 2024 后突然变成 AI Infra 的基础。
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 OpenAPI 和 契约优先 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+## 六、AI 架构师加问：5 个
 
-### 追问 3：你如何判断这个方案值得做？
+1. **把 OpenAPI 喂给 LLM Agent 当工具集，最大风险是什么？**
+   Prompt Injection 让 Agent 调用未授权接口（如把 query 误当成 delete）。治理：OpenAPI 里给每个 operation 打 `x-llm-safe: query-only` 标签，Agent 网关只暴露 safe 接口；写操作必须走人工确认。
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 接口治理 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+2. **用 LLM 自动生成 OpenAPI YAML，可行吗？**
+   可行但必须人工 review。LLM 擅长从已有接口反推契约，但不擅长捕捉业务语义（枚举值含义、必填业务规则）。落地：LLM 生成草案 → spectral lint 自动校验 → 资深工程师 review 业务语义。
 
-### STAR 项目表达
+3. **OpenAPI → Function Calling 的转换怎么处理枚举和大 schema？**
+   枚举直接转 enum 字段；大 schema（>32KB）需要拆分或用 JSON Schema `$ref` + 工具调用前先调 `/describe` 拉取。OpenAI 当前单次 tool schema 限制 32K tokens，要给 LLM 一个"API 目录"接口让它按需拉。
 
-- **S（背景）**：原系统在 OpenAPI 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 API 契约优先设计与 OpenAPI 治理 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 success_rate、latency_p99 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+4. **LLM Agent 调 OpenAPI 怎么做鉴权？**
+   Agent 用 client_credentials 拿 Access Token，scope 限定可调接口。高危操作（资金、删除）要求 user_assertion（用户显式授权一次）。所有 Agent 调用进 audit log，关联 traceId + tool_call_id。
 
-### 二轮复盘清单
+5. **怎么用 LLM 检测 OpenAPI 契约的"语义破坏性变更"？**
+   oasdiff 只能检测结构破坏，检测不了语义破坏（status=PAID 含义变了）。LLM 读 commit message + 字段注释 + 业务文档，对比新旧版本语义差异，输出"语义变更风险报告"供人工 review。
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
-
-## 十一、面试官 5 个企业级追问
-
-1. **你在真实项目里怎么判断“API 契约优先设计与 OpenAPI 治理”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 success_rate、latency_p99、error_rate。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
-
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，OpenAPI 是否真是瓶颈，契约优先 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
-
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 边界不清导致跨服务强耦合。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 success_rate 和 latency_p99 做分钟级观察，一旦越过阈值立即止损。
-
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 接口治理，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
-
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“API 契约优先设计与 OpenAPI 治理”，至少要沉淀 核心业务对象、状态机、读写链路、依赖拓扑 的建模规范，以及 success_rate、latency_p99 的验收标准。
-
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“API 契约优先设计与 OpenAPI 治理”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 OpenAPI 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“API 契约优先设计与 OpenAPI 治理”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 success_rate、latency_p99 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 边界不清导致跨服务强耦合，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 七、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：经验丰富的值班负责人拿着工具箱、调度台和应急预案，在处理“业务流量和系统风险同时出现”。
+抓 **"Design-First、四件套、兼容性三档、弃用 Sunset"**。
 
-- **场景**：先说明“API 契约优先设计与 OpenAPI 治理”服务于什么业务目标，不要上来就堆 OpenAPI。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 边界不清导致跨服务强耦合、异常链路没有补偿和告警。
-- **验证**：最后落到 success_rate、latency_p99、error_rate，让面试官感觉你真的上线过。
+- **Design-First**：YAML 先于代码，PR 阶段就评审
+- **四件套**：spectral（lint）→ openapi-diff（兼容性）→ prism（mock）→ openapi-generator（SDK）
+- **兼容性三档**：non-breaking 同版本、breaking bump version、risky 人工评审
+- **弃用**：deprecated 标记 → Sunset header → 90 天迁移 → 410 Gone
 
 ### 拟人化理解
 
-可以把“API 契约优先设计与 OpenAPI 治理”想成一个经验丰富的值班负责人：OpenAPI 是他的工具箱、调度台和应急预案，契约优先 是他面对的现场信号，接口治理 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看指标，再控风险，最后谈优化。这样记，比死背组件名更稳。
+把 OpenAPI 治理想象成 **建筑设计院的施工图纸管理**。YAML 是图纸，进版本控制系统（Git）。每次改图纸要走过审（spectral）和结构审查（oasdiff），破坏性改动（拆承重墙）必须出新版图（v2）。旧版图纸保留 90 天，让施工队有时间切换。Mock 是按图纸搭的样板房，前端先住进去体验。SDK 是按图纸预制的构件，运到工地直接拼装。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“API 契约优先设计与 OpenAPI 治理”，我会这样答：我会先确认业务目标、规模、SLA 和一致性要求，再选择合适的架构手段。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 边界不清导致跨服务强耦合，所以我会提前设计灰度、监控和止损阈值，重点看 success_rate、latency_p99。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 success_rate 或 latency_p99 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> 我们走 Design-First：OpenAPI YAML 进 Git，PR 阶段跑 spectral lint（命名规范、必填 operationId、统一 Error schema）+ openapi-diff 识别 breaking change。CI 通过后 prism 起 Mock 让前端并行联调，openapi-generator 自动生成 Java/Go/TS SDK 发到 Nexus。兼容性分三档：non-breaking 同版本迭代，breaking 必须 bump version（URL 路径版本最直观），risky 人工评审。弃用流程严格按 RFC 8594：标 deprecated → Sunset header → 90 天迁移 → 410 Gone。最大的坑是 Code-First 模式下注解和契约漂移，所以强制 stub 模式——controller 必须 implements 生成的接口，编译器保证契约一致。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司内部服务间用 gRPC 还是 REST？对外用 OpenAPI 暴露还是用 GraphQL？如果两个都有，怎么保证 proto 和 OpenAPI 不漂移？是 grpc-gateway 自动转还是双份维护？
 
+## 八、苏格拉底式面试追问（7 层表格 + 现场对话）
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 你为什么坚持 Design-First 而不是 Code-First？ | 用集成阶段返工成本说话：Code-First 在集成期才发现不兼容，返工成本 = 前后端工时 + 测试工时；Design-First 在 PR 阶段拦截，成本只是改 YAML。JD 实测：Design-First 让 OpenAPI 集成期 bug 数下降 60% |
+| 证据追问 | 怎么证明治理流水线有效？ | contract_violation_count（CI 拦截的破坏性变更数）应该 > 0 才证明规则有效；mock_first_ratio（前端是否先调 mock 再调真实接口）应 > 80%；sdk_auto_generated_ratio 应 100% |
+| 边界追问 | OpenAPI 能描述异步回调、长任务、流式吗？ | 3.1 支持 webhooks（服务端推送契约）；流式用 `text/event-stream` 但没有 schema 描述，需要 OpenAI 风格的额外约定。所以 OpenAPI 不是万能，复杂异步场景要配 AsyncAPI |
+| 反例追问 | 什么场景你不推荐 Design-First？ | 创业期 POC 阶段、内部单体应用、调用方只有自己团队——契约约束的收益小于写 YAML 的成本。这种场景 Code-First + 注解生成文档更高效 |
+| 风险追问 | 治理流水线最大风险是什么？ | LLM 时代新风险：开发者让 AI 生成 YAML 跳过 spectral 规则集，导致规范形同虚设。要给 AI 输入规则集 + CI 强制二次校验 |
+| 验证追问 | 怎么证明 contract test 真的覆盖了所有路径？ | 用 schema coverage 工具（如 schemathesis）自动基于 OpenAPI 生成测试用例，报告覆盖率；contract_violation_count 应随时间下降 |
+| 沉淀追问 | 团队治理规范沉淀什么？ | 公共 components（Error、Pagination、TraceId）、spectral 规则集、openapi-generator 配置模板、SDK 发布流水线、API 文档门户（Redocly/Stoplight）、弃用流程 SOP |
+
+### 现场对话示例
+
+**面试官**：你说 Design-First 好，但写 YAML 比写代码慢多了，怎么说服团队？
+
+**候选人**：我会算三笔账。第一，集成返工账：Code-First 模式下我们统计过 OpenAPI 类项目的集成 bug 平均 1.4 个/接口，每个返工 0.5 人天；Design-First 下降到 0.5 个/接口。第二，并行开发账：YAML 一确定 prism 立刻起 Mock，前端不用等后端实现，前后端能并行 2-3 周。第三，治理账：现在不写 YAML，未来 breaking change 是定时炸弹。具体落地我不让团队从零写 YAML——给他们 IDE 插件（Stoplight Studio 可视化编辑）+ 模板（脚手架生成基础 YAML）+ AI 辅助（LLM 根据自然语言描述生成草案）。把单接口的 YAML 撰写时间从 30 分钟压到 5 分钟。
+
+**面试官**：怎么处理 ISV 强烈反对的 breaking change？
+
+**候选人**：分情况。如果是安全/合规原因（如鉴权升级），强制执行 + 给 90 天迁移窗口 + 提供自动化迁移工具。如果是业务演进（如拆分接口），我会先做"双写"——新接口 v2 上线，v1 内部转发到 v2 再转换格式，ISV 无感知。如果是 ISV 主动要求的，给申请通道。Sunset 之前必须有三个信号：v1 调用量下降到阈值以下、邮件确认所有头部 ISV 已迁移、灰度关闭 v1 一周观察无客诉。任何一项不满足就推迟下线。
+
+**面试官**：OpenAPI 和 GraphQL 怎么选？
+
+**候选人**：不是二选一。OpenAPI 是服务端主导契约，适合"对外稳定承诺、强类型、有 SLA"的场景（开放平台、内部核心 RPC、合规审计）。GraphQL 是客户端驱动契约，适合"字段灵活、聚合多源、App 首页动态化"场景。京东的实际做法是：内部服务用 gRPC（proto 是契约），网关用 grpc-gateway 转出 OpenAPI 给 ISV 用，App 首页这种聚合场景用 BFF 层包 GraphQL。三者各司其职，OpenAPI 是外部契约的语言。
+
+## 常见考点
+
+1. **OpenAPI 3.0 vs 3.1 区别？**——3.1 完全对齐 JSON Schema 2020-12，支持 `type: ["string","null"]` 替代 `nullable: true`，支持 webhooks，支持 const 编码枚举。
+2. **breaking change 判定规则？**——加必填字段、删字段、改类型、收紧 enum、删 response code 都是 breaking；加可选字段、加 enum 值、加新接口都是 non-breaking。
+3. **Linter 规则集怎么设计？**——三层：语法层（spectral:oas 内置）、规范层（公司命名/错误码/分页规范）、安全层（必填鉴权、禁用 query 传敏感字段）。
+4. **OpenAPI 怎么描述分页？**——用 `nextCursor` 游标分页（避免 offset 大表性能问题），response 里 `x-page-next` 字段；或在 header 用 `Link: <url>; rel="next"`。
+5. **怎么自动生成 SDK？**——openapi-generator-cli 支持 50+ 语言，CI 流水线拉 YAML → generate → publish 到 Nexus/npm/PyPI。版本号和 OpenAPI version 一一对应。

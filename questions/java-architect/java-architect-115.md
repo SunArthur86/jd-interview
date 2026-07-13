@@ -6,262 +6,423 @@ subcategory: 可观测性
 tags:
 - Java 架构师
 - OpenTelemetry
-- Tracing
-- Metrics
+- 分布式追踪
+- W3C TraceContext
 feynman:
-  essence: OpenTelemetry 在 Java 微服务中的落地的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: OpenTelemetry（OTel）是 CNCF 的可观测性统一标准，三件事——Trace（链路）/Metrics（指标）/Logs（日志）的采集 SDK + 数据格式（OTLP 协议）。本质是解决厂商锁定：应用代码只调 OTel API，数据通过 OTLP 协议发到 Collector，Collector 转发到任意后端（Jaeger/Tempo/SkyWalking/Datadog）。换后端不改应用代码。
+  analogy: 像 USB-C 标准——设备（应用）只有 USB-C 接口（OTel API），通过转接头（Collector）连到任意显示器（Jaeger/Tempo/SkyWalking）。换显示器不用换设备。
+  first_principle: 分布式追踪的本质是"把一次请求在多个服务间的因果关系重建出来"。OTel 用 trace context（W3C traceparent：traceId-spanId-flags）在服务间传播，每个 span 记录一段处理，通过 parentSpanId 串成树。指标和日志共享 traceId，三支柱可联动下钻。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - OTel 三支柱：Trace / Metrics / Logs（统一标准）
+  - W3C TraceContext（traceparent header）跨服务传播
+  - Span = 操作单元（traceId + spanId + parentSpanId 串成树）
+  - OTLP 协议（gRPC/HTTP）发到 Collector
+  - Collector 做转发/采样/脱敏（应用无感）
+  - Java Agent 字节码注入（无侵入采集）
 first_principle:
-  problem: 面对“OpenTelemetry 在 Java 微服务中的落地”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 微服务架构下一次请求穿过 10+ 服务，出问题怎么定位是哪个服务？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 每个服务独立日志，没有统一 ID 无法关联
+  - 追踪要重建"调用链"（谁调谁、耗时多少、哪里慢）
+  - 不同监控后端（Jaeger/SkyWalking）格式不兼容，厂商锁定
+  rebuild: "OTel 定义三件事统一标准。① API：应用调 OTel API 创建 span（traceId/spanId/parentSpanId）。② 传播：W3C TraceContext（traceparent: 00-{traceId}-{spanId}-{flags}）在 HTTP header/gRPC metadata/MQ 消息属性间透传。③ 协议：OTLP 发到 Collector。Collector 做转发/采样/脱敏，推到任意后端。Java 用 Agent 字节码注入（无侵入给 HTTP/JDBC/Redis 加 span），业务代码零改动。"
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - OTel 和 SkyWalking / Jaeger 区别？——OTel 是标准（API+协议），SkyWalking/Jaeger 是后端（存储+UI）。OTel 替代各家私有 SDK，后端可切换
+  - "W3C TraceContext 长啥样？——`traceparent: 00-{version}-{traceId-32hex}-{spanId-16hex}-{flags-2hex}`。traceId 全局唯一，spanId 本地唯一，flags 控制采样"
+  - 采样策略？——头部采样（TraceIDRatio，按比例，简单但可能漏关键）/尾部采样（Collector 决策，可保留全错误链路，但需缓存全链路）
+  - Java Agent 原理？——Instrumentation API 在类加载时改字节码，给 HTTP client/server、JDBC、Kafka 等加 span 创建逻辑。业务代码无感
+  - 三支柱怎么联动？——Metrics 告警 → 通过 exemplar 关联 trace → trace 看慢在哪 → traceId 关联 logs 看具体日志
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - OTel 是 CNCF 可观测性统一标准（Trace/Metrics/Logs）
+  - W3C TraceContext：traceparent header 跨服务传播
+  - Span = traceId + spanId + parentSpanId（串成树）
+  - OTLP 协议发到 Collector，Collector 转发任意后端
+  - Java Agent 字节码注入（无侵入）
+  - 采样：头部（TraceIDRatio）vs 尾部（Collector 决策）
+  - 三支柱联动：Metrics → Exemplar → Trace → Logs
 ---
 
-# 【Java 后端架构师】OpenTelemetry 在 Java 微服务中的落地？
+# 【Java 后端架构师】OpenTelemetry 在 Java 微服务中的落地
 
-> 适用场景：高并发高可用。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。订单服务下单链路穿过网关、订单、库存、支付、券、风控 6 个服务，P99 抖动无法定位。架构师必须用 OpenTelemetry 建立统一分布式追踪，让一次请求的调用链可视化，且可切换后端（Jaeger → Tempo）不改代码。
 
-## 一、先明确问题边界
+## 一、概念层：OpenTelemetry 的三支柱与传播机制
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**OpenTelemetry 是什么**：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+```
+应用（OTel API + SDK）
+   │  OTLP（gRPC/HTTP）
+   ▼
+OTel Collector（转发/采样/脱敏/批处理）
+   │
+   ┌──────────┬──────────┬──────────┬──────────┐
+   ▼          ▼          ▼          ▼          ▼
+Jaeger/Tempo  Prometheus  Loki/ES   SkyWalking  Datadog
+（Trace）     （Metrics）  （Logs）   （全栈）    （SaaS）
+```
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 OpenTelemetry 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**OTel 三支柱**（这张表面试必问）：
 
-## 二、推荐架构思路
+| 支柱 | 数据模型 | 解决问题 | 后端示例 |
+|------|---------|---------|---------|
+| **Trace** | Span（traceId/spanId/parentSpanId） | 调用链定位 | Jaeger / Tempo / Zipkin |
+| **Metrics** | Counter/Gauge/Histogram | 大盘监控 + 告警 | Prometheus / Mimir |
+| **Logs** | LogRecord（带 traceId） | 具体日志排查 | Loki / Elasticsearch |
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+**核心概念：Span 的结构**：
 
-## 三、技术落地点
+```json
+{
+  "traceId": "abc123...（32 hex，全局唯一）",
+  "spanId": "def456...（16 hex，本地唯一）",
+  "parentSpanId": "aaa111...",       // 父 span，串成调用树
+  "name": "OrderService.createOrder",
+  "kind": "SERVER",                  // SERVER/CLIENT/INTERNAL/PRODUCER/CONSUMER
+  "startTime": 1690000000000000000,  // 纳秒时间戳
+  "endTime": 1690000000123000000,    // 123ms
+  "attributes": {                    // 业务标签（可查询）
+    "http.method": "POST",
+    "http.url": "/orders",
+    "http.status_code": 200,
+    "orderId": "ORD12345"
+  },
+  "events": [                        // 事件（日志点）
+    {"name": "cache-miss", "timestamp": "..."}
+  ],
+  "status": {"code": "OK"}           // OK / ERROR
+}
+```
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+**W3C TraceContext 传播**：
 
-## 四、常见坑
+```http
+# HTTP Header（跨服务传播 traceId）
+traceparent: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01
+             │  │                                  │              │
+             │  │ traceId（32 hex）                 │ spanId(16hex)│ flags（01=采样）
+             │                                    （父 span）     
+             version（00）
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+tracestate: vendor=value,...    # 厂商扩展（可选）
+baggage: userId=123,env=prod    # 业务上下文（跨服务透传）
+```
 
-## 五、面试回答模板
+## 二、机制层：Java Agent 无侵入接入
 
-可以按下面结构作答：
+**启动方式（推荐 Java Agent）**：
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“OpenTelemetry 在 Java 微服务中的落地”，核心是 OpenTelemetry 与 Tracing 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+```bash
+# Dockerfile
+ENV JAVA_TOOL_OPTIONS="-javaagent:/opt/opentelemetry-agent.jar"
 
-## 六、加分点
+# 启动参数
+java -javaagent:opentelemetry-javaagent.jar \
+     -Dotel.service.name=order-service \
+     -Dotel.exporter.otlp.endpoint=http://otel-collector:4317 \
+     -Dotel.exporter.otlp.protocol=grpc \
+     -Dotel.traces.exporter=otlp \
+     -Dotel.metrics.exporter=otlp \
+     -Dotel.logs.exporter=otlp \
+     -jar order-service.jar
+```
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+**自动埋点的库（Instrumentation 库，零代码改动）**：
 
-## 七、企业级面试定位：从“会用”到“能负责”
+| 库 | 自动采集 |
+|----|---------|
+| Spring MVC / WebFlux | HTTP server span（method/url/status） |
+| HttpClient / OkHttp / RestTemplate | HTTP client span |
+| JDBC / HikariCP | DB 查询 span（SQL 摘要） |
+| Redis Lettuce / Jedis | Redis 命令 span |
+| Kafka Producer / Consumer | MQ 消息 span（PRODUCER/CONSUMER） |
+| gRPC | gRPC 调用 span |
+| MongoDB / Elasticsearch | NoSQL 查询 span |
 
-企业级面试不会只问“OpenTelemetry 是什么”，而是看你能不能对一条真实生产链路负责。回答“OpenTelemetry 在 Java 微服务中的落地”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+**手动埋点（业务关键节点）**：
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 高并发高可用 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 OpenTelemetry、Tracing、Metrics 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 success_rate、latency_p99、error_rate、backlog_size 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+```java
+// 方式 1：@WithSpan 注解（推荐）
+@WithSpan(value = "createOrder", kind = SpanKind.INTERNAL)
+public Order createOrder(
+        @SpanAttribute("orderId") String orderId,
+        @SpanAttribute("userId") String userId) {
+    // 自动创建 span，参数作为 attribute
+    return doCreate(orderId, userId);
+}
 
-### 企业级回答骨架
+// 方式 2：手动 API
+public Order createOrder(String orderId) {
+    Tracer tracer = GlobalOpenTelemetry.getTracer("order-service");
+    Span span = tracer.spanBuilder("createOrder")
+        .setSpanKind(SpanKind.INTERNAL)
+        .setAttribute("orderId", orderId)
+        .startSpan();
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 OpenTelemetry 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+    try (Scope scope = span.makeCurrent()) {
+        Order order = doCreate(orderId);
+        span.setStatus(StatusCode.OK);
+        return order;
+    } catch (Exception e) {
+        span.recordException(e);           // 记录异常
+        span.setStatus(StatusCode.ERROR, e.getMessage());
+        throw e;
+    } finally {
+        span.end();
+    }
+}
 
-### 面试中要主动补的生产细节
+// 添加事件（日志点）
+span.addEvent("cache-miss", Attributes.of(
+    AttributeKey.stringKey("key"), "order:" + orderId
+));
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+// 添加 baggage（跨服务透传业务上下文）
+Baggage.current().toBuilder()
+    .put("userId", userId)
+    .put("vipLevel", "gold")
+    .build()
+    .makeCurrent();
+```
 
-## 八、苏格拉底式面试追问
+**Collector 配置（接收 + 处理 + 转发）**：
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+```yaml
+# otel-collector-config.yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“OpenTelemetry 在 Java 微服务中的落地”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 success_rate、latency_p99、error_rate、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 OpenTelemetry 负责的范围，以及必须依赖 Tracing、Metrics 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 边界不清导致跨服务强耦合，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+processors:
+  batch:                              # 批处理（减少请求次数）
+    timeout: 5s
+    send_batch_size: 1000
+  memory_limiter:                     # 内存限流（防 OOM）
+    check_interval: 1s
+    limit_mib: 512
+  attributes:                         # 脱敏（删敏感字段）
+    actions:
+      - key: http.request.header.authorization
+        action: delete
+  resource:                           # 加全局标签
+    attributes:
+      - key: deployment.environment
+        value: prod
+        action: upsert
+  tail_sampling:                      # 尾部采样
+    policies:
+      - name: errors                  # 保留所有错误链路
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      - name: slow                    # 保留慢请求（> 1s）
+        type: latency
+        latency:
+          threshold_ms: 1000
+      - name: random                  # 10% 随机采样
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
 
-### 现场对话示例
+exporters:
+  otlp/jaeger:                        # Trace 发 Jaeger
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  prometheusremotewrite:              # Metrics 发 Prometheus
+    endpoint: http://mimir:9009/api/v1/push
+  loki:                               # Logs 发 Loki
+    endpoint: http://loki:3100/loki/api/v1/push
 
-**面试官**：你说要做“OpenTelemetry 在 Java 微服务中的落地”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 success_rate、latency_p99、业务失败率和事故记录。
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes, resource, tail_sampling, batch]
+      exporters: [otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [prometheusremotewrite]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes, batch]
+      exporters: [loki]
+```
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 success_rate 没有改善，或者 latency_p99 反而变差，就停止扩大范围，回到假设层重新复盘。
+## 三、实战层：下单链路追踪
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 success_rate、latency_p99、error_rate。这样它不是个人经验，而是团队机制。
+**链路传播（HTTP → Service → MQ）**：
 
-## 九、专项架构深挖：对象、链路、失败模式
+```
+[网关] traceId=A, spanId=1
+   │ traceparent: 00-A-1-01
+   ▼
+[订单服务] traceId=A, spanId=2, parentSpanId=1
+   │ HTTP 调用库存
+   │ traceparent: 00-A-3-01（生成新 spanId=3）
+   ▼
+[库存服务] traceId=A, spanId=4, parentSpanId=3
+   │ Kafka 发消息
+   │ traceparent 注入 Kafka header
+   ▼
+[券消费者] traceId=A, spanId=5, parentSpanId=（Kafka producer span）
+```
 
-这一题不要停在“知道 OpenTelemetry”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+**异步上下文传播（关键陷阱）**：
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 核心业务对象、状态机、读写链路、依赖拓扑；幂等键、版本号、审计流水、补偿任务；监控指标、压测模型、灰度开关 |
-| 设计主线 | 主链路保持简单可靠，非核心能力异步解耦；状态变化必须有唯一约束、版本控制和补偿兜底；所有关键方案都要能灰度、观测和回滚 |
-| 失败模式 | 边界不清导致跨服务强耦合；异常链路没有补偿和告警；只优化技术指标但遗漏业务正确性 |
-| 验证指标 | success_rate、latency_p99、error_rate、backlog_size |
+```java
+// 陷阱：线程池丢上下文
+ExecutorService executor = Executors.newFixedThreadPool(10);
+executor.submit(() -> {
+    // 这里 traceId 丢了！新线程没有上下文
+    orderService.process(orderId);
+});
 
-**架构拆解**：
+// 正确：用 ContextWrapper 传播
+ExecutorService executor = Context.taskWrapping(Executors.newFixedThreadPool(10));
+// 或虚拟线程（JDK 21+）自动传播 StructuredTaskScope
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 Tracing 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 OpenTelemetry 在 Java 微服务中的落地 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 Metrics 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+// 虚拟线程 + OTel（推荐）
+try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+    var inventory = scope.fork(() -> inventoryService.check(orderId));
+    var coupon = scope.fork(() -> couponService.apply(orderId));
+    scope.join().throwIfFailed();
+    // 子任务自动继承父 traceId
+}
+```
 
-**高分回答细节**：
+**MQ 消息传播（Kafka）**：
 
-- 不要只说“可以用 OpenTelemetry”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+```java
+// Producer（OTel 自动注入 traceparent 到 header）
+kafkaTemplate.send("order-events", orderEvent);
+// 实际消息 header 包含：traceparent: 00-{traceId}-{spanId}-01
 
-## 十、二轮场景追问与项目表达
+// Consumer（OTel 自动从 header 提取 traceId，创建 CONSUMER span）
+@KafkaListener(topics = "order-events")
+public void consume(OrderEvent event) {
+    // 自动有 traceId，和 Producer 是一条链路
+    processEvent(event);
+}
+```
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+**慢请求定位（从大盘到根因）**：
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+```
+1. Metrics 告警：订单 P99 从 200ms 涨到 800ms
+2. Exemplar 关联：点 Metrics 上的 exemplar → 跳到具体 trace
+3. Trace 查看：调用树显示
+   ┌─ gateway (10ms)
+   ├─ order-service.createOrder (800ms)        ← 慢在这
+   │   ├─ jdbc SELECT inventory (5ms)
+   │   ├─ http POST coupon-service (780ms)     ← 罪魁！
+   │   │   └─ jdbc SELECT coupon (770ms)       ← 缺索引
+   │   └─ kafka send (5ms)
+4. Logs 关联：通过 traceId 查 coupon-service 日志
+   → 看到 "SELECT * FROM coupon WHERE code=? AND status=1" 慢
+5. 根因：coupon 表缺 (code, status) 联合索引，加索引 → P99 恢复
+```
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“OpenTelemetry 在 Java 微服务中的落地”，重点看 success_rate、latency_p99、error_rate，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+## 四、底层本质：为什么是 OTel
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+回到第一性：**为什么不是各家私有 SDK（SkyWalking / Jaeger client / Zipkin client）？**
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 OpenTelemetry 和 Tracing 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+- **厂商锁定问题**：用 SkyWalking client 后想换 Jaeger，要改所有服务的代码。OTel 是 CNCF 标准，换后端只改 Collector 配置，应用零改动。
+- **三支柱统一**：Trace/Metrics/Logs 三个 SDK 合一，共享 traceId/resource，三支柱可联动（点 Metrics 跳 Trace，点 Trace 看 Logs）。
+- **W3C TraceContext 标准化**：traceparent 是 W3C 标准，跨语言（Java/Go/Python/Node）跨服务（HTTP/gRPC/MQ）统一格式。不是 OTel 私有，Brave（Zipkin）也支持。
 
-### 追问 3：你如何判断这个方案值得做？
+**尾部采样 vs 头部采样的本质**：
+- **头部采样（TraceIDRatio）**：入口决定是否采样。简单、资源省。但随机决定，可能漏掉关键错误链路（采样率 10%，10% 错误链路被采，90% 漏）。
+- **尾部采样（Collector 决策）**：全链路完成后，Collector 看结果决定。可"保留所有错误链路 + 保留慢请求 + 10% 随机"。代价是 Collector 要缓存全链路（内存大）。
+- **生产实践**：TraceIDRatio=100%（全采），Collector 尾部采样降负载。或头部 10% + Collector 尾部补全错误链路。
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 Metrics 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+**Java Agent 字节码注入的本质**：
+- `Instrumentation` API（`premain`/`agentmain`）在类加载时拦截，改字节码。
+- OTel Agent 给 `HttpURLConnection.connect()` 前后插入 `span.start()`/`span.end()`。
+- 业务代码零改动——这就是"无侵入"。代价是启动慢 1-2 秒（类加载时改字节码）。
 
-### STAR 项目表达
+**为什么 OTel 没有存储/UI**：
+- OTel 定位是"采集 + 协议标准"，不做存储和 UI（避免和后端厂商竞争）。
+- 存储和 UI 交给后端（Jaeger/Tempo/SkyWalking）。
+- 这样后端厂商才会支持 OTel 协议（不会被 OTel 干掉）。
 
-- **S（背景）**：原系统在 OpenTelemetry 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 OpenTelemetry 在 Java 微服务中的落地 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 success_rate、latency_p99 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+## 五、AI 架构师加问：5 个
 
-### 二轮复盘清单
+1. **AI 推理链路的 trace 怎么设计？**
+   每个 AI 调用一个 span：LLM 调用（model/version/prompt_tokens）、RAG 检索（vector_db/query）、tool_call（tool_name/duration）。串联成"用户提问 → 检索 → LLM → tool → LLM → 回答"。attribute 记录 tokens/latency/cost，便于分析单次推理成本和瓶颈。
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+2. **AI 能自动分析 trace 找异常吗？**
+   AI 学习历史 trace 模式（正常调用树结构、耗时分布），检测异常：① 调用树结构异常（多了个意外的下游）；② 单 span 耗时突增（比历史 P99 慢 5 倍）；③ 错误率突升（某服务开始报错）。AI 给异常 trace 打标 + 关联可能根因（哪个 span 异常 + 可能原因）。
 
-## 十一、面试官 5 个企业级追问
+3. **大模型 RAG 链路的 trace 关键 span？**
+   `embed_query`（query 向量化）→ `vector_search`（向量检索，记录 top_k/score）→ `rerank`（重排）→ `prompt_build`（组装 prompt，记录 context 长度）→ `llm_call`（LLM 推理，记录 tokens/latency）→ `response_parse`。每个 span 的 attribute 有 token 数、score、context 长度，定位"是检索质量差还是 LLM 慢"。
 
-1. **你在真实项目里怎么判断“OpenTelemetry 在 Java 微服务中的落地”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 success_rate、latency_p99、error_rate。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+4. **AI Agent 多轮对话的 trace 怎么组织？**
+   顶层 span：conversation_turn（一轮对话）。子 span：think（LLM 推理）→ action（tool_call）→ observation（执行结果）→ think（下一轮）→ ... → answer。用 parentSpanId 串成树，attribute 记录 iteration_count（防止死循环）、tool_call_chain。跨轮的对话用 conversationId 关联（baggage 透传）。
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，OpenTelemetry 是否真是瓶颈，Tracing 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+5. **AI 怎么做 trace 异常归因？**
+   AI 分析异常 trace：① 找出耗时占比 > 50% 的 span（瓶颈定位）；② 对比正常 trace 的相同路径（这个 span 比正常慢 X 倍）；③ 关联该 span 服务的其他信号（同时段 GC、CPU、DB 慢查询）；④ 输出归因报告："coupon-service.jdbc SELECT 慢，因 coupon 表缺索引，建议加 (code,status) 联合索引"。
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 边界不清导致跨服务强耦合。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 success_rate 和 latency_p99 做分钟级观察，一旦越过阈值立即止损。
-
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 Metrics，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
-
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“OpenTelemetry 在 Java 微服务中的落地”，至少要沉淀 核心业务对象、状态机、读写链路、依赖拓扑 的建模规范，以及 success_rate、latency_p99 的验收标准。
-
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“OpenTelemetry 在 Java 微服务中的落地”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 OpenTelemetry 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“OpenTelemetry 在 Java 微服务中的落地”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 success_rate、latency_p99 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 边界不清导致跨服务强耦合，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 六、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：经验丰富的值班负责人拿着工具箱、调度台和应急预案，在处理“业务流量和系统风险同时出现”。
+抓 **"三支柱、W3C、Span 树、Agent、采样、三联动"**。
 
-- **场景**：先说明“OpenTelemetry 在 Java 微服务中的落地”服务于什么业务目标，不要上来就堆 OpenTelemetry。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 边界不清导致跨服务强耦合、异常链路没有补偿和告警。
-- **验证**：最后落到 success_rate、latency_p99、error_rate，让面试官感觉你真的上线过。
+- **三支柱**：Trace（调用链）/Metrics（指标）/Logs（日志）
+- **W3C TraceContext**：traceparent header（traceId-spanId-flags）跨服务传播
+- **Span 树**：traceId（全局）+ spanId（本地）+ parentSpanId（父）串成调用树
+- **Agent**：Java Agent 字节码注入（Instrumentation API），无侵入给 HTTP/JDBC/MQ 加 span
+- **采样**：头部（TraceIDRatio 比例）/尾部（Collector 看结果，保留错误链路）
+- **三联动**：Metrics → Exemplar → Trace → traceId 关联 Logs
 
 ### 拟人化理解
 
-可以把“OpenTelemetry 在 Java 微服务中的落地”想成一个经验丰富的值班负责人：OpenTelemetry 是他的工具箱、调度台和应急预案，Tracing 是他面对的现场信号，Metrics 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看指标，再控风险，最后谈优化。这样记，比死背组件名更稳。
+把 OTel 想成**快递追踪系统的统一接口**。寄一个包裹（一次请求）经过多个中转站（服务），每个中转站扫一次条码（创建 span），条码上有单号（traceId）和中转站编号（spanId）。W3C TraceContext 就是条码格式标准——所有快递公司（语言/服务）用同样的条码。OTel Collector 是快递分拣中心，可以决定哪些包裹详细记录（采样）、转给哪个目的地（后端）。换目的地（后端）不用改寄件人（应用代码）。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“OpenTelemetry 在 Java 微服务中的落地”，我会这样答：我会先确认业务目标、规模、SLA 和一致性要求，再选择合适的架构手段。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 边界不清导致跨服务强耦合，所以我会提前设计灰度、监控和止损阈值，重点看 success_rate、latency_p99。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 success_rate 或 latency_p99 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> OpenTelemetry 是 CNCF 的可观测性统一标准，三支柱：Trace（链路）/Metrics（指标）/Logs（日志）。核心是 W3C TraceContext——traceparent header（traceId-spanId-flags）跨服务传播，每个 span 记录一段处理，通过 parentSpanId 串成调用树。Java 用 Agent 字节码注入（Instrumentation API），无侵入给 HTTP/JDBC/Kafka 加 span，业务代码零改动。数据通过 OTLP 协议发到 Collector，Collector 做采样/脱敏/转发到任意后端（Jaeger/Tempo/SkyWalking），换后端不改应用代码。采样策略：头部（TraceIDRatio 按比例）简单但可能漏关键错误，尾部（Collector 看结果，保留所有错误 + 慢请求 + 随机）更智能。三支柱联动：Metrics 告警 → Exemplar 关联 trace → trace 看慢在哪 → traceId 关联 logs 看具体日志。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司追踪后端是 Jaeger/Tempo/SkyWalking 还是自研？全量采集还是采样？这决定我聊 Collector 尾部采样还是 Agent 头部采样。
 
+## 七、苏格拉底式面试追问
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 已经有日志和指标，为什么还要 Trace？ | 指标告诉你"有问题"（P99 高），日志告诉你"具体什么错"，Trace 告诉你"问题在哪条链路、哪个服务、哪一步"。没有 Trace 无法定位分布式问题 |
+| 证据追问 | 怎么证明 OTel 接入有效？ | ① 核心服务 100% 接入；② 调用链完整率 > 95%（trace 跨服务不中断）；③ MTTR 从小时级降到分钟级；④ Exemplar 关联率（Metrics 可下钻 Trace）> 80% |
+| 边界追问 | OTel 能解决所有可观测性问题吗？ | 不能。JVM 问题要 dump + JFR；网络问题要抓包；性能热点要 profile；业务逻辑要看代码。OTel 主要解决"分布式链路定位 + 三支柱联动" |
+| 反例追问 | 什么场景不要上 OTel？ | 单体应用（日志足够）、内部工具、研发阶段。OTel 有性能开销（Agent 1-3% CPU）+ 存储成本（后端存储），ROI 低不要上 |
+| 风险追问 | OTel 最大风险？ | ① 上下文传播断（线程池/MQ 没传播 traceId，链路断）；② 采样配置不当（采太少漏关键错误）；③ 敏感信息泄露（trace 里带 token/密码）。治法：Context.taskWrapping、尾部采样保留错误、attributes 脱敏 |
+| 验证追问 | 怎么验证 trace 完整？ | ① 入口和最终服务 traceId 一致；② 每个下游调用都有对应 CLIENT 和 SERVER span；③ 错误链路 100% 保留（尾部采样验证）；④ Exemplar 能跳转 trace |
+| 沉淀追问 | 团队规范沉淀什么？ | ① 接入 SOP（Agent + 配置）；② Span 命名规范（service.action）；③ 业务关键 span 手动埋点清单；④ 采样策略（错误全采 + 慢请求 + 10% 随机）；⑤ 脱敏规则 |
+
+### 现场对话示例
+
+**面试官**：OTel 和 SkyWalking 区别？要替换吗？
+
+**候选人**：OTel 是标准（API + OTLP 协议 + 三支柱），SkyWalking 是后端（存储 + UI + 告警）。OTel 不是要替代 SkyWalking，而是替代各家私有 SDK。SkyWalking 8+ 已支持 OTLP 协议接收——可以用 OTel Agent 采集 + SkyWalking 后端存储。迁移路径：Agent 换 OTel（统一），后端保留 SkyWalking（保护存储投资）。新项目直接 OTel + Tempo/Jaeger。
+
+**面试官**：Java Agent 原理？对性能影响多大？
+
+**候选人**：Java Agent 用 Instrumentation API，在 JVM 启动时（premain）或运行时（agentmain）拦截类加载。OTel Agent 给目标类（如 HttpURLConnection）字节码插入 span 创建逻辑。性能开销：① 启动慢 1-2 秒（类加载时改字节码）；② 运行时 1-3% CPU（每个 span 创建/序列化）；③ 内存增加（span 缓存）。可以通过采样降负载。生产实测 5000 QPS 服务开销 < 3% CPU。
+
+**面试官**：异步场景（线程池/MQ）traceId 怎么不断？
+
+**候选人**：三个陷阱。① 线程池：用 `Context.taskWrapping(executor)` 包装，子任务自动继承上下文。② 虚拟线程：JDK 21+ 自动传播（StructuredTaskScope）。③ MQ：OTel 自动把 traceparent 注入 Kafka header（Producer）和提取（Consumer），无需手动。如果用原生 Thread 不包装，traceId 会丢——这是最常见的链路断原因。
+
+## 常见考点
+
+1. **OpenTelemetry 是什么？**——CNCF 可观测性统一标准（Trace/Metrics/Logs），解决厂商锁定。应用调 OTel API，OTLP 协议发 Collector，转发任意后端。
+2. **W3C TraceContext？**——traceparent: 00-{traceId-32hex}-{spanId-16hex}-{flags}，跨服务传播 traceId。
+3. **Java Agent 原理？**——Instrumentation API 字节码注入，类加载时给 HTTP/JDBC/MQ 加 span，业务无感。
+4. **头部采样 vs 尾部采样？**——头部（TraceIDRatio 入口按比例，简单可能漏错误）；尾部（Collector 看结果，保留错误+慢请求，需缓存全链路）。
+5. **三支柱联动？**——Metrics → Exemplar → Trace（看链路）→ traceId 关联 Logs（看日志）。告警到根因一条线下钻。

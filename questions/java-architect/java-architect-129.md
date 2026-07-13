@@ -9,259 +9,379 @@ tags:
 - 流式
 - 背压
 feynman:
-  essence: gRPC 流式接口的背压与超时控制的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: gRPC 流式接口（Server/Client/Bidi Streaming）让服务端可以持续推、客户端可以持续拉，但当下游消费速度 < 上游生产速度时，缓冲区会无限膨胀直至 OOM。背压（Backpressure）的本质是"让下游的反向压力传给上游"——下游处理慢就让上游慢点发。gRPC 用 HTTP/2 flow control（WINDOW_UPDATE 帧）做传输层背压，应用层用 Reactor/Flowable 的 `request(n)` 机制做语义背压。超时控制要分"流整体超时"和"单消息超时"，流式场景整体超时用 deadline，单消息超时用 per-message timeout。
+  analogy: 像水龙头接水池。客户端是水池，服务端是水龙头。如果水池出水口（消费）慢，水龙头还猛灌，水池溢出（OOM）。背压是水池满了通过水管把压力反向传给水龙头，让它自动关小。HTTP/2 flow control 是水管里内置的压力传感器，Reactors 是水池主动喊"再给我 100 升就够了"。
+  first_principle: 为什么 gRPC 流式比 REST 更需要背压？REST 是请求-响应模型，每次请求独立，慢了就超时；流式是长连接持续推，单条连接的内存压力随时间累积。如果不做背压，一个慢消费者会把服务端内存吃光。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 四种 gRPC 模式：Unary（一元）、Server Streaming、Client Streaming、Bidi Streaming
+  - HTTP/2 flow control：每个 stream 有 send/recv window，消费后 WINDOW_UPDATE 补
+  - 应用层背压：Reactor 的 limitRate(n)、Flowable 的 request(n)
+  - 超时三档：deadline（流整体）、per-RPC timeout、per-message timeout
+  - gRPC keepalive 检测假死连接（idle ping、activity ping）
 first_principle:
-  problem: 面对“gRPC 流式接口的背压与超时控制”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: gRPC 流式接口如何防止慢消费者拖垮服务端，同时保证快速消费者的吞吐？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 流式接口的内存压力随消息速率和消费速率的差值线性累积
+  - HTTP/2 内置 flow control 可以做传输层背压，但应用层缓冲可能绕过它
+  - 慢消费者不能用"断开连接"粗暴处理（业务可能希望降级而非失败）
+  rebuild: HTTP/2 flow control 在传输层兜底（窗口耗尽自动暂停发送），应用层用 Reactor 的 `limitRate(100)` 控制向 HTTP/2 写入速率，下游慢则 Reactor backpressure 传到上游。超时用 deadline-on 流（如 30s）配 per-message timeout（如 5s），超过则取消流并清理资源。keepalive ping 检测假死连接，10s idle 关闭释放资源。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - HTTP/2 flow control 怎么工作？——每个 stream 有发送/接收窗口（默认 65535 字节），发送方扣窗口，接收方消费后 WINDOW_UPDATE 补。窗口耗尽则发送方暂停。WINDOW_UPDATE 太小会导致停-等，建议设大（如 1MB）。
+  - Reactor 的 onBackpressureBuffer/Drop/Latest 区别？——Buffer 攒到上限后 OverflowStrategy 决定：DROP 丢最新、LATEST 留最新丢旧、ERROR 抛异常。流式场景一般 DROP 或 LATEST（避免 OOM）。
+  - gRPC 怎么实现"流整体超时"？——客户端用 `withDeadlineAfter(30, SECONDS)`，服务端用 `onCancel` 回调清理资源；超时后客户端收到 DEADLINE_EXCEEDED。
+  - bidi streaming 怎么处理半连接？——客户端 close write 但还读，服务端检测 `onComplete` 后继续发，最后也 close。Spring gRPC 用 `StreamObserver.onCompleted()` 触发。
+  - 大消息体怎么办？——gRPC 默认单消息 4MB 上限（maxInboundMessageSize），大消息建议分片成 streaming 或用 out-of-band（如传 S3 URL）。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 四种模式：Unary/Server Stream/Client Stream/Bidi Stream
+  - HTTP/2 flow control + Reactor backpressure 双层背压
+  - 超时：deadline-on 流（30s）+ per-message（5s）+ keepalive（10s idle ping）
+  - maxInboundMessageSize 默认 4MB，大消息分片或 out-of-band
+  - 慢消费者策略：DROP/LATEST/限速，不能 Buffer 无限
 ---
 
-# 【Java 后端架构师】gRPC 流式接口的背压与超时控制？
+# 【Java 后端架构师】gRPC 流式接口的背压与超时控制
 
-> 适用场景：JD 核心技术。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。京东实时风控用 gRPC bidi streaming 推用户行为事件流给下游模型推理服务，单连接每秒 1 万条消息。当模型服务 GC 抖动消费变慢时，风控端缓冲区快速膨胀到 OOM，导致整个风控链路雪崩。背压治理 + 三档超时控制让风控端能在下游慢时自动降速、超时主动断开释放资源。
 
-## 一、先明确问题边界
+## 一、概念层
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**gRPC 四种调用模式**：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+| 模式 | 客户端 | 服务端 | 典型场景 |
+|------|--------|--------|---------|
+| **Unary** | 1 请求 | 1 响应 | 普通 RPC（替代 REST） |
+| **Server Streaming** | 1 请求 | N 响应 | 订阅、推送、大结果分页 |
+| **Client Streaming** | N 请求 | 1 响应 | 上传、批量、聚合 |
+| **Bidi Streaming** | N 请求 | N 响应 | 聊天、实时事件、协同 |
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 gRPC 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**为什么流式需要背压**：
 
-## 二、推荐架构思路
+```
+无背压（OOM 灾难）：
+  服务端生产 10000 msg/s ──► 网络缓冲 ──► 客户端消费 1000 msg/s
+                                          │
+                                          ▼
+                            缓冲区每秒积累 9000 msg，10 秒后 OOM
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+有背压（自动降速）：
+  服务端生产 10000 msg/s ──► Reactor.limitRate(1000) ──► 客户端消费 1000 msg/s
+                                          │
+                                          ▼
+                            Reactor 检测下游慢，向上游传 backpressure，生产降到 1000 msg/s
+```
 
-## 三、技术落地点
+## 二、机制层：proto 流式定义
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+**proto 文件**（必背）：
 
-## 四、常见坑
+```protobuf
+syntax = "proto3";
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+package jd.risk;
 
-## 五、面试回答模板
+option java_package = "com.jd.risk.grpc";
+option java_multiple_files = true;
 
-可以按下面结构作答：
+service RiskEventService {
+  // Server Streaming：客户端订阅，服务端持续推
+  rpc SubscribeEvents(SubscribeRequest) returns (stream RiskEvent);
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“gRPC 流式接口的背压与超时控制”，核心是 gRPC 与 流式 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+  // Client Streaming：客户端批量上传，服务端聚合返回
+  rpc UploadBehaviors(stream UserBehavior) returns (UploadSummary);
 
-## 六、加分点
+  // Bidi Streaming：双向流（实时风控）
+  rpc StreamRisk(stream UserBehavior) returns (stream RiskDecision);
+}
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+message SubscribeRequest {
+  string user_id = 1;
+  repeated string event_types = 2;
+}
 
-## 七、企业级面试定位：从“会用”到“能负责”
+message RiskEvent {
+  string event_id = 1;
+  string user_id = 2;
+  string event_type = 3;
+  int64 timestamp = 4;
+  map<string, string> payload = 5;
+}
 
-企业级面试不会只问“gRPC 是什么”，而是看你能不能对一条真实生产链路负责。回答“gRPC 流式接口的背压与超时控制”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+message UserBehavior {
+  string user_id = 1;
+  string action = 2;
+  int64 timestamp = 3;
+}
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 JD 核心技术 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 gRPC、流式、背压 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 success_rate、latency_p99、error_rate、backlog_size 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+message RiskDecision {
+  string user_id = 1;
+  bool blocked = 2;
+  string reason = 3;
+  float risk_score = 4;
+}
+```
 
-### 企业级回答骨架
+## 三、机制层：背压处理代码
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 gRPC 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+**服务端 Server Streaming + Reactor 背压**：
 
-### 面试中要主动补的生产细节
+```java
+// 服务端：用 Reactor 模式（grpc-reactor）
+@Service
+public class RiskEventServiceImpl extends RiskEventServiceGrpc.RiskEventServiceImplBase {
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+    @Autowired private RiskEventFluxService eventFluxService;
 
-## 八、苏格拉底式面试追问
+    @Override
+    public Flux<RiskEvent> subscribeEvents(SubscribeRequest request) {
+        // limitRate：向下游每次只请求 100 条，下游消费完才请求下一批
+        return eventFluxService.subscribe(request.getUserId())
+            .limitRate(100)                              // 背压核心：每次 request(100)
+            .onBackpressureLatest()                      // 慢消费者：保留最新，丢旧的
+            .timeout(Duration.ofSeconds(5))              // 单消息超时
+            .doOnCancel(() -> log.info("Client disconnected"))
+            .doOnError(e -> log.error("Stream error", e));
+    }
+}
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+// 配置 gRPC server
+@Bean
+public Server grpcServer() throws IOException {
+    return ServerBuilder.forPort(9090)
+        .addService(InProcessServerBuilderFactory.forName("risk"))
+        .maxInboundMessageSize(16 * 1024 * 1024)         // 单消息上限 16MB
+        .keepAliveTime(10, TimeUnit.SECONDS)             // 10s 没活动发 ping
+        .keepAliveTimeout(5, TimeUnit.SECONDS)           // ping 5s 没回关闭连接
+        .maxConnectionAge(30, TimeUnit.MINUTES)          // 连接最大 30 分钟，强制重连负载均衡
+        .maxConnectionAgeGrace(5, TimeUnit.SECONDS)      // 优雅关闭窗口
+        .build()
+        .start();
+}
+```
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“gRPC 流式接口的背压与超时控制”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 success_rate、latency_p99、error_rate、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 gRPC 负责的范围，以及必须依赖 流式、背压 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 边界不清导致跨服务强耦合，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+**客户端 Server Streaming 消费**：
 
-### 现场对话示例
+```java
+// 客户端：用 Flux 消费，背压传到服务端
+@Service
+public class RiskEventClient {
 
-**面试官**：你说要做“gRPC 流式接口的背压与超时控制”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 success_rate、latency_p99、业务失败率和事故记录。
+    @GrpcClient("risk-service")
+    private ReactorRiskEventServiceGrpc.ReactorRiskEventServiceStub stub;
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 success_rate 没有改善，或者 latency_p99 反而变差，就停止扩大范围，回到假设层重新复盘。
+    public void consume(String userId) {
+        SubscribeRequest req = SubscribeRequest.newBuilder()
+            .setUserId(userId)
+            .addAllEventTypes(List.of("LOGIN", "PAY"))
+            .build();
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 success_rate、latency_p99、error_rate。这样它不是个人经验，而是团队机制。
+        stub.withDeadlineAfter(30, TimeUnit.SECONDS)     // 流整体超时 30s
+            .subscribeEvents(req)
+            .limitRate(50)                                // 客户端背压：每次 request(50)
+            .concatMap(this::processEvent)                // 串行处理（避免并发抢资源）
+            .doOnNext(e -> metrics.recordProcessed())
+            .onBackpressureLatest()                       // 处理慢时保留最新
+            .subscribe(
+                event -> log.info("Processed {}", event.getEventId()),
+                error -> log.error("Stream failed", error),
+                () -> log.info("Stream completed")
+            );
+    }
 
-## 九、专项架构深挖：对象、链路、失败模式
+    private Mono<Void> processEvent(RiskEvent event) {
+        return Mono.fromRunnable(() -> {
+            // 业务处理
+            riskDecisionService.decide(event);
+        }).subscribeOn(Schedulers.boundedElastic()).then();
+    }
+}
+```
 
-这一题不要停在“知道 gRPC”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+**Bidi Streaming 双向流背压**（最复杂）：
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 核心业务对象、状态机、读写链路、依赖拓扑；幂等键、版本号、审计流水、补偿任务；监控指标、压测模型、灰度开关 |
-| 设计主线 | 主链路保持简单可靠，非核心能力异步解耦；状态变化必须有唯一约束、版本控制和补偿兜底；所有关键方案都要能灰度、观测和回滚 |
-| 失败模式 | 边界不清导致跨服务强耦合；异常链路没有补偿和告警；只优化技术指标但遗漏业务正确性 |
-| 验证指标 | success_rate、latency_p99、error_rate、backlog_size |
+```java
+@Override
+public Flux<RiskDecision> streamRisk(Flux<UserBehavior> requestFlux) {
+    return requestFlux
+        .limitRate(100)                                   // 接收侧背压
+        .concatMap(this::evaluate)                        // 风控推理
+        .limitRate(100)                                   // 发送侧背压
+        .onBackpressureLatest();
+}
 
-**架构拆解**：
+// 客户端
+public Flux<RiskDecision> streamRisk(Flux<UserBehavior> behaviors) {
+    return stub.streamRisk(behaviors.limitRate(100))     // 客户端发送也限速
+        .limitRate(100);                                   // 接收侧限速
+}
+```
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 流式 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 gRPC 流式接口的背压与超时控制 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 背压 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+## 四、机制层：三档超时控制
 
-**高分回答细节**：
+**超时三档对比**（必背）：
 
-- 不要只说“可以用 gRPC”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+| 超时类型 | 设置方式 | 作用 |
+|---------|---------|------|
+| **流整体 deadline** | `withDeadlineAfter(30, SECONDS)` | 整个流不超过 30s，超时取消流 |
+| **单消息 timeout** | Reactor `.timeout(Duration.ofSeconds(5))` | 5s 没收到下一条消息触发超时 |
+| **keepalive** | server `keepAliveTime(10s)` + `keepAliveTimeout(5s)` | 10s 没活动 ping，5s 没回 pong 关连接 |
 
-## 十、二轮场景追问与项目表达
+**为什么需要三档**：
+- deadline：防止僵尸流占用连接（如客户端崩溃但 TCP 没断）
+- per-message timeout：检测处理卡顿（如某条消息触发了慢查询）
+- keepalive：检测网络假死（如 NAT 表过期但 TCP 状态机不知道）
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+**服务端超时配置**：
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+```java
+// 完整服务端配置
+Server server = ServerBuilder.forPort(9090)
+    .addService(service)
+    // 单消息大小限制
+    .maxInboundMessageSize(16 * 1024 * 1024)             // 16MB
+    // 流控窗口（HTTP/2 flow control）
+    .flowControlWindow(1024 * 1024)                       // 1MB 接收窗口
+    // keepalive
+    .keepAliveTime(10, TimeUnit.SECONDS)                  // 10s idle 发 ping
+    .keepAliveTimeout(5, TimeUnit.SECONDS)                // ping 5s 没回关连接
+    .permitKeepAliveTime(30, TimeUnit.SECONDS)            // 客户端最短 ping 间隔
+    .permitKeepAliveWithoutCalls(true)                    // 允许无 active stream 时 ping
+    // 连接生命周期
+    .maxConnectionAge(30, TimeUnit.MINUTES)               // 30min 强制断开（负载均衡）
+    .maxConnectionAgeGrace(5, TimeUnit.SECONDS)           // 5s 优雅窗口
+    .maxConcurrentCallsPerConnection(100)                 // 单连接并发上限
+    .build();
+```
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“gRPC 流式接口的背压与超时控制”，重点看 success_rate、latency_p99、error_rate，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+**客户端超时配置**：
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+```java
+ManagedChannel channel = ManagedChannelBuilder
+    .forAddress("risk-service.jd.com", 9090)
+    .usePlaintext()                                       // 内网不用 TLS
+    .keepAliveTime(10, TimeUnit.SECONDS)
+    .keepAliveTimeout(5, TimeUnit.SECONDS)
+    .keepAliveWithoutCalls(true)
+    .defaultLoadBalancingPolicy("round_robin")
+    .maxInboundMessageSize(16 * 1024 * 1024)
+    .build();
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 gRPC 和 流式 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+// 流整体 deadline
+ReactorRiskEventServiceGrpc.ReactorRiskEventServiceStub stub =
+    ReactorRiskEventServiceGrpc.newStub(channel)
+        .withDeadlineAfter(30, TimeUnit.SECONDS)
+        .withCompression("gzip");                          // 大消息压缩
+```
 
-### 追问 3：你如何判断这个方案值得做？
+## 五、实战层/选型：背压策略选型
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 背压 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+**Reactor onBackpressureXxx 对比**：
 
-### STAR 项目表达
+| 策略 | 行为 | 适用 |
+|------|------|------|
+| `BUFFER` | 无限缓冲（默认） | 不会用，必 OOM |
+| `BUFFER(max)` | 缓冲到上限，超了 OverflowStrategy | 突发流量，可容忍丢失 |
+| `DROP` | 丢最新到达的 | 慢消费者场景，丢最新无所谓 |
+| `LATEST` | 保留最新丢旧的 | 实时监控、行情，关注最新值 |
+| `ERROR` | 抛异常 | 强一致场景，宁可失败不可丢 |
 
-- **S（背景）**：原系统在 gRPC 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 gRPC 流式接口的背压与超时控制 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 success_rate、latency_p99 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+**JD 风控实战选型**：
+- 实时风控流：`onBackpressureLatest()`（关注最新行为，旧的没意义）
+- 行为审计流：`onBackpressureBuffer(100000).onBackpressureDrop()`（缓冲兜底，超了丢，告警）
+- 交易事件流：`onBackpressureError()`（强一致，宁可失败不能丢）
 
-### 二轮复盘清单
+**背压策略可视化**：
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+```
+上游 10000 msg/s ──► limitRate(100) ──► Reactor 内部缓冲 100 ──► 下游 1000 msg/s
+                          │                      │
+                          ▼                      ▼
+                  upstream 降到 1000       缓冲永远不超过 100
+                  (Reactor 反向 pull)      onBackpressureLatest 保留最新
+```
 
-## 十一、面试官 5 个企业级追问
+## 六、底层本质：HTTP/2 flow control 与 Reactor 的协作
 
-1. **你在真实项目里怎么判断“gRPC 流式接口的背压与超时控制”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 success_rate、latency_p99、error_rate。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+回到第一性：**gRPC 背压有两层——HTTP/2 传输层 flow control + Reactor 应用层 backpressure**。
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，gRPC 是否真是瓶颈，流式 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+- **HTTP/2 flow control**：每个 stream 有发送/接收窗口（默认 65535 字节），发送方扣窗口，接收方消费后 WINDOW_UPDATE 补。窗口耗尽则发送方暂停。这是 TCP 之上的应用层流控，gRPC 框架自动处理。
+- **Reactor backpressure**：用 `limitRate(n)` 控制向上游 request 的数量。下游消费慢，Reactor 不向上游 request，上游自然不发——这是 push 转 pull 的语义。
+- **两层协作**：HTTP/2 flow control 兜底（窗口耗尽自动停），Reactor 提供语义控制（limitRate、onBackpressureXxx）。如果只依赖 HTTP/2 flow control，发送方会在内存里 buffer 待发数据；Reactor 在 buffer 之前就 throttle。
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 边界不清导致跨服务强耦合。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 success_rate 和 latency_p99 做分钟级观察，一旦越过阈值立即止损。
+**背压传到上游的本质**：传统 push 模型（如 Kafka consumer）消费速度靠 max.poll.records 等参数控制；Reactor 用 `request(n)` 让下游主动告诉上游"再给我 n 个"，把控制权交给下游。这种 pull-based 模型让背压精准传递。
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 背压，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+**为什么不用断开连接粗暴处理**：流式场景下，慢消费者断开会导致业务中断（如风控订阅断开）。背压让慢消费者继续在但降速，业务可以降级（如风控降级为只看高风险事件）。这是"柔性"治理。
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“gRPC 流式接口的背压与超时控制”，至少要沉淀 核心业务对象、状态机、读写链路、依赖拓扑 的建模规范，以及 success_rate、latency_p99 的验收标准。
+## 七、AI 架构师加问：5 个
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
+1. **LLM 流式推理（如 chat completion）用 gRPC bidi 还是 SSE？**
+   LLM 流式输出用 SSE/HTTP streaming 更通用（浏览器支持、CDN 友好）；内部推理引擎间（router → inference）用 gRPC bidi（多路复用、背压、低延迟）。两者职责不同。
 
-1. **如果把“gRPC 流式接口的背压与超时控制”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 gRPC 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
+2. **LLM 推理慢，背压怎么传到 token 生成器？**
+   客户端 SSE 消费慢 → TCP receive buffer 满 → 服务端 socket write 阻塞 → gRPC/SSE 框架检测到 backpressure → Reactor `limitRate` 暂停向 vLLM 拉 token。整条链路天然背压传导。
 
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“gRPC 流式接口的背压与超时控制”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 success_rate、latency_p99 对业务链路的影响。
+3. **Agent 调 gRPC 流式接口，超时怎么设？**
+   Agent 一般有"思考超时"和"工具调用超时"两档。gRPC 流整体 deadline 设为工具调用超时（如 60s），per-message timeout 设为单 token 响应超时（如 5s）。Agent 框架（如 LangGraph）的 timeout 必须覆盖 gRPC deadline。
 
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 边界不清导致跨服务强耦合，要能通过 trace、tool_call_id 和业务流水快速回放。
+4. **用 LLM 自动诊断 gRPC 流式 OOM？**
+   LLM 读 heap dump + gRPC metric（pending streams、message size、flow control window），识别模式（如"100 个 client 慢消费导致 buffer 膨胀"），推荐调参（maxInboundMessageSize 调小、limitRate 调小、maxConnectionAge 调短）。
 
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
+5. **LLM Agent 调 gRPC 用 streaming 还是 unary？**
+   优先 unary（简单、易调试）。只有需要持续推送（如 Agent 订阅事件流）才用 streaming。Agent 工具调用通常是一次性 RPC，streaming 反而复杂化（Agent 要管理 stream 生命周期）。
 
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 八、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：经验丰富的值班负责人拿着工具箱、调度台和应急预案，在处理“业务流量和系统风险同时出现”。
+抓 **"四种模式、双层背压、三档超时"**。
 
-- **场景**：先说明“gRPC 流式接口的背压与超时控制”服务于什么业务目标，不要上来就堆 gRPC。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 边界不清导致跨服务强耦合、异常链路没有补偿和告警。
-- **验证**：最后落到 success_rate、latency_p99、error_rate，让面试官感觉你真的上线过。
+- **四种模式**：Unary / Server Stream / Client Stream / Bidi Stream
+- **双层背压**：HTTP/2 flow control（传输层）+ Reactor limitRate（应用层）
+- **三档超时**：deadline（流整体 30s）+ per-message timeout（5s）+ keepalive（10s idle ping）
+- **onBackpressureXxx**：DROP/LATEST/ERROR，按业务选
+- **maxInboundMessageSize** 默认 4MB，大消息分片
 
 ### 拟人化理解
 
-可以把“gRPC 流式接口的背压与超时控制”想成一个经验丰富的值班负责人：gRPC 是他的工具箱、调度台和应急预案，流式 是他面对的现场信号，背压 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看指标，再控风险，最后谈优化。这样记，比死背组件名更稳。
+把 gRPC 流式想成**水管输水**。客户端是水池，服务端是水龙头。Unary 是接一杯水（一次性），Server Streaming 是水龙头持续灌（订阅），Bidi 是双向水管（聊天）。HTTP/2 flow control 是水管内置的压力传感器（窗口耗尽自动关阀），Reactor limitRate 是水池主动喊"给我 100 升就够了"。三档超时：deadline 是"30 秒必须灌完"，per-message 是"5 秒没下滴水断水"，keepalive 是"10 秒没动静 ping 一下确认水管没破"。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“gRPC 流式接口的背压与超时控制”，我会这样答：我会先确认业务目标、规模、SLA 和一致性要求，再选择合适的架构手段。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 边界不清导致跨服务强耦合，所以我会提前设计灰度、监控和止损阈值，重点看 success_rate、latency_p99。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 success_rate 或 latency_p99 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> 我们实时风控用 gRPC bidi streaming 推用户行为事件流。背压两层——HTTP/2 flow control 在传输层兜底（窗口耗尽自动暂停），应用层用 Reactor `limitRate(100)` 控制 pull 节奏，下游慢消费时 Reactor 不向上游 request，上游自然停推。慢消费者策略按业务选：实时风控用 onBackpressureLatest（关注最新行为），审计流用 Buffer+Drop（缓冲兜底），交易流用 ERROR（不能丢）。超时三档：流整体 deadline 30s（防僵尸流）+ 单消息 timeout 5s（检测卡顿）+ keepalive 10s idle ping（防假死）。maxConnectionAge 30min 强制重连做负载均衡。这套组合让我们扛住了下游 GC 抖动场景，OOM 再没出现过。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司 gRPC 用哪种模式最多？有没有流式场景？下游慢消费怎么处理？keepalive 配置怎么定的？
 
+## 九、苏格拉底式面试追问（7 层表格 + 现场对话）
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么用 gRPC 流式而不是 REST 轮询？ | 用资源消耗说话：REST 轮询 1000 QPS = 1000 次连接建立 + HTTP 头开销；gRPC 流式 1 个长连接持续推，吞吐 10 倍 + 延迟 1/10。LLM token 流式输出场景尤其明显 |
+| 证据追问 | 怎么证明背压生效？ | pending_messages 指标应稳定在 limitRate 上限附近；flow_control_window 不持续缩小（说明客户端在消费）；服务端堆内存不持续增长；下游慢时上游生产速率自动下降 |
+| 边界追问 | HTTP/2 flow control 和 Reactor 哪个先触发？ | Reactor 先触发——它在内存 buffer 之前 throttle；HTTP/2 flow control 是兜底，保护 socket buffer。如果绕过 Reactor 直接写 socket，会绕过应用层背压 |
+| 反例追问 | 什么场景不用 gRPC 流式？ | 浏览器直连（用 SSE/WebSocket 更通用）、CDN 缓存场景（gRPC 不缓存）、跨语言生态差（Python/PHP gRPC 库不如 Java/Go 成熟） |
+| 风险追问 | gRPC 流式最大风险？ | 主动点出：OOM（无背压缓冲膨胀）、僵尸流（无 deadline 占连接）、慢消费者拖垮服务端（无超时）、调试困难（流式 trace 工具不成熟） |
+| 验证追问 | 怎么验证三档超时有效？ | 故障演练：注入慢消费者，观察 pending_messages 是否被 limitRate 控制；kill client 模拟崩溃，观察 deadline 是否触发清理；iptables 模拟网络假死，观察 keepalive 是否关闭连接 |
+| 沉淀追问 | 团队 gRPC 治理沉淀什么？ | 默认参数模板（maxInboundMessageSize、keepalive、maxConnectionAge）、Reactor 背压策略 SOP、deadline 三档标准、gRPC 监控大盘（pending_streams/flow_window/message_latency） |
+
+### 现场对话示例
+
+**面试官**：bidi streaming 怎么处理"客户端突然断开"？
+
+**候选人**：分两层。传输层，TCP RST/FIN 会触发 gRPC 框架的 `onCancel` 回调，服务端 stream 自动 close。应用层，Reactor 的 `doOnCancel` 钩子可以清理资源（关闭数据库连接、释放锁、记录 metric）。但有个坑——如果客户端是 OOM 崩溃，TCP 可能不立即 RST（处于半连接状态），这时靠 keepalive ping 检测：10s 没活动 ping 一次，5s 没回 pong 判定连接死，服务端主动关闭。所以 keepalive 是兜底。我们的实操：每个 bidi stream 都注册 `doOnCancel` 资源清理 + 流整体 deadline 30s + keepalive，三层保护，确保不会有僵尸流。
+
+**面试官**：Reactor 的 limitRate 是怎么实现背压的？
+
+**候选人**：limitRate(n) 内部是一个 prefetch + 补充机制。下游每次 request(k)，limitRate 拦截后向真正上游 request(2*k)（默认 prefetch 比例 100%），但下游只看到 k 个。下游消费完 k 个再 request 下一个 k。这就实现了"下游主动 pull 上游"的语义。如果下游不 request（处理慢），上游永远等不到 demand，自然不生产。这是 Reactor 把 push 模型转 pull 模型的核心机制。limitRate(100) 意思是"每批向下游推 100 个，下游消费完再推下一批"。
+
+**面试官**：HTTP/2 flow control 窗口耗尽会怎样？
+
+**候选人**：发送方收到零窗口后暂停发送，等接收方 WINDOW_UPDATE 帧补充窗口才能继续。如果接收方一直不补（处理慢），发送方永远停。这看起来像背压，但有坑——发送方在暂停期间会把待发消息 buffer 在内存里（应用层 buffer），如果消息持续产生，应用层 buffer 还是会 OOM。所以 HTTP/2 flow control 只保护 socket buffer，保护不了应用层 buffer。必须配合 Reactor limitRate 在应用层就 throttle，不让消息进入"等待发送"队列。这两层协作才完整。
+
+## 常见考点
+
+1. **gRPC 和 Thrift/Dubbo 区别？**——gRPC 用 HTTP/2 + proto（多路复用、流式、跨语言）；Thrift 是 TCP + binary（更轻但生态弱）；Dubbo 是 Java 生态（功能丰富但跨语言弱）。JD 内部用 gRPC + Dubbo 共存。
+2. **gRPC 拦截器（Interceptor）能做什么？**——鉴权、tracing、metric、限流、重试。Client 和 Server 各一套，类似 Servlet Filter。
+3. **proto3 和 proto2 区别？**——proto3 移除 required、移除 default value 显式设置、新增 map 类型、原生 JSON 支持。proto3 更简洁但失去一些约束。
+4. **gRPC 怎么做服务发现？**——gRPC 内置 NameResolver（DNS、xDS），生产用 Consul/Nacos 自定义 Resolver；负载均衡用 round_robin / pick_first，或 xDS 做 Envoy 控制。
+5. **gRPC 错误码有哪些？**——gRPC 用 status code（OK、CANCELLED、DEADLINE_EXCEEDED、UNAVAILABLE...），自定义错误用 `Status.withDescription` + RichError 模式。

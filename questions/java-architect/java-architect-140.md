@@ -9,259 +9,360 @@ tags:
 - CDC
 - 事件发布
 feynman:
-  essence: Outbox + CDC 如何保证事件可靠发布的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: Outbox 模式解决"业务数据更新 + 事件发布"的原子性问题——传统模式（先更 DB 后发消息）会因发消息失败丢事件，Outbox 把事件和业务数据放同一事务写到一个 outbox 表，保证原子。CDC（Change Data Capture）异步监听 outbox 表变更（通过 binlog），把事件推到 Kafka。这样"业务事务原子写 outbox + CDC 异步推 Kafka"，实现可靠事件发布。
+  analogy: 像寄信。Outbox 是"邮局信箱"——你写信投到信箱（和业务操作一起，原子），不直接送给邮递员（避免送信失败丢信）。CDC 是"邮递员定期开信箱取信分发"——异步、可靠、不阻塞业务。
+  first_principle: 为什么不"先更 DB 后发消息"？因为 DB 提交和消息发送是两个系统，无法原子。发消息失败要么丢事件（业务已提交但消息没发），要么业务回滚（消息发了但业务失败）。Outbox 把"事件"变成业务事务的一部分（写 outbox 表），用 DB 本地事务保证原子，再用 CDC 异步推 Kafka。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - Outbox 表：和业务表同库，存待发布事件（id, aggregate_id, type, payload, status, created_at）
+  - CDC：Debezium 监听 outbox 表 binlog，变更即推 Kafka
+  - 幂等：消费端按 event_id 去重，CDC 重启可能重投
+  - 顺序：同一 aggregate 的事件按 created_at 顺序（单分区）
+  - 失败处理：CDC 失败 outbox 堆积；消费失败重试或死信
 first_principle:
-  problem: 面对“Outbox + CDC 如何保证事件可靠发布”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 微服务架构下"业务数据更新 + 事件通知下游"如何原子，避免事件丢失或业务回滚？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - DB 提交和 Kafka 发送是两个系统，2PC 性能差不可行
+  - 业务事务原子性是底线（数据不能错），事件丢失可补偿
+  - 跨系统原子只能用"本地事务 + 异步同步"模式
+  rebuild: 业务事务里同时写 business 表和 outbox 表（一个本地事务，原子）。CDC（Debezium）监听 outbox 表 binlog，变更异步推 Kafka。这样事件发布是"at-least-once + 业务幂等"——CDC 重启可能重投，消费端按 event_id 去重。outbox 表定期清理（已发布事件归档），避免无限膨胀。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - Outbox 表会无限膨胀吗？——会。已发布事件定期归档/删除（如保留 7 天）。CDC 推 Kafka 后状态置 PUBLISHED，后台 job 清理。
+  - CDC 失败怎么办？——CDC 是 Debezium 实例，挂了 binlog 不消费（offset 不变），重启从上次 offset 继续。outbox 表会堆积，但 DB 扛得住（数据量可控）。
+  - 事件顺序怎么保证？——同一 aggregate_id 路由到同 Kafka 分区，单分区内按 created_at 顺序消费。跨 aggregate 无序（业务可接受）。
+  - Debezium 怎么部署？——独立服务（Connect 模式）或独立进程（Standalone），监听 MySQL binlog。生产用 Connect 集群（Kafka Connect）。
+  - Outbox 和 Saga 区别？——Outbox 解决"事件可靠发布"（一次操作一个事件）；Saga 解决"跨服务长事务"（多步操作链式补偿）。两者互补：Saga 用 Outbox 发补偿事件。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - Outbox 表：业务事务原子写，存待发布事件
+  - CDC（Debezium）监听 binlog，异步推 Kafka
+  - 幂等：消费端按 event_id 去重
+  - 顺序：aggregate_id 路由同分区，单分区内按时间顺序
+  - 清理：已发布事件定期归档/删除
 ---
 
-# 【Java 后端架构师】Outbox + CDC 如何保证事件可靠发布？
+# 【Java 后端架构师】Outbox + CDC 如何保证事件可靠发布
 
-> 适用场景：高并发高可用。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。京东订单创建后要发 Kafka 事件给履约、营销、风控、BI。"先更 DB 后发消息"模式在网络抖动时会丢事件——订单创建了但下游不知道，导致履约延迟、风控漏判。引入 Outbox + CDC 后，订单事务原子写 outbox 表，Debezium 异步监听推 Kafka，事件零丢失。
 
-## 一、先明确问题边界
+## 一、概念层
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**三种事件发布模式对比**（必背）：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+| 模式 | 原子性 | 复杂度 | 适用 |
+|------|--------|--------|------|
+| **先更 DB 后发消息** | 不保证（发消息失败丢事件） | 低 | 低一致性要求 |
+| **先发消息后更 DB** | 不保证（DB 失败消息已发） | 低 | 极少用 |
+| **2PC（XA）** | 强一致 | 高 | 性能差，不推荐 |
+| **Outbox + CDC** | 业务事务原子 + 事件 at-least-once | 中 | 推荐，生产标配 |
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 Outbox 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**Outbox + CDC 流程**（必画）：
 
-## 二、推荐架构思路
+```
+应用 ──── 业务事务 ────┬─► 1. UPDATE orders SET status='PAID' WHERE id=?
+                     │
+                     └─► 2. INSERT INTO outbox (event_id, type, payload) VALUES (...)
+                     │
+                     ▼
+              DB 提交本地事务（原子！）
+                     │
+                     ▼
+           ┌──── Debezium（CDC）────┐
+           │  监听 outbox 表 binlog │
+           │  新增行 → 读 payload    │
+           │  → 推到 Kafka          │
+           └────────────┬───────────┘
+                        │
+                        ▼
+                   Kafka topic
+                        │
+                        ▼
+                   下游消费（幂等）
+```
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+## 二、机制层：Outbox 表设计
 
-## 三、技术落地点
+**Outbox 表结构**：
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+```sql
+CREATE TABLE outbox (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    event_id VARCHAR(64) NOT NULL,          -- 事件唯一 ID（UUID，幂等用）
+    aggregate_type VARCHAR(50) NOT NULL,    -- 聚合类型（如 Order）
+    aggregate_id VARCHAR(64) NOT NULL,      -- 聚合 ID（如订单号，分区路由用）
+    event_type VARCHAR(50) NOT NULL,        -- 事件类型（如 OrderPaid）
+    payload JSON NOT NULL,                  -- 事件内容
+    headers JSON,                           -- 元数据（traceId, user_id 等）
+    created_at DATETIME NOT NULL,
+    published_at DATETIME,                  -- 已发布时间（NULL 表示未发布）
 
-## 四、常见坑
+    INDEX idx_aggregate (aggregate_type, aggregate_id),
+    INDEX idx_created (created_at),
+    INDEX idx_unpublished (published_at)
+);
+```
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+**业务事务原子写 outbox**：
 
-## 五、面试回答模板
+```java
+@Service
+public class OrderService {
 
-可以按下面结构作答：
+    @Autowired private OrderRepo orderRepo;
+    @Autowired private OutboxRepo outboxRepo;
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“Outbox + CDC 如何保证事件可靠发布”，核心是 Outbox 与 CDC 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+    @Transactional
+    public void payOrder(String orderId) {
+        // 1. 业务更新（同事务）
+        Order order = orderRepo.findById(orderId);
+        order.setStatus("PAID");
+        order.setPaidAt(Instant.now());
+        orderRepo.save(order);
 
-## 六、加分点
+        // 2. 写 outbox（同事务，原子）
+        OutboxEvent event = new OutboxEvent();
+        event.setEventId(UUID.randomUUID().toString());
+        event.setAggregateType("Order");
+        event.setAggregateId(orderId);
+        event.setEventType("OrderPaid");
+        event.setPayload(JSON.toJSONString(Map.of(
+            "orderId", orderId,
+            "userId", order.getUserId(),
+            "amount", order.getAmount(),
+            "paidAt", order.getPaidAt()
+        )));
+        event.setHeaders(JSON.toJSONString(Map.of(
+            "traceId", MDC.get("traceId"),
+            "version", "1.0"
+        )));
+        event.setCreatedAt(new Date());
+        outboxRepo.save(event);
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+        // 事务提交后，outbox 行已落库，CDC 会监听到
+    }
+}
+```
 
-## 七、企业级面试定位：从“会用”到“能负责”
+## 三、机制层：CDC（Debezium）配置
 
-企业级面试不会只问“Outbox 是什么”，而是看你能不能对一条真实生产链路负责。回答“Outbox + CDC 如何保证事件可靠发布”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+**Debezium MySQL Connector 配置**：
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 高并发高可用 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 Outbox、CDC、事件发布 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 success_rate、latency_p99、error_rate、backlog_size 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+```json
+{
+  "name": "order-outbox-connector",
+  "config": {
+    "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+    "database.hostname": "mysql.jd.com",
+    "database.port": "3306",
+    "database.user": "debezium",
+    "database.password": "${VAULT_PASSWORD}",
+    "database.server.id": "184054",
+    "database.server.name": "order-service",
+    "database.include.list": "order_db",
+    "table.include.list": "order_db.outbox",
+    "database.history.kafka.bootstrap.servers": "kafka:9092",
+    "database.history.kafka.topic": "schema-history.order",
 
-### 企业级回答骨架
+    "transforms": "outbox",
+    "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+    "transforms.outbox.table.field.event.id": "event_id",
+    "transforms.outbox.table.field.event.key": "aggregate_id",
+    "transforms.outbox.table.field.event.type": "event_type",
+    "transforms.outbox.table.field.event.payload": "payload",
+    "transforms.outbox.table.field.event.headers": "headers",
+    "transforms.outbox.route.by.field": "aggregate_type",
+    "transforms.outbox.route.topic.replacement": "order.${routedByValue}",
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 Outbox 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+    "transforms.outbox.predicate": "false",
 
-### 面试中要主动补的生产细节
+    "snapshot.mode": "schema_only_recovery",
+    "tombstones.on.delete": "false"
+  }
+}
+```
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+**EventRouter Transform** 是 Debezium 内置的 Outbox 模式转换器，把 outbox 表行转成 Kafka 消息（key=aggregate_id, value=payload, headers=headers），路由到不同 topic。
 
-## 八、苏格拉底式面试追问
+**部署 Debezium**（Kafka Connect 模式）：
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+```bash
+# 启动 Kafka Connect（带 Debezium plugin）
+docker run -d \
+    -p 8083:8083 \
+    -e BOOTSTRAP_SERVERS=kafka:9092 \
+    -e GROUP_ID=1 \
+    -e CONFIG_STORAGE_TOPIC=connect_configs \
+    -e OFFSET_STORAGE_TOPIC=connect_offsets \
+    -v /plugins/debezium:/kafka/connect \
+    confluentinc/cp-kafka-connect
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“Outbox + CDC 如何保证事件可靠发布”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 success_rate、latency_p99、error_rate、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 Outbox 负责的范围，以及必须依赖 CDC、事件发布 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 边界不清导致跨服务强耦合，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+# 注册 connector（POST 配置到 Connect REST API）
+curl -X POST http://localhost:8083/connectors \
+    -H "Content-Type: application/json" \
+    -d @order-outbox-connector.json
+```
 
-### 现场对话示例
+## 四、机制层：消费端幂等
 
-**面试官**：你说要做“Outbox + CDC 如何保证事件可靠发布”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 success_rate、latency_p99、业务失败率和事故记录。
+**消费端按 event_id 去重**：
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 success_rate 没有改善，或者 latency_p99 反而变差，就停止扩大范围，回到假设层重新复盘。
+```java
+@Service
+public class OrderEventConsumer {
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 success_rate、latency_p99、error_rate。这样它不是个人经验，而是团队机制。
+    @Autowired private OrderEventLogRepo logRepo;
+    @Autowired private FulfillmentService fulfillmentService;
 
-## 九、专项架构深挖：对象、链路、失败模式
+    @KafkaListener(topics = "order.Order")
+    public void consume(@Header("eventId") String eventId,
+                         @Payload String payload) {
+        // 1. 幂等检查
+        if (logRepo.existsByEventId(eventId)) {
+            log.info("Event already processed: {}", eventId);
+            return;
+        }
 
-这一题不要停在“知道 Outbox”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+        // 2. 业务处理
+        OrderEvent event = JSON.parseObject(payload, OrderEvent.class);
+        switch (event.getEventType()) {
+            case "OrderPaid":
+                fulfillmentService.startFulfillment(event.getOrderId());
+                break;
+            case "OrderCancelled":
+                fulfillmentService.cancelFulfillment(event.getOrderId());
+                break;
+        }
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 核心业务对象、状态机、读写链路、依赖拓扑；幂等键、版本号、审计流水、补偿任务；监控指标、压测模型、灰度开关 |
-| 设计主线 | 主链路保持简单可靠，非核心能力异步解耦；状态变化必须有唯一约束、版本控制和补偿兜底；所有关键方案都要能灰度、观测和回滚 |
-| 失败模式 | 边界不清导致跨服务强耦合；异常链路没有补偿和告警；只优化技术指标但遗漏业务正确性 |
-| 验证指标 | success_rate、latency_p99、error_rate、backlog_size |
+        // 3. 记录已处理（幂等用）
+        OrderEventLog log = new OrderEventLog();
+        log.setEventId(eventId);
+        log.setProcessedAt(Instant.now());
+        logRepo.save(log);   // event_id UNIQUE 约束兜底
+    }
+}
+```
 
-**架构拆解**：
+## 五、机制层：Outbox 清理
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 CDC 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 Outbox + CDC 如何保证事件可靠发布 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 事件发布 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+**定期清理已发布事件**：
 
-**高分回答细节**：
+```java
+@Scheduled(cron = "0 0 3 * * *")  // 每天凌晨 3 点
+public void cleanupOutbox() {
+    // 删除 7 天前已发布的事件
+    outboxRepo.deletePublishedBefore(Date.from(
+        Instant.now().minus(7, ChronoUnit.DAYS)
+    ));
+}
+```
 
-- 不要只说“可以用 Outbox”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+**双保险：CDC + Polling 兜底**：
 
-## 十、二轮场景追问与项目表达
+```java
+// 如果 CDC 挂了，定时扫描未发布事件手动推 Kafka
+@Scheduled(fixedDelay = 60000)
+public void fallbackPublisher() {
+    List<OutboxEvent> unpublished = outboxRepo.findUnpublished(100);
+    for (OutboxEvent e : unpublished) {
+        try {
+            kafkaTemplate.send("order." + e.getAggregateType(),
+                e.getAggregateId(), e.getPayload());
+            outboxRepo.markPublished(e.getId());
+        } catch (Exception ex) {
+            log.error("Fallback publish failed: " + e.getEventId(), ex);
+        }
+    }
+}
+```
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+## 六、底层本质：本地事务替代分布式事务
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+回到第一性：**Outbox 模式的精髓是"用本地事务 + 异步同步"替代"分布式事务"，让事件发布变成业务事务的一部分**。
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“Outbox + CDC 如何保证事件可靠发布”，重点看 success_rate、latency_p99、error_rate，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+- **为什么本地事务能解决原子性**：业务表和 outbox 表在同一 DB，一个本地事务保证两者原子。提交后 outbox 行一定存在，CDC 一定能监听到。
+- **为什么 CDC 而不是业务代码发 Kafka**：业务代码发 Kafka 在事务外，无法原子（事务提交前发可能业务回滚，事务提交后发可能失败）。CDC 监听 binlog 是"事件驱动"——DB 提交后 binlog 一定有记录，CDC 一定能读到。
+- **at-least-once 的本质**：CDC 重启可能重投（offset 未保存），消费端必须幂等。幂等靠 event_id 唯一索引去重。
+- **顺序保证的本质**：同一 aggregate_id 的事件按 created_at 顺序写入 outbox，binlog 顺序一致，CDC 推 Kafka 时按 aggregate_id 路由到同分区，单分区内严格有序。
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+**为什么不用 RocketMQ 事务消息**：
+- RocketMQ 事务消息原理类似（半消息 + 本地事务 + 回查），但锁定 RocketMQ
+- Outbox + CDC 是数据库无关、消息系统无关（Kafka/Pulsar/RabbitMQ 都行）
+- Outbox 表可审计（事件历史留痕），事务消息不留痕
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 Outbox 和 CDC 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+**Outbox 的代价**：
+- outbox 表写入开销（业务事务多一次 INSERT）
+- 表清理维护（不清理无限膨胀）
+- CDC 运维（Debezium 集群）
 
-### 追问 3：你如何判断这个方案值得做？
+## 七、AI 架构师加问：5 个
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 事件发布 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+1. **LLM 推理事件用 Outbox 吗？**
+   推理结果发事件用 Outbox 模式（保证推理完成 + 事件发布原子）。但 LLM 推理本身是"近似计算"，事件丢失影响小，可以接受 at-least-once + 幂等，不需要 Outbox 那么重。
 
-### STAR 项目表达
+2. **AI Agent 工作流事件用 Outbox？**
+   Agent 多步工作流用 Temporal/Saga 内置的事件机制（workflow state + activity），不直接用 Outbox。Outbox 适合"单业务操作 + 事件通知"，Saga 适合"跨服务多步补偿"。
 
-- **S（背景）**：原系统在 Outbox 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 Outbox + CDC 如何保证事件可靠发布 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 success_rate、latency_p99 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+3. **LLM 怎么辅助 Outbox 治理？**
+   LLM 读 outbox 表堆积情况 + CDC 健康度，识别异常（如某 aggregate 事件持续未发布、CDC offset 滞后），告警 + 推荐修复（重启 CDC、扩容）。
 
-### 二轮复盘清单
+4. **AI 训练样本回流用 Outbox？**
+   可以。业务事务里写 sample_outbox 表（样本数据），CDC 推到 Kafka，Flink 消费转训练样本格式写入数据湖。这样保证"业务数据 + 训练样本"一致。
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+5. **用 LLM 自动生成 Outbox schema？**
+   LLM 读业务领域模型（DDD 聚合根、事件）→ 推荐 outbox 表结构 + event type 命名规范。但 schema 设计要人工 review（业务语义理解）。
 
-## 十一、面试官 5 个企业级追问
-
-1. **你在真实项目里怎么判断“Outbox + CDC 如何保证事件可靠发布”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 success_rate、latency_p99、error_rate。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
-
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，Outbox 是否真是瓶颈，CDC 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
-
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 边界不清导致跨服务强耦合。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 success_rate 和 latency_p99 做分钟级观察，一旦越过阈值立即止损。
-
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 事件发布，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
-
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“Outbox + CDC 如何保证事件可靠发布”，至少要沉淀 核心业务对象、状态机、读写链路、依赖拓扑 的建模规范，以及 success_rate、latency_p99 的验收标准。
-
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“Outbox + CDC 如何保证事件可靠发布”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 Outbox 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“Outbox + CDC 如何保证事件可靠发布”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 success_rate、latency_p99 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 边界不清导致跨服务强耦合，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 八、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：经验丰富的值班负责人拿着工具箱、调度台和应急预案，在处理“业务流量和系统风险同时出现”。
+抓 **"业务事务写 outbox、CDC 监听推 Kafka、消费幂等去重"**。
 
-- **场景**：先说明“Outbox + CDC 如何保证事件可靠发布”服务于什么业务目标，不要上来就堆 Outbox。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 边界不清导致跨服务强耦合、异常链路没有补偿和告警。
-- **验证**：最后落到 success_rate、latency_p99、error_rate，让面试官感觉你真的上线过。
+- **Outbox 表**：业务事务原子写，存待发布事件
+- **CDC（Debezium）**：监听 binlog，EventRouter Transform 转 Kafka 消息
+- **消费幂等**：event_id 唯一索引去重，CDC 重投安全
+- **顺序**：aggregate_id 路由同分区，单分区内按时间顺序
+- **清理**：已发布事件定期归档/删除；Polling 兜底（CDC 挂了）
 
 ### 拟人化理解
 
-可以把“Outbox + CDC 如何保证事件可靠发布”想成一个经验丰富的值班负责人：Outbox 是他的工具箱、调度台和应急预案，CDC 是他面对的现场信号，事件发布 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看指标，再控风险，最后谈优化。这样记，比死背组件名更稳。
+把 Outbox 想成**邮局信箱**。你写信（业务操作）投到信箱（outbox 表）和"寄信"是同一次去邮局（一个事务，原子）——不会出现"信投了但没寄"或"寄了但没投"。CDC 是邮递员——定期开信箱取信分发，不阻塞你投信。如果邮递员病了（CDC 挂），信箱里信堆积但 DB 扛得住；邮递员恢复后从上次位置继续取（offset）。收信人按信件编号去重（幂等），同一收信人的信按时间顺序送达（顺序）。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“Outbox + CDC 如何保证事件可靠发布”，我会这样答：我会先确认业务目标、规模、SLA 和一致性要求，再选择合适的架构手段。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 边界不清导致跨服务强耦合，所以我会提前设计灰度、监控和止损阈值，重点看 success_rate、latency_p99。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 success_rate 或 latency_p99 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> Outbox 模式解决"业务数据更新 + 事件发布"原子性。传统"先更 DB 后发消息"会因发消息失败丢事件，Outbox 把事件写进 outbox 表（和业务表同事务），本地事务保证原子——业务提交了 outbox 行一定在。CDC（Debezium）监听 outbox 表 binlog，用 EventRouter Transform 把行转 Kafka 消息推到 Kafka。消费端按 event_id 唯一索引去重，CDC 重启重投安全（at-least-once + 幂等）。顺序保证：aggregate_id 路由同分区，单分区内按 created_at 严格有序。outbox 表定期清理已发布事件（保留 7 天），避免无限膨胀。双保险：CDC 挂了用 Polling 兜底（定时扫未发布事件手动推 Kafka）。这套让我们订单事件零丢失，下游履约/营销/风控/BI 都能可靠收到。最大坑是 CDC offset 管理——Debezium 重启必须从上次 offset 继续，否则漏事件或重复。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司事件发布用 Outbox 还是 RocketMQ 事务消息？CDC 用 Debezium 还是 Canal？outbox 表多大？怎么清理？
 
+## 九、苏格拉底式面试追问（7 层表格 + 现场对话）
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么不用 RocketMQ 事务消息？ | 用解耦说话：RocketMQ 事务消息锁定 MQ，Outbox + CDC 是 DB/MQ 无关；Outbox 表可审计（事件历史），事务消息不留痕；Outbox 跨 MQ（Kafka/Pulsar）通用 |
+| 证据追问 | 怎么证明 Outbox 真的零丢失？ | 注入测试：业务事务提交后立刻 kill Kafka，事件应在 outbox；恢复后 CDC 推 Kafka；消费端统计收到的 event_id 应 100% 覆盖 |
+| 边界追问 | Outbox 能解决跨服务事务吗？ | 不能直接。Outbox 解决"单服务内事件可靠发布"。跨服务事务用 Saga（每步用 Outbox 发补偿事件）。两者互补 |
+| 反例追问 | 什么场景不用 Outbox？ | 低一致性场景（埋点/监控，丢事件无所谓）、单服务无下游（不需要事件）、性能极致（outbox 多一次 INSERT） |
+| 风险追问 | Outbox 上线最大风险？ | 主动点出：CDC 挂了 outbox 堆积（要监控）、消费端不幂等导致重复（必须 event_id 去重）、outbox 表膨胀（要清理）、CDC 配置错（binlog 格式必须是 ROW） |
+| 验证追问 | 怎么验证 CDC 真的监听到 outbox？ | 测试：业务事务提交后看 Kafka topic 是否收到事件；查 Debezium metric（records-sent-count、offset）；kill Debezium 重启看是否从上次 offset 继续 |
+| 沉淀追问 | 团队 Outbox 治理沉淀什么？ | Outbox 表 schema 模板、Debezium connector 配置模板、EventRouter 配置规范、消费端幂等 SDK、CDC 监控大盘（lag/throughput/offset） |
+
+### 现场对话示例
+
+**面试官**：CDC 挂了怎么办？outbox 表会无限膨胀吗？
+
+**候选人**：CDC 挂了 outbox 表会堆积，但有兜底。第一，CDC 高可用——Debezium 用 Kafka Connect 集群部署，实例挂了 rebalance 到其他实例继续消费（offset 存 Kafka connect_offsets topic）。第二，监控——Debezium 的 records-sent-count metric 突然下降告警，第一时间发现。第三，Polling 兜底——业务系统定时扫 outbox 表未发布事件（published_at IS NULL），手动推 Kafka。这样即使 CDC 全挂，事件也不会丢（只是延迟）。outbox 表膨胀：定期清理已发布事件（published_at IS NOT NULL AND created_at < 7 天前），保留窗口够 CDC 重启恢复即可。京东实操：Debezium 3 副本，从未因 CDC 故障丢事件。
+
+**面试官**：同一 aggregate 的多个事件怎么保证顺序？
+
+**候选人**：三层保证。第一，outbox 表写入顺序——同一 aggregate 的事件按 created_at 顺序写入，binlog 顺序一致（单线程提交保证）。第二，CDC 推 Kafka 路由——Debezium EventRouter 按 aggregate_id hash 路由到同分区（如 hash(orderId) % partitions），同一 aggregate 永远在同一分区。第三，Kafka 单分区内严格有序——消费者单线程消费单分区，按 offset 顺序处理。这样同一 aggregate 的事件严格按时间顺序送达下游。跨 aggregate 无序（业务可接受，如订单 A 和订单 B 的事件顺序不重要）。
+
+**面试官**：消费端怎么保证幂等？
+
+**候选人**：event_id 唯一索引是核心。消费端处理事件前先查"是否已处理过这个 event_id"——查到就跳过。具体实现：(1) 消费端维护 event_log 表，event_id UNIQUE 约束；(2) 业务处理 + 写 event_log 在同一事务（保证"处理了就一定记录"）；(3) 并发场景下两个消费者同时处理同一 event_id，一个成功一个 DuplicateKeyException，捕获后跳过。这样 CDC 重投、Kafka 重试都安全。注意：event_id 必须是 UUID（全局唯一），不能用自增 ID（重启会变）。
+
+## 常见考点
+
+1. **Outbox 和 Saga 区别？**——Outbox 解决"单业务操作的事件可靠发布"（一次操作一个事件）；Saga 解决"跨服务长事务"（多步操作链式补偿）。Saga 每步用 Outbox 发补偿事件。
+2. **Debezium 和 Canal 区别？**——Debezium 是开源 CDC 平台（基于 Kafka Connect），支持多种 DB，社区活跃；Canal 是阿里开源，专注 MySQL，国内生态强。两者原理相同（监听 binlog）。
+3. **binlog 格式必须是 ROW 吗？**——是的。STATEMENT 格式记录 SQL 语句，CDC 解析复杂（如 NOW() 函数）；ROW 格式记录行变更，CDC 直接读。MIXED 不推荐。
+4. **Outbox 表要建索引吗？**——要。aggregate_id 索引（查询同一 aggregate 历史）、created_at 索引（清理按时间）、published_at 索引（Polling 兜底查未发布）。
+5. **Outbox 怎么做事务回滚？**——业务事务回滚时 outbox INSERT 也回滚（同事务），事件不会发布。这正是 Outbox 的原子性保证——业务失败事件不发。

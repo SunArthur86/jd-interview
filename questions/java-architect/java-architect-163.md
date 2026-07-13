@@ -9,259 +9,318 @@ tags:
 - 确定性
 - 业务流程
 feynman:
-  essence: LLM 输出如何进入确定性业务流程的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: LLM 输出进入业务流程的本质是"把非确定的生成结果约束成确定的结构化决策"——LLM 只负责"理解意图 + 提取参数 + 推荐方案"，真正改变业务状态的动作（扣款、改库存、发券）由确定性代码执行。核心模式是"LLM 输出 JSON → schema 校验 → 业务规则校验 → 确定性执行"，绝不让 LLM 直接操作数据库。
+  analogy: 像医院的 AI 分诊——AI 负责听病人描述、理解症状、推荐科室（非确定），但开药、做手术由医生和确定性医疗流程执行（确定）。AI 的建议要经过医生确认才执行。
+  first_principle: LLM 是概率模型，同样的输入可能输出不同的结果，可能幻觉（编造不存在的订单号）、可能格式错（该输出 JSON 输出了散文）。业务流程要求确定性（扣款必须精确到分、库存必须精确到件）。两者之间必须有"schema 校验 + 规则校验 + 幂等执行"的转换层。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 转换层模式：LLM 输出 → JSON schema 校验 → 业务规则校验 → 确定性执行
+  - 结构化输出：function calling / JSON mode / structured output（OpenAI 的 response_format）
+  - 双轨校验：LLM 自校验（"你确定吗？"）+ 代码硬校验（schema + 规则）
+  - 幂等执行：LLM 可能重复输出，业务侧用 idempotency_key 兜底
+  - 可回退：LLM 决策错误时能撤销（soft delete + audit log）
 first_principle:
-  problem: 面对“LLM 输出如何进入确定性业务流程”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 如何让 LLM 的非确定输出安全地驱动资金、库存等确定性业务流程？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - LLM 输出非确定（幻觉、格式错、数值错）
+  - 业务流程要求精确（金额精确到分、状态机不可乱跳）
+  - 不可逆操作（转账、删数据）一旦执行无法撤回
+  - LLM 不应该直接持有数据库连接或业务权限
+  rebuild: 建转换层——LLM 用 function calling 输出结构化决策（intent + parameters），代码层做三道校验（JSON schema 校验格式、业务规则校验合理性、权限校验合法性），全部通过后由确定性 Service 执行。LLM 的输出视为"建议"而非"指令"，执行权在代码。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - 怎么保证 LLM 输出 JSON 格式对？——用 function calling（OpenAI tool_use）或 response_format=json_object，模型层面约束输出。再加 jsonschema 校验兜底（ajv/java-jsonschema）。格式错重试 2 次，仍失败降级人工。
+  - LLM 幻觉出不存在的订单号怎么办？——业务规则校验层查数据库验证 orderId 真实存在且属于当前用户，不存在直接拒绝。不信任 LLM 的任何参数。
+  - 数值类输出（金额、数量）怎么保证精确？——LLM 输出字符串而非数字（避免浮点），业务层解析为 BigDecimal 精确计算。关键数值二次校验（"退款金额 1200 元，请确认"）。
+  - LLM 决策和规则引擎冲突怎么办？——规则引擎优先（确定性）。LLM 推荐"给用户退款"，但规则校验"超退货时效"，拒绝。LLM 的输出始终是建议，规则是硬约束。
+  - 怎么回退 LLM 的错误决策？——所有 LLM 驱动的操作用 soft delete（标记而非物理删除）+ 审计日志（记录 LLM 原始输出 + 执行结果）。发现错误可回溯撤销。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 转换层：LLM 输出 → JSON schema → 业务规则 → 确定性执行
+  - 结构化输出：function calling / response_format=json_object
+  - 双轨校验：LLM 自校验 + 代码硬校验（schema + 规则 + 权限）
+  - 幂等：idempotency_key 兜底重复输出
+  - 可回退：soft delete + 审计日志，LLM 输出视为建议非指令
 ---
 
-# 【Java 后端架构师】LLM 输出如何进入确定性业务流程？
+# 【Java 后端架构师】LLM 输出如何进入确定性业务流程
 
-> 适用场景：AI Agent/Infra。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。智能客服 LLM 听到"帮我退订单 888 的货"，理解意图后要触发退货退款流程——但 LLM 可能听错订单号（888 还是 8888？）、可能算错金额、可能跳过退货时效校验。架构师要设计的是一道"非确定到确定"的转换闸门，让 LLM 的理解能力赋能业务，但不让它的不确定性污染业务状态。
 
-## 一、先明确问题边界
+## 一、概念层：LLM 与业务流程的边界
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+| 层级 | 角色 | 确定性 | 示例 |
+|------|------|--------|------|
+| **LLM 层** | 意图理解 + 参数提取 + 方案推荐 | 非确定 | "用户要退货订单 888，推荐退款流程" |
+| **转换层** | schema 校验 + 规则校验 + 权限校验 | 确定 | "orderId 格式合法？订单存在？属于用户？" |
+| **业务层** | 状态机 + 事务 + 副作用执行 | 确定 | 退款 1200 元（精确到分）、释放库存 |
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+**核心原则**：LLM 只负责"理解"和"建议"，业务层负责"执行"。两者之间有确定性的转换层兜底。
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 LLM 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+## 二、机制层：转换层实现
 
-## 二、推荐架构思路
+### 2.1 结构化输出（function calling）
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+```java
+@Service
+public class IntentParser {
 
-## 三、技术落地点
+    private final ChatClient llm;
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+    private static final String SYSTEM_PROMPT = """
+        你是订单客服助手。分析用户意图，输出结构化决策。
+        必须通过 function calling 返回，不要输出自然语言。
+        可用工具：applyRefund, cancelOrder, modifyAddress, queryOrder。
+        """;
 
-## 四、常见坑
+    /**
+     * LLM 理解意图 → 输出结构化 tool_call
+     */
+    public ToolCall parse(String userInput, UserContext user) {
+        LlmResponse response = llm.prompt()
+            .system(SYSTEM_PROMPT)
+            .user(userInput)
+            .tools(List.of(refundToolSchema, cancelToolSchema, ...))
+            .options(OptionBuilder.temperature(0))      // temperature=0 降低随机性
+            .call()
+            .toLlmResponse();
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+        if (!response.hasToolCalls()) {
+            return ToolCall.clarify("我无法确定您的需求，请说明具体要做什么");
+        }
+        return response.getToolCalls().get(0);
+    }
+}
+```
 
-## 五、面试回答模板
+### 2.2 三道校验闸门
 
-可以按下面结构作答：
+```java
+@Service
+@Slf4j
+public class LlmToBusinessGateway {
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“LLM 输出如何进入确定性业务流程”，核心是 LLM 与 确定性 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+    private final JsonSchemaValidator schemaValidator;
+    private final BusinessRuleValidator ruleValidator;
+    private final PermissionValidator permValidator;
 
-## 六、加分点
+    /**
+     * 转换层：LLM 输出 → 确定性业务执行
+     * 三道校验全过才执行
+     */
+    public BusinessResult execute(ToolCall llmOutput, UserContext user) {
+        // 第一道：JSON schema 校验（格式对不对）
+        try {
+            schemaValidator.validate(llmOutput.getArguments(), llmOutput.getSchema());
+        } catch (SchemaException e) {
+            metrics.counter("llm.schema_fail").increment();
+            log.warn("LLM 输出格式错 toolCall={} err={}", llmOutput, e.getMessage());
+            return BusinessResult.retry("参数格式错误，正在重新理解");
+        }
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+        // 第二道：业务规则校验（合不合理）
+        BusinessRuleResult ruleResult = ruleValidator.validate(llmOutput, user);
+        if (!ruleResult.isPass()) {
+            metrics.counter("llm.rule_fail", "rule", ruleResult.getViolatedRule()).increment();
+            return BusinessResult.reject(ruleResult.getReason());
+            // 例："订单 888 已超过 7 天退货时效"
+        }
 
-## 七、企业级面试定位：从“会用”到“能负责”
+        // 第三道：权限校验（合不合法）
+        if (!permValidator.canExecute(user, llmOutput)) {
+            metrics.counter("llm.perm_fail").increment();
+            return BusinessResult.reject("无权执行此操作");
+        }
 
-企业级面试不会只问“LLM 是什么”，而是看你能不能对一条真实生产链路负责。回答“LLM 输出如何进入确定性业务流程”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+        // 全过：确定性执行
+        return executeDeterministically(llmOutput, user);
+    }
+}
+```
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 AI Agent/Infra 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 LLM、确定性、业务流程 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 tool_call_success_rate、agent_task_completion_rate、human_confirm_rate、token_cost_per_task 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+### 2.3 业务规则校验器
 
-### 企业级回答骨架
+```java
+@Service
+public class BusinessRuleValidator {
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 LLM 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+    /**
+     * 校验 LLM 输出是否符合业务规则
+     */
+    public BusinessRuleResult validate(ToolCall call, UserContext user) {
+        Map<String, Object> args = call.getArguments();
 
-### 面试中要主动补的生产细节
+        switch (call.getName()) {
+            case "applyRefund":
+                return validateRefund(args, user);
+            case "cancelOrder":
+                return validateCancel(args, user);
+            default:
+                return BusinessRuleResult.reject("未知操作");
+        }
+    }
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+    private BusinessRuleResult validateRefund(Map<String, Object> args, UserContext user) {
+        String orderId = (String) args.get("orderId");
 
-## 八、苏格拉底式面试追问
+        // 规则1：订单必须真实存在（不信任 LLM 的 orderId）
+        Order order = orderRepo.findById(orderId);
+        if (order == null) {
+            return BusinessRuleResult.reject("订单 " + orderId + " 不存在");
+        }
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+        // 规则2：订单必须属于当前用户（防越权）
+        if (!order.getUserId().equals(user.getUserId())) {
+            return BusinessRuleResult.reject("无权操作此订单");
+        }
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“LLM 输出如何进入确定性业务流程”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 tool_call_success_rate、agent_task_completion_rate、human_confirm_rate、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 LLM 负责的范围，以及必须依赖 确定性、业务流程 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 工具权限过大导致越权操作，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+        // 规则3：退货时效校验
+        if (order.getCreateTime().isBefore(LocalDateTime.now().minusDays(7))) {
+            return BusinessRuleResult.reject("订单已超过 7 天退货时效");
+        }
 
-### 现场对话示例
+        // 规则4：订单状态必须是已签收
+        if (order.getStatus() != OrderStatus.DELIVERED) {
+            return BusinessRuleResult.reject("订单状态 " + order.getStatus() + " 不可退货");
+        }
 
-**面试官**：你说要做“LLM 输出如何进入确定性业务流程”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 tool_call_success_rate、agent_task_completion_rate、业务失败率和事故记录。
+        // 规则5：金额校验（LLM 输出的 amount 必须和订单实际金额一致）
+        BigDecimal llmAmount = new BigDecimal(args.get("amount").toString());
+        if (llmAmount.compareTo(order.getPayAmount()) != 0) {
+            log.warn("LLM 金额 {} 与实际 {} 不符", llmAmount, order.getPayAmount());
+            return BusinessRuleResult.reject("退款金额校验失败");
+        }
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 tool_call_success_rate 没有改善，或者 agent_task_completion_rate 反而变差，就停止扩大范围，回到假设层重新复盘。
+        return BusinessRuleResult.pass();
+    }
+}
+```
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 tool_call_success_rate、agent_task_completion_rate、human_confirm_rate。这样它不是个人经验，而是团队机制。
+### 2.4 确定性执行（幂等）
 
-## 九、专项架构深挖：对象、链路、失败模式
+```java
+@Service
+public class DeterministicExecutor {
 
-这一题不要停在“知道 LLM”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+    /**
+     * 幂等执行：LLM 可能重复输出相同决策，用 idempotency_key 兜底
+     */
+    public BusinessResult executeDeterministically(ToolCall call, UserContext user) {
+        String idempotencyKey = buildKey(user.getUserId(), call);
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 用户意图、任务状态、工具调用、记忆、审计记录；计划器、执行器、工具权限和人工确认点；失败重试和回滚动作 |
-| 设计主线 | Agent 负责决策编排，关键业务动作仍由确定性服务执行；高风险工具调用要有权限、预算、确认和审计；任务状态机要支持暂停、恢复、取消和补偿 |
-| 失败模式 | 工具权限过大导致越权操作；循环调用耗尽预算；非确定性输出直接写入核心系统 |
-| 验证指标 | tool_call_success_rate、agent_task_completion_rate、human_confirm_rate、token_cost_per_task |
+        return idempotentExecutor.execute(idempotencyKey, () -> {
+            // 走标准业务流程（状态机 + 事务）
+            switch (call.getName()) {
+                case "applyRefund":
+                    RefundResult result = refundService.process(
+                        (String) call.getArg("orderId"),
+                        (String) call.getArg("reason"),
+                        user.getUserId());
+                    // 审计：记录 LLM 触发了此操作
+                    auditLogger.log(LLM_TRIGGERED, call, result, user);
+                    return BusinessResult.success(result);
+                // ...
+            }
+        });
+    }
 
-**架构拆解**：
+    private String buildKey(String userId, ToolCall call) {
+        // 用户 + 操作 + 参数 hash → 同一用户同一操作幂等
+        return userId + ":" + call.getName() + ":" + hash(call.getArguments());
+    }
+}
+```
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 确定性 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 LLM 输出如何进入确定性业务流程 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 业务流程 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+## 三、实战层：数值精度与可回退
 
-**高分回答细节**：
+### 3.1 数值类输出的精确处理
 
-- 不要只说“可以用 LLM”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+```java
+// LLM 输出金额用字符串，业务层解析为 BigDecimal
+public class MoneyParser {
+    public static BigDecimal parseLlmAmount(Object llmAmount) {
+        String str = llmAmount.toString().replaceAll("[^0-9.]", "");
+        BigDecimal amount = new BigDecimal(str)
+            .setScale(2, RoundingMode.HALF_UP);       // 精确到分
+        if (amount.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new BusinessException("金额必须大于 0");
+        }
+        if (amount.compareTo(MAX_AMOUNT) > 0) {
+            throw new BusinessException("金额超上限");
+        }
+        return amount;
+    }
+}
+```
 
-## 十、二轮场景追问与项目表达
+### 3.2 可回退机制（soft delete + 审计）
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+```sql
+-- LLM 驱动的操作用软删除，可回溯撤销
+CREATE TABLE t_llm_action_log (
+    id BIGINT PRIMARY KEY,
+    action_id VARCHAR(64) UNIQUE,           -- 幂等键
+    user_id VARCHAR(32),
+    llm_output JSON,                        -- LLM 原始输出（可追溯）
+    tool_name VARCHAR(50),
+    executed_result JSON,                   -- 执行结果
+    status VARCHAR(20),                     -- EXECUTED / REVERTED
+    create_time TIMESTAMP,
+    revert_time TIMESTAMP,
+    revert_reason VARCHAR(200)
+);
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+-- 发现 LLM 决策错误，撤销
+UPDATE t_llm_action_log SET status='REVERTED',
+    revert_time=NOW(), revert_reason='LLM 误判订单号'
+WHERE action_id = 'xxx';
+-- 同时执行业务回滚（退款撤销、库存恢复）
+```
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“LLM 输出如何进入确定性业务流程”，重点看 tool_call_success_rate、agent_task_completion_rate、human_confirm_rate，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+## 四、底层本质：概率模型和确定性系统的契约
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+LLM 是概率模型（生成下一个 token 的概率分布），业务系统是确定性状态机（每个状态转换有严格规则）。两者能协作的根本是"契约"——LLM 输出必须符合预定义的 schema（function calling 的 JSON Schema），转换层把概率输出"坍缩"为确定性指令。
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 LLM 和 确定性 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+**类比量子力学**：LLM 是叠加态（多种意图的可能性），function calling + 校验层是"观测"（坍缩为确定的一种意图），业务层是经典物理（确定性执行）。观测的过程就是 schema + 规则 + 权限三道校验。
 
-### 追问 3：你如何判断这个方案值得做？
+**工程启示**：
+1. LLM 的输出永远是"建议"，不是"指令"
+2. 校验层的规则是硬约束，LLM 的推理理由不能绕过
+3. 所有 LLM 驱动的操作必须可审计、可回退
+4. temperature=0 降低随机性，但仍有 5-10% 的格式错误率，必须代码兜底
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 业务流程 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+## 五、AI 工程化深挖
 
-### STAR 项目表达
+1. **怎么降低 LLM 输出的不确定性？**
+   temperature=0（贪心解码）+ function calling（强 schema）+ few-shot 示例（给典型 case）+ system prompt 约束（"必须通过 tool 返回，不要自由发挥"）。实测：function calling + temp=0 的格式错误率 < 2%，纯文本输出 + temp=0 约 10%。
 
-- **S（背景）**：原系统在 LLM 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 LLM 输出如何进入确定性业务流程 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 tool_call_success_rate、agent_task_completion_rate 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+2. **LLM 决策和规则引擎怎么协同？**
+   LLM 负责"模糊地带"（意图理解、方案推荐），规则引擎负责"硬约束"（时效、金额、权限）。两者顺序：LLM 推荐 → 规则校验 → 通过则执行。规则是兜底，LLM 是赋能。新业务规则先在规则引擎固化，再让 LLM 学习遵守。
 
-### 二轮复盘清单
+3. **怎么评估转换层的有效性？**
+   核心指标：schema_pass_rate（格式通过率，应 > 98%）、rule_pass_rate（规则通过率，反映 LLM 推荐质量）、llm_triggered_error_rate（LLM 决策导致的业务错误率，应 < 传统人工错误率）、revert_rate（事后撤销率，应 < 1%）。
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+4. **LLM 改变了业务状态怎么对账？**
+   每天 T+1 跑对账：LLM 驱动的操作日志 vs 业务系统实际状态，发现不一致（LLM 说退了但实际没退）自动补偿。监控对账差异率，超阈值告警。这和传统系统对账一样，只是数据源多了 LLM 日志。
 
-## 十一、面试官 5 个企业级追问
+5. **怎么防止 prompt injection 让 LLM 执行恶意操作？**
+   转换层不信任 LLM 的任何输出——schema 校验防格式注入、规则校验防逻辑越权（"给我退款 100 万"被金额规则拦）、权限校验防身份越权（LLM 不能替别的用户操作）。高敏操作还要人工确认（HITL）。
 
-1. **你在真实项目里怎么判断“LLM 输出如何进入确定性业务流程”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 tool_call_success_rate、agent_task_completion_rate、human_confirm_rate。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
-
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，LLM 是否真是瓶颈，确定性 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
-
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 工具权限过大导致越权操作。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 tool_call_success_rate 和 agent_task_completion_rate 做分钟级观察，一旦越过阈值立即止损。
-
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 业务流程，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
-
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“LLM 输出如何进入确定性业务流程”，至少要沉淀 用户意图、任务状态、工具调用、记忆、审计记录 的建模规范，以及 tool_call_success_rate、agent_task_completion_rate 的验收标准。
-
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“LLM 输出如何进入确定性业务流程”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 LLM 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“LLM 输出如何进入确定性业务流程”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 tool_call_success_rate、agent_task_completion_rate 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 工具权限过大导致越权操作，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 六、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：带实习生的值班组长拿着任务计划、工具权限、检查清单和交接记录，在处理“聪明的实习生想自己操作生产系统”。
+抓 **"结构化、三校验、幂等、可回退"** 四个词。
 
-- **场景**：先说明“LLM 输出如何进入确定性业务流程”服务于什么业务目标，不要上来就堆 LLM。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 工具权限过大导致越权操作、循环调用耗尽预算。
-- **验证**：最后落到 tool_call_success_rate、agent_task_completion_rate、human_confirm_rate，让面试官感觉你真的上线过。
-
-### 拟人化理解
-
-可以把“LLM 输出如何进入确定性业务流程”想成一个带实习生的值班组长：LLM 是他的任务计划、工具权限、检查清单和交接记录，确定性 是他面对的现场信号，业务流程 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先让他提建议，再让确定性系统执行。这样记，比死背组件名更稳。
+- **结构化**：function calling / response_format=json，LLM 输出 JSON
+- **三校验**：schema（格式）+ 规则（合理）+ 权限（合法）
+- **幂等**：idempotency_key 兜底重复输出
+- **可回退**：soft delete + 审计日志，LLM 输出是建议非指令
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“LLM 输出如何进入确定性业务流程”，我会这样答：我会先把 Agent 的决策、工具、状态和审计边界讲清楚，不能因为模型聪明就让它绕过工程护栏。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 工具权限过大导致越权操作，所以我会提前设计灰度、监控和止损阈值，重点看 tool_call_success_rate、agent_task_completion_rate。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
+> LLM 输出进业务流程我建一道转换闸门。LLM 用 function calling 输出结构化决策（intent + parameters），temperature=0 降低随机性。转换层三道校验：schema 校验格式（ajv 验证 JSON Schema）、业务规则校验合理性（订单存在/属于用户/退货时效/金额一致）、权限校验合法性。三道全过才走确定性 Service 执行。关键是"不信任 LLM"——orderId 要查库验证、金额要用 BigDecimal 精确解析、用户要校验归属。幂等用 idempotency_key（userId + operation + paramsHash），LLM 重复输出返回上次结果。所有 LLM 驱动的操作用 soft delete + 审计日志，发现误判可回溯撤销。LLM 的输出始终是建议，规则引擎是硬约束，冲突时规则优先。最容易翻车的是"让 LLM 直接操作数据库"——一旦 prompt injection 诱导，业务全线崩。
 
-### 被追问时的转场话术
+## 常见考点
 
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 tool_call_success_rate 或 agent_task_completion_rate 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
-
-### 反问面试官
-
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
-
+1. **为什么不能让 LLM 直接执行 SQL？**——LLM 可能幻觉出不存在的条件（DELETE FROM orders）、可能被 prompt injection 诱导（"删除所有订单"）。必须走确定性 Service + 状态机 + 权限校验。Text-to-SQL 只在分析场景用且只读账号。
+2. **function calling 比 prompt 输出 JSON 好在哪？**——function calling 是模型层面约束（训练时学过），格式错误率 < 2%；prompt 要求输出 JSON 是提示层面约束，模型可能输出多余文本或格式错，错误率约 10%。
+3. **LLM 输出的数值怎么处理？**——字符串接收（避免 JSON 浮点精度丢失），BigDecimal 解析（精确到分），业务规则二次校验（和订单实际金额比对）。
+4. **怎么回退 LLM 的错误决策？**——操作前写 LLM action log（含原始输出），操作用 soft delete。发现错误时标记 REVERTED + 业务回滚（退款撤销/库存恢复）。监控 revert_rate < 1%。

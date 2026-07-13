@@ -5,263 +5,474 @@ category: java-architect
 subcategory: 交易架构
 tags:
 - Java 架构师
-- 账户
-- 流水
+- 账户系统
+- 复式记账
 - 对账
+- 资金安全
 feynman:
-  essence: 账户余额、流水与对账架构的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: 账户系统是金融级基础设施——"钱不能多也不能少"。核心是"复式记账（有借必有贷，借贷必相等）+ 流水不可篡改（追加写+哈希链）+ 实时对账（余额=流水汇总）"。账户余额不是直接更新的数字，而是"流水汇总"的结果——每一笔交易记一条流水（借/贷），余额 = 初始余额 + SUM(流水)。这样任何余额都可由流水重算验证，资金可追溯。
+  analogy: 像银行存折。存折上不是直接改"余额"，而是每笔交易记一行（日期、存/取、金额），余额是累加的结果。你对账时，把所有存取累加，应该等于余额——对不上就是账错了。账户系统一样——余额不是独立存储的数字，而是流水的汇总。这就是"流水是账本，余额是视图"。
+  first_principle: 为什么余额不能直接 UPDATE +1/-1？因为并发更新会丢失（两个事务都读到 100，各扣 50，写回都 50，实际应该是 0）；而且直接改余额无审计痕迹（查不到为什么变了）。解法是"流水追加写"——每笔交易 INSERT 一条流水（不可改），余额由流水汇总。并发用乐观锁或"余额表 + 流水表"分离（流水高并发写，余额低频更新）。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 复式记账：每笔交易借方贷方平衡（A 转 B：A 借，B 贷，金额相等）
+  - 流水追加写：INSERT only，不可 UPDATE/DELETE，哈希链防篡改
+  - 余额一致性：余额表 = SUM(流水)，定时对账修正
+  - 并发控制：乐观锁（version）或悲观锁（SELECT FOR UPDATE）
+  - 账户冻结/解冻：预占额度（frozen），对应"可用=余额-冻结"
 first_principle:
-  problem: 面对“账户余额、流水与对账架构”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 账户余额涉及钱，怎么保证高并发下不错账、不丢钱、可审计？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 钱不能错（差一分都是 P0 故障）
+  - 并发扣款不能丢失更新（两事务并发扣同一账户）
+  - 每笔交易必须可追溯（审计/对账/合规）
+  - 余额必须随时可由流水重算验证（防数据腐败）
+  rebuild: 复式记账 + 流水追加写 + 余额分离。流水表 INSERT only（记录每笔借贷，哈希链防篡改），余额表用乐观锁更新（version 字段）。账户操作走"写流水 + 更余额"两步，事务保证原子。对账定时跑：余额表 vs SUM(流水)，差异告警。冻结额度独立字段（frozen_balance），可用 = balance - frozen。T+1 全量对账（和银行/支付渠道对），实时增量对账（关键账户秒级）。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - 高并发扣款怎么优化？——余额表分片（按 user_id），避免热点；乐观锁重试；流水异步写（先扣余额后补流水，靠对账兜底）。
+  - 账户透支怎么防？——扣款前校验 balance >= amount，可用乐观锁 CAS（UPDATE WHERE balance >= amount）。
+  - 怎么做账户冻结？——frozen_balance 字段，冻结时 INCR frozen，解冻 DECR；可用余额 = balance - frozen_balance。
+  - 对账发现差异怎么修？——不能直接改余额（破坏审计），要写"调整流水"（adjustment），记原因和审批人，余额由流水重算。
+  - 账户系统怎么容灾？——同城双活（主写单机房，只读多机房），跨城灾备（异步复制）。资金数据零丢失（RPO=0）。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 复式记账：借贷必相等
+  - 流水追加写：INSERT only + 哈希链
+  - 余额 = SUM(流水)，对账验证
+  - 并发：乐观锁 version 或 CAS（WHERE balance >= amount）
+  - 冻结：frozen_balance 字段，可用 = balance - frozen
 ---
 
-# 【Java 后端架构师】账户余额、流水与对账架构？
+# 【Java 后端架构师】账户余额、流水与对账架构
 
-> 适用场景：架构设计。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 资金核心。用户钱包余额、商家收款账户、平台营销账户、供应商结算账户——所有涉及"钱"的账户都要保证"余额准确、流水可查、对账闭环"。这不是普通 CRUD，而是金融级系统：差一分钱都是 P0 故障。核心是"复式记账 + 流水追加写 + 多层对账"。
 
-## 一、先明确问题边界
+## 一、概念层：账户系统的金融级要求
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**账户模型三要素**：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+```
+账户（Account）：who
+  ├─ account_id（账户 ID）
+  ├─ user_id（所属用户/商户）
+  ├─ account_type（类型：WALLET/SETTLEMENT/MARKETING）
+  ├─ balance（余额）          ← 余额视图，由流水汇总
+  ├─ frozen_balance（冻结额）  ← 预占额度
+  └─ version（乐观锁版本号）
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 账户 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+流水（Ledger）：what happened
+  ├─ ledger_id（流水 ID，全局唯一）
+  ├─ account_id（账户）
+  ├─ direction（方向：DEBIT 借 / CREDIT 贷）
+  ├─ amount（金额）
+  ├─ business_type（业务类型：RECHARGE/PAY/REFUND/SETTLE）
+  ├─ business_id（业务单号，关联订单/支付）
+  ├─ prev_hash（前一条流水的哈希，哈希链防篡改）
+  └─ curr_hash（本条流水哈希）
 
-## 二、推荐架构思路
+对账（Reconciliation）：is it correct
+  ├─ 余额表 balance vs SUM(流水) ← 内部对账
+  ├─ 平台账 vs 银行/支付渠道账 ← 外部对账
+  └─ 差异处理（长款/短款）
+```
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+**复式记账原理**（核心）：
 
-## 三、技术落地点
+```
+用户 A 用钱包余额 100 元买商家 B 的商品：
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+借（DEBIT）              贷（CREDIT）
+───────────────────────────────────
+A 钱包账户  100  ──┐
+                   ├── 金额相等（借贷平衡）
+B 商家结算账户     100
 
-## 四、常见坑
+两条流水，金额相等，方向相反。任何时刻：SUM(所有借) = SUM(所有贷)
+这保证了"钱不凭空多/少"——总额守恒。
+```
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+**为什么不用单式记账（直接改余额）**：
 
-## 五、面试回答模板
+| 维度 | 单式记账（直接改） | 复式记账（流水汇总） |
+|------|---------------------|----------------------|
+| 并发 | 丢失更新（两事务并发扣） | 流水 INSERT 无冲突 |
+| 审计 | 无痕迹（余额变了不知为何） | 每笔可追溯 |
+| 对账 | 无法验证（余额是孤值） | 余额=SUM(流水)可重算 |
+| 防错 | 错了难发现 | 借贷不平衡立即发现 |
+| 适用 | 简单计数器 | 金融账户（选这个） |
 
-可以按下面结构作答：
+## 二、机制层：账户操作核心代码
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“账户余额、流水与对账架构”，核心是 账户 与 流水 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+**扣款（乐观锁 + 流水追加）**：
 
-## 六、加分点
+```java
+@Service
+public class AccountService {
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+    @Autowired private AccountRepository accountRepo;
+    @Autowired private LedgerRepository ledgerRepo;
 
-## 七、企业级面试定位：从“会用”到“能负责”
+    /**
+     * 扣款：写流水 + 扣余额（事务原子）
+     */
+    @Transactional
+    public void debit(Long accountId, BigDecimal amount, String businessType, String businessId) {
+        // 1. 查账户（带乐观锁版本号）
+        Account account = accountRepo.findById(accountId)
+            .orElseThrow(() -> new AccountNotFoundException(accountId));
 
-企业级面试不会只问“账户 是什么”，而是看你能不能对一条真实生产链路负责。回答“账户余额、流水与对账架构”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+        // 2. 校验可用余额（余额 - 冻结 >= 扣款额）
+        BigDecimal available = account.getBalance().subtract(account.getFrozenBalance());
+        if (available.compareTo(amount) < 0) {
+            throw new InsufficientBalanceException("余额不足");
+        }
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 架构设计 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 账户、流水、对账 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 pay_callback_duplicate_rate、reconcile_diff_count、account_balance_mismatch、compensation_pending_count 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+        // 3. 写流水（DEBIT 方向，追加写，哈希链）
+        String prevHash = ledgerRepo.getLatestHash(accountId);
+        Ledger ledger = new Ledger();
+        ledger.setAccountId(accountId);
+        ledger.setDirection("DEBIT");
+        ledger.setAmount(amount);
+        ledger.setBusinessType(businessType);
+        ledger.setBusinessId(businessId);
+        ledger.setPrevHash(prevHash);
+        ledger.setCurrHash(computeHash(prevHash, accountId, "DEBIT", amount, businessId));
+        ledgerRepo.insert(ledger);   // INSERT only，不可改
 
-### 企业级回答骨架
+        // 4. 乐观锁更新余额
+        int updated = accountRepo.debitWithOptimisticLock(
+            accountId, amount, account.getVersion());
+        if (updated == 0) {
+            throw new ConcurrentModifyException("账户并发修改，请重试");
+        }
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 账户 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+        monitor.record("account_debit", accountId, amount);
+    }
 
-### 面试中要主动补的生产细节
+    private String computeHash(String... parts) {
+        String joined = String.join("|", parts);
+        return DigestUtils.sha256Hex(joined);
+    }
+}
+```
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+**乐观锁扣款 SQL**（关键）：
 
-## 八、苏格拉底式面试追问
+```sql
+-- 乐观锁扣款：balance >= amount 才扣，version 匹配才更新
+UPDATE t_account
+SET balance = balance - #{amount},
+    version = version + 1,
+    updated_at = NOW()
+WHERE id = #{accountId}
+  AND version = #{oldVersion}
+  AND balance - frozen_balance >= #{amount};   -- 可用余额校验
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+-- affected rows = 1 成功，0 = 并发冲突或余额不足
+```
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“账户余额、流水与对账架构”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 pay_callback_duplicate_rate、reconcile_diff_count、account_balance_mismatch、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 账户 负责的范围，以及必须依赖 流水、对账 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 重复回调导致重复入账，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+**复式记账转账**（A 转 B）：
 
-### 现场对话示例
+```java
+@Service
+public class TransferService {
 
-**面试官**：你说要做“账户余额、流水与对账架构”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 pay_callback_duplicate_rate、reconcile_diff_count、业务失败率和事故记录。
+    /**
+     * 转账：A 借 + B 贷，原子事务
+     */
+    @Transactional
+    public void transfer(Long fromAccount, Long toAccount, BigDecimal amount, String businessId) {
+        try {
+            // 1. A 扣款（DEBIT）
+            accountService.debit(fromAccount, amount, "TRANSFER_OUT", businessId);
+            // 2. B 加款（CREDIT）
+            accountService.credit(toAccount, amount, "TRANSFER_IN", businessId);
+            // 事务提交，两步要么都成功要么都失败（原子）
+        } catch (Exception e) {
+            // 自动回滚（@Transactional），A 不会扣了 B 没加
+            throw e;
+        }
+    }
+}
+```
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 pay_callback_duplicate_rate 没有改善，或者 reconcile_diff_count 反而变差，就停止扩大范围，回到假设层重新复盘。
+**账户冻结/解冻**（下单预占额度）：
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 pay_callback_duplicate_rate、reconcile_diff_count、account_balance_mismatch。这样它不是个人经验，而是团队机制。
+```java
+@Service
+public class AccountFreezeService {
 
-## 九、专项架构深挖：对象、链路、失败模式
+    /**
+     * 冻结：不扣余额，增加 frozen_balance（可用 = balance - frozen 减少）
+     */
+    @Transactional
+    public void freeze(Long accountId, BigDecimal amount, String businessId) {
+        Account account = accountRepo.findByIdForUpdate(accountId);  // 悲观锁
+        BigDecimal available = account.getBalance().subtract(account.getFrozenBalance());
+        if (available.compareTo(amount) < 0) {
+            throw new InsufficientBalanceException("可用余额不足");
+        }
 
-这一题不要停在“知道 账户”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+        // 写冻结流水
+        ledgerRepo.insert(buildLedger(accountId, "FREEZE", amount, businessId));
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 订单、支付单、账户流水、清结算单、对账差错；状态机、幂等键、支付回调、补偿任务；资金快照和审计凭证 |
-| 设计主线 | 资金状态以流水和状态机为准，禁止覆盖式更新；外部回调必须幂等并可重复查询；交易、清结算、对账分层，差错进入可追踪工单 |
-| 失败模式 | 重复回调导致重复入账；状态逆向流转导致资金错乱；对账缺失让差错长期沉默 |
-| 验证指标 | pay_callback_duplicate_rate、reconcile_diff_count、account_balance_mismatch、compensation_pending_count |
+        // 增加冻结额
+        accountRepo.addFrozen(accountId, amount);
+    }
 
-**架构拆解**：
+    /**
+     * 解冻并扣款（支付成功：冻结额转实扣）
+     */
+    @Transactional
+    public void freezeAndDeduct(Long accountId, BigDecimal amount, String businessId) {
+        // 1. 释放冻结
+        accountRepo.reduceFrozen(accountId, amount);
+        // 2. 实扣余额
+        accountRepo.debit(accountId, amount);
+        // 3. 写扣款流水
+        ledgerRepo.insert(buildLedger(accountId, "DEBIT", amount, businessId));
+    }
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 流水 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 账户余额、流水与对账架构 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 对账 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+    /**
+     * 解冻（订单取消：冻结额释放回可用）
+     */
+    @Transactional
+    public void unfreeze(Long accountId, BigDecimal amount, String businessId) {
+        accountRepo.reduceFrozen(accountId, amount);
+        ledgerRepo.insert(buildLedger(accountId, "UNFREEZE", amount, businessId));
+    }
+}
+```
 
-**高分回答细节**：
+## 三、机制层：流水哈希链防篡改
 
-- 不要只说“可以用 账户”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+**哈希链设计**（审计级防篡改）：
 
-## 十、二轮场景追问与项目表达
+```java
+/**
+ * 流水哈希链：每条流水的 hash 依赖前一条的 hash
+ * 篡改任意一条，后续所有 hash 都不匹配，立即发现
+ */
+@Component
+public class LedgerHashChain {
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+    /**
+     * 写流水时计算哈希
+     */
+    public String computeHash(Ledger ledger, String prevHash) {
+        String content = String.join("|",
+            prevHash,
+            ledger.getAccountId().toString(),
+            ledger.getDirection(),
+            ledger.getAmount().toString(),
+            ledger.getBusinessId(),
+            ledger.getCreatedAt().toString()
+        );
+        return DigestUtils.sha256Hex(content);
+    }
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+    /**
+     * 验证哈希链完整性（对账时跑）
+     */
+    public HashChainVerifyResult verifyChain(Long accountId) {
+        List<Ledger> ledgers = ledgerRepo.findByAccountIdOrderByTime(accountId);
+        String prevHash = "GENESIS";
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“账户余额、流水与对账架构”，重点看 pay_callback_duplicate_rate、reconcile_diff_count、account_balance_mismatch，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+        for (Ledger ledger : ledgers) {
+            String expected = computeHash(ledger, prevHash);
+            if (!expected.equals(ledger.getCurrHash())) {
+                // 哈希不匹配——流水被篡改！
+                monitor.record("ledger_tamper_detected", accountId, ledger.getId());
+                return HashChainVerifyResult.tampered(ledger.getId());
+            }
+            prevHash = ledger.getCurrHash();
+        }
+        return HashChainVerifyResult.ok();
+    }
+}
+```
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+## 四、机制层：多层对账体系
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 账户 和 流水 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+**对账架构**（三层）：
 
-### 追问 3：你如何判断这个方案值得做？
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 第 1 层：内部对账（实时/分钟级）                              │
+│   余额表 balance vs SUM(流水 amount)                         │
+│   差异 → 告警 + 写调整流水修正                                │
+│   目的：防数据腐败（DB bug/并发问题）                         │
+├─────────────────────────────────────────────────────────────┤
+│ 第 2 层：外部对账（T+1 批量）                                 │
+│   平台账 vs 银行/支付宝/微信账                                │
+│   下载渠道账单 → 比对流水 → 长款/短款处理                     │
+│   目的：防渠道通信问题（掉单/重复）                           │
+├─────────────────────────────────────────────────────────────┤
+│ 第 3 层：总分账（日终）                                       │
+│   所有账户余额 SUM vs 总账控制账户                            │
+│   目的：防系统性错误（整体资金守恒验证）                      │
+└─────────────────────────────────────────────────────────────┘
+```
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 对账 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+**内部对账代码**：
 
-### STAR 项目表达
+```java
+@Service
+public class InternalReconcileService {
 
-- **S（背景）**：原系统在 账户 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 账户余额、流水与对账架构 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 pay_callback_duplicate_rate、reconcile_diff_count 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+    /**
+     * 单账户对账：余额表 vs 流水汇总
+     */
+    public ReconcileResult reconcileAccount(Long accountId) {
+        // 1. 余额表的余额
+        Account account = accountRepo.findById(accountId);
+        BigDecimal balanceFromAccount = account.getBalance();
 
-### 二轮复盘清单
+        // 2. 流水汇总（DEBIT 减，CREDIT 加）
+        BigDecimal balanceFromLedger = ledgerRepo.sumByAccountId(accountId);
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+        // 3. 比对
+        if (balanceFromAccount.compareTo(balanceFromLedger) != 0) {
+            BigDecimal diff = balanceFromAccount.subtract(balanceFromLedger);
+            monitor.record("balance_mismatch", accountId, diff);
 
-## 十一、面试官 5 个企业级追问
+            // 写调整流水修正（不能直接改余额，要留痕）
+            writeAdjustment(accountId, diff, "对账差异修正");
 
-1. **你在真实项目里怎么判断“账户余额、流水与对账架构”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 pay_callback_duplicate_rate、reconcile_diff_count、account_balance_mismatch。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+            // 告警人工复核
+            alertService.send("账户余额不一致", accountId, diff);
+            return ReconcileResult.mismatch(diff);
+        }
+        return ReconcileResult.ok();
+    }
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，账户 是否真是瓶颈，流水 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+    /**
+     * 定时全量对账（凌晨跑批）
+     */
+    @Scheduled(cron = "0 0 2 * * ?")   // 每天凌晨 2 点
+    public void fullReconcile() {
+        List<Long> accountIds = accountRepo.findAllActiveAccountIds();
+        int mismatchCount = 0;
+        for (Long accountId : accountIds) {
+            ReconcileResult result = reconcileAccount(accountId);
+            if (result.isMismatch()) mismatchCount++;
+        }
+        monitor.record("reconcile_mismatch_rate",
+            (double) mismatchCount / accountIds.size());
+    }
+}
+```
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 重复回调导致重复入账。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 pay_callback_duplicate_rate 和 reconcile_diff_count 做分钟级观察，一旦越过阈值立即止损。
+**外部对账（和支付渠道）**：
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 对账，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+```java
+@Service
+public class ChannelReconcileService {
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“账户余额、流水与对账架构”，至少要沉淀 订单、支付单、账户流水、清结算单、对账差错 的建模规范，以及 pay_callback_duplicate_rate、reconcile_diff_count 的验收标准。
+    /**
+     * T+1 对账：下载渠道账单，比对平台流水
+     */
+    @Scheduled(cron = "0 0 6 * * ?")   // 每天早上 6 点对昨日账
+    public void reconcileWithChannel() {
+        // 1. 下载渠道账单（支付宝/微信/银行）
+        List<ChannelRecord> channelRecords = channelClient.downloadBill(yesterday());
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
+        // 2. 查平台昨日流水
+        List<Ledger> platformLedgers = ledgerRepo.findByDate(yesterday());
 
-1. **如果把“账户余额、流水与对账架构”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 账户 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
+        // 3. 双向比对
+        ReconcileResult result = bidirectionalMatch(channelRecords, platformLedgers);
 
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“账户余额、流水与对账架构”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 pay_callback_duplicate_rate、reconcile_diff_count 对业务链路的影响。
+        // 4. 处理差异
+        for (Record missing : result.getPlatformMissing()) {
+            // 长款：渠道有平台无——补单（渠道扣了款但平台没记）
+            handleLongPayment(missing);
+        }
+        for (Record missing : result.getChannelMissing()) {
+            // 短款：平台有渠道无——挂账待查（平台记了但渠道没成功）
+            handleShortPayment(missing);
+        }
 
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 重复回调导致重复入账，要能通过 trace、tool_call_id 和业务流水快速回放。
+        monitor.record("reconcile_long_count", result.getPlatformMissing().size());
+        monitor.record("reconcile_short_count", result.getChannelMissing().size());
+    }
+}
+```
 
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
+## 五、底层本质：账户系统的本质是"资金守恒与可验证"
 
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
+回到第一性：**账户系统的本质是"保证资金守恒（钱不凭空多/少）且任何时刻可验证（余额可由流水重算）"**。
 
-## 十三、记忆口诀与面试现场表达
+- **资金守恒**：复式记账保证"借方总额=贷方总额"，钱只是在不同账户间流转，总额不变。这是物理定律级的约束——像能量守恒。任何单边记账（只记一方）都可能"钱凭空消失/出现"，复式记账从结构上杜绝。
+- **可验证性**：余额不是独立存储的"数"，而是流水的"汇总视图"。任何时候余额表 = SUM(流水) 必须成立。这像"账本和存折对账"——存折（流水）是原始记录，余额是累加结果，两者必须一致。不一致说明数据出错（DB 损坏/并发 bug/篡改）。
+- **不可篡改**：流水追加写（INSERT only，不可 UPDATE/DELETE），加哈希链（每条依赖前一条）。篡改任意一条流水，后续哈希全不匹配，立即发现。这是"审计级数据完整性"——像区块链的思路，用密码学保证不可改。
+- **可对账**：三层对账（内部余额 vs 流水、平台 vs 渠道、总分账）形成闭环。任何错误都能被发现和修正（通过写调整流水，不是直接改余额）。
+
+**余额表 vs 流水表分离的本质**：流水表是"高并发写"（每笔交易 INSERT），余额表是"低频读"（查询余额）。如果每次查余额都 SUM(流水)，性能差（流水可能百万条）。所以余额表做"物化视图"——实时维护余额，查询 O(1)。代价是余额表和流水表可能短暂不一致（并发/延迟），靠对账兜底。这是"读写分离 + 最终一致"的取舍——用对账换性能。
+
+**冻结额的本质是"预占"**：下单时不能立刻扣余额（用户可能取消），但要把额度"占住"防止超额下单。冻结额（frozen_balance）就是这个"预占"——可用余额 = balance - frozen。下单冻结、支付成功转实扣、取消解冻。这解决了"下单到支付的时间差内如何防止超额"的问题。
+
+## 六、AI 架构师加问：5 个
+
+1. **用 AI 检测异常账户操作（洗钱/套现），怎么做？**
+   AI 学习正常账户的交易模式（频率/金额/对手方），用异常检测识别偏离——如某账户突然大额转出（可能被盗）、频繁小额转入再集中转出（洗钱）、与黑名单账户交互。AI 用图神经网络分析账户关系网，识别团伙作案。京东金融实践：AI 风控每天拦截万级异常交易，准确率 98%+。
+
+2. **用 AI 预测账户流动性（余额够不够兑付），怎么做？**
+   AI 根据历史提现/消费模式预测未来 N 天的资金需求，提前准备备付金。预测偏低有兑付风险（用户提现失败），偏高资金闲置（成本）。AI 用时序模型（LSTM/Prophet）预测，准确率 90%+ 时用于备付金调度。
+
+3. **AI 自动处理对账差异，怎么做？**
+   对账差异（长款/短款）传统要人工判断处理。AI 学习历史差异处理案例，自动分类——"渠道延迟"类（自动等待重对）、"重复记账"类（自动冲正）、"真实差错"类（人工复核）。AI 处理 80% 的常见差异，20% 复杂的人工兜底。
+
+4. **用 AI 做账户画像（信用评分），怎么做？**
+   AI 根据账户历史（余额稳定性/流水规律/还款记录）算信用分，用于授信（花呗/白条）、提额。但这是金融级决策，AI 只是辅助——最终授信需人工审核+合规校验。京东白条：AI 评分 + 规则引擎 + 人工审核，三层决策。
+
+5. **AI 检测账户系统异常（DB 性能/数据倾斜），怎么做？**
+   AI 监控账户系统的指标（QPS/RT/错误率/数据分布），用异常检测识别偏离——如某账户突然成热点（被刷）、某分片数据量异常（分片不均）。AI 定位根因并触发自动处理（热点账户迁移、分片 rebalance）。
+
+## 七、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：银行柜台主管拿着流水、凭证、复核和对账，在处理“每一分钱都不能凭感觉处理”。
+抓 **"复式记账借贷平、流水追加哈希链、余额等于流水和、三层对账保资金"**。
 
-- **场景**：先说明“账户余额、流水与对账架构”服务于什么业务目标，不要上来就堆 账户。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 重复回调导致重复入账、状态逆向流转导致资金错乱。
-- **验证**：最后落到 pay_callback_duplicate_rate、reconcile_diff_count、account_balance_mismatch，让面试官感觉你真的上线过。
-
-### 拟人化理解
-
-可以把“账户余额、流水与对账架构”想成一个银行柜台主管：账户 是他的流水、凭证、复核和对账，流水 是他面对的现场信号，对账 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先保证账准，再提升效率。这样记，比死背组件名更稳。
+- **复式记账**：每笔交易借方贷方平衡（A 转 B：A 借 B 贷，金额相等）
+- **流水追加写**：INSERT only + 哈希链（prev_hash → curr_hash）防篡改
+- **余额一致性**：余额表 = SUM(流水)，实时对账验证
+- **并发控制**：乐观锁（version + WHERE balance >= amount）或悲观锁（FOR UPDATE）
+- **冻结预占**：frozen_balance 字段，可用 = balance - frozen
+- **三层对账**：内部（余额 vs 流水）+ 外部（平台 vs 渠道）+ 总分账
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“账户余额、流水与对账架构”，我会这样答：我会先把资金状态、幂等键、流水和对账讲清楚，交易链路最怕状态被覆盖和重复推进。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 重复回调导致重复入账，所以我会提前设计灰度、监控和止损阈值，重点看 pay_callback_duplicate_rate、reconcile_diff_count。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
+> 账户系统是金融级基础设施，核心是"复式记账 + 流水追加写 + 三层对账"。复式记账——每笔交易借方贷方平衡，A 转 B 就是 A 借 100、B 贷 100，保证资金守恒（钱不凭空多/少）。流水表 INSERT only（不可改不可删），加哈希链（每条 curr_hash 依赖前一条 prev_hash），篡改任意一条后续哈希全不匹配，审计级防篡改。余额表是流水的物化视图——balance = SUM(流水)，查询 O(1)，但靠对账保证一致。并发扣款用乐观锁——UPDATE WHERE id AND version=旧 AND balance-frozen >= amount，affected=1 成功，0 重试。账户冻结——frozen_balance 字段，下单时 INCR frozen（预占额度），支付成功转实扣（DECR frozen + DECR balance），取消则 DECR frozen（释放）。三层对账——内部（余额表 vs SUM 流水，分钟级，防数据腐败）、外部（平台 vs 支付渠道账单，T+1，防掉单/重复）、总分账（所有账户余额 SUM vs 控制账户，日终，防系统性错误）。对账发现差异不能直接改余额（破坏审计），要写调整流水（adjustment）留痕。监控 balance_mismatch（余额不一致数，应为 0）、ledger_tamper_detected（流水篡改数，应为 0）、reconcile_diff_count（对账差异数）。最关键的是"资金守恒且任何时刻可由流水重算验证"——这是账户系统区别于普通增删改的本质。
 
-### 被追问时的转场话术
+## 八、苏格拉底式面试追问
 
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 pay_callback_duplicate_rate 或 reconcile_diff_count 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么不直接 UPDATE balance = balance - amount（要乐观锁+流水）？ | 直接 UPDATE 有两个问题：丢失更新（并发两事务都读到 100，各扣 50，写回 50，实际应 0）；无审计（余额变了不知为何）。乐观锁防并发，流水记审计。用 balance_mismatch（余额不一致数，应 0）和 lost_update_count（丢失更新数，应 0）量化 |
+| 证据追问 | 怎么证明账户系统资金准确（一分不差）？ | 三层对账全通过 + 哈希链验证完整 + 压测（万并发扣同一账户，断言余额=初始-总扣）+ 外部审计（第三方审计账目）。监控 balance_mismatch（0）、reconcile_diff_count（0）、hash_chain_broken（0） |
+| 边界追问 | 复式记账能处理所有场景吗？ | 不能。单边记账场景（如利息计算、手续费）要先确定对应账户。跨币种（外币转账）涉及汇率，需要"汇兑损益"账户平衡。复杂金融产品（期权/期货）需多账户联动 |
+| 反例追问 | 什么场景不需要复式记账（单式够用）？ | 非资金场景——积分、虚拟币、库存。这些"丢了能补"（不是真钱），单式记账够用。但涉及真钱的账户必须复式 |
+| 风险追问 | 账户系统最大风险？ | 主动点出：余额不一致（数据腐败/并发 bug）、资金丢失（掉单/重复扣）、流水篡改（内鬼/黑客）、对账遗漏（差异未发现累积）。靠哈希链+三层对账+实时告警组合防护 |
+| 验证追问 | 怎么验证冻结/解冻正确？ | 不变式：可用余额 = balance - frozen >= 0（永不透支）；冻结总额 = 所有未支付订单冻结和；解冻和实扣金额匹配。监控 negative_available_count（可用为负数，应 0） |
+| 沉淀追问 | 账户系统沉淀什么？ | 复式记账框架、流水哈希链工具、三层对账平台、账户监控大盘（余额一致性/流水完整性/对账差异率/并发冲突率） |
 
-### 反问面试官
+### 现场对话示例
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+**面试官**：高并发场景（双 11 万级 QPS 扣同一商户账户），乐观锁冲突率高怎么办？
 
+**候选人**：乐观锁冲突率高时退化为"热点账户"问题。三层解法。第一层，账户分片——把一个商户账户拆成 N 个子账户（如 merchant:1234:0 到 merchant:1234:9），扣款随机选子账户，单子账户 QPS 降到 1/10。查总余额时 SUM 所有子账户。第二层，异步累积——高并发扣款先写流水（INSERT 无冲突），余额表异步批量更新（每秒汇总流水更新一次余额）。代价是余额有秒级延迟，但对账兜底（实时对账会发现差异并修正）。第三层，内存缓冲——热账户余额缓存到本地（Caffeine），扣款先在内存扣（无锁，超快），异步刷 DB。极端情况内存和 DB 不一致，靠"内存预扣 + DB 兜底 + 对账修正"保证最终一致。京东双 11 的实践：TOP 商户账户分片 100 个 + 内存缓冲，单商户支撑 10 万 QPS 扣款，乐观锁冲突率 < 0.1%。
+
+**面试官**：对账发现"平台余额 1000，流水汇总 950，差 50"，怎么处理？
+
+**候选人**：这是"余额表多 50"。第一步，不能直接改余额表（破坏审计），要查根因。可能原因：并发 bug（余额更新了但流水没写）、DB 数据腐败、历史迁移错误。第二步，查该账户近期所有操作日志，定位差异时间点（从什么时候开始差 50）。第三步，写"调整流水"修正——INSERT 一条 DEBIT 50 的流水，类型"ADJUSTMENT"，备注"对账差异修正，原因 XXX，审批人 YYY"。这样余额表（1000）和新流水汇总（950+50=1000）一致，且留有审计痕迹。第四步，如果是系统性 bug（多个账户都有类似差异），要修代码 + 全量对账修正。第五步，告警升级——单账户差异人工处理，批量差异 P0 告警（可能系统级故障）。监控 reconcile_diff_count（对账差异数）和 balance_mismatch_rate（不一致率，应 < 0.001%）。京东的实践：对账差异率 < 0.0001%（百万分之一），差异都有人工复核闭环。
+
+**面试官**：流水哈希链被篡改（内鬼改了流水金额），怎么发现和恢复？
+
+**候选人**：哈希链的设计就是防这个。内鬼改了第 N 条流水的金额，第 N 条的 curr_hash 会变（因为内容变了），但第 N+1 条的 prevHash 还是旧的（指向原来的 N 的 hash），computeHash(N+1) 用新的 prevHash 算出的 currHash 和存储的不匹配——发现篡改。具体步骤：对账时跑 verifyChain(accountId)，遍历所有流水，逐条验证 curr_hash == computeHash(prev_hash, content)。发现不匹配的，定位到具体被改的流水 ID。恢复：从备份恢复（T+1 全量备份 + binlog 增量），或从对端系统（如支付渠道）重建流水。预防：流水库独立权限（开发者不能直接改）、DB 审计日志（记录所有 DML 操作）、哈希链定时验证（每小时跑）。极端情况内鬼同时改了流水和哈希——这需要"外部锚定"，如把哈希定期写到独立系统（区块链/独立审计库），内鬼难同时改两个系统。京东金融的实践：流水表 DBA 无写权限（只有应用能 INSERT），哈希链每小时验证，篡改告警秒级响应。
+
+## 常见考点
+
+1. **账户系统和订单系统的区别？**——订单是"交易记录"（买了什么），账户是"资金状态"（有多少钱）。订单影响账户（下单扣余额），但两者解耦（订单系统调账户接口，不直接改账户）。
+2. **复式记账和区块链的关系？**——区块链是"分布式复式记账"——每个交易借方贷方平衡（UTXO 模型），且哈希链防篡改。账户系统的复式记账是中心化的，区块链是去中心化的。
+3. **账户余额为什么用 BigDecimal 不用 double？**——double 有精度丢失（0.1+0.2≠0.3），金融场景必须精确。BigDecimal 任意精度，适合金额计算。
+4. **怎么做账户的"日终结算"？**——日终跑批：冻结所有交易 → 跑全量对账 → 计算利息/手续费 → 生成日报表 → 解冻。结算期间账户只读不可交易。

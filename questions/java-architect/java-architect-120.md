@@ -6,262 +6,420 @@ subcategory: 高可用
 tags:
 - Java 架构师
 - 优雅停机
-- Kubernetes
-- 发布
+- 流量摘除
+- SIGTERM
 feynman:
-  essence: Java 服务优雅停机与流量摘除的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: 优雅停机是 Java 服务"无感下线"的核心——收到 SIGTERM 后，按"摘流量 → 等处理完 → 销毁资源"的顺序退出，保证在途请求不丢、消息不重复消费、连接不泄漏。Spring Boot 的 graceful shutdown + ApplicationListener<ContextClosedEvent> + K8s preStop hook 三层协作。坑点：SIGTERM 被吞（PID 1 问题）、preStop sleep 时间不够、线程池 shutdown 顺序错、消费者 offset 未提交。
+  analogy: 像"餐厅关门"——粗暴关（kill -9）是直接赶走客人（请求中断），优雅关是"门口挂停业牌（摘流量）→ 等桌上的客人吃完（在途请求完成）→ 关灯锁门（释放资源）"。客人无感，餐厅不浪费。
+  first_principle: 优雅停机的本质是"流量摘除"和"资源清理"的有序解耦。流量先摘（LB/注册中心剔除），新请求不再来，在途请求有时间完成。资源清理（线程池/连接池/消费者）在请求处理完后才执行。坑点在于"时序"——摘流量要时间传播（LB 轮询刷新），处理要时间完成（慢请求），资源清理要有序（先停消费者，再关连接池）。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 三层协作：Spring Boot graceful + ApplicationListener + K8s preStop
+  - 摘流量：注册中心注销（Eureka/Nacos）+ LB 刷新 + 网关路由更新
+  - SIGTERM 处理：Spring 监听 ContextClosedEvent，触发 graceful shutdown
+  - 线程池有序关闭：shutdown() → awaitTermination() → shutdownNow()
+  - 消费者：停止拉取 + 处理完在途 + 提交 offset
+  - K8s：preStop sleep + terminationGracePeriodSeconds
 first_principle:
-  problem: 面对“Java 服务优雅停机与流量摘除”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 服务发布/扩缩容时，怎么保证在途请求不丢、消息不重复消费？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - kill -9 会中断在途请求（用户报错）
+  - 新请求还在来（LB/注册中心没剔除）
+  - 资源未释放（连接泄漏、消费者 offset 未提交）
+  rebuild: 优雅停机分三阶段。① 摘流量——K8s preStop 先执行（sleep 等 LB 刷新 + 主动调注册中心注销），新请求不再来。② 等处理完——Spring graceful shutdown 拒绝新请求（HTTP 503），等在途请求完成（timeout 30s）。③ 销毁资源——按顺序：停消费者（不拉新消息）→ 等在途消息处理完 + 提交 offset → 关线程池（shutdown → await）→ 关连接池 → 销毁 Bean。坑点：PID 1 问题（SIGTERM 没传给 JVM，要用 exec 或 spring-boot:run）、preStop sleep 不够（LB 还在转发）。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - 为什么不能 kill -9？——SIGKILL 无法捕获，JVM 立即退出，在途请求中断、连接泄漏、消费者 offset 未提交（消息重复消费）
+  - preStop 为什么要 sleep？——K8s 删 Pod 时，kube-proxy 更新 iptables 有延迟（1-2 秒），期间 LB 还会转发请求到已下线的 Pod。sleep 5-10 秒等 iptables 刷新
+  - Spring graceful shutdown 原理？——ContextClosedEvent 触发，Tomcat 停止接受新请求，等在途请求完成（spring.lifecycle.timeout-per-shutdown-phase）
+  - 消费者怎么优雅停？——container.stop() 停止拉取新消息，等当前批次处理完，提交 offset，再关闭
+  - PID 1 问题？——容器 ENTRYPOINT 用 shell 启动（sh -c java ...），JVM 不是 PID 1，SIGTERM 发给 shell 没转发给 JVM。用 exec java 或 spring-boot:run 解决
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 三层协作：Spring graceful + ApplicationListener + K8s preStop
+  - 摘流量：注册中心注销 + LB 刷新 + preStop sleep
+  - SIGTERM → ContextClosedEvent → graceful shutdown
+  - 线程池：shutdown() → awaitTermination() → shutdownNow()
+  - 消费者：停拉取 → 处理完 → 提交 offset
+  - K8s：preStop sleep + terminationGracePeriodSeconds=60
+  - PID 1 问题：用 exec java，不用 sh -c
 ---
 
-# 【Java 后端架构师】Java 服务优雅停机与流量摘除？
+# 【Java 后端架构师】Java 服务优雅停机与流量摘除
 
-> 适用场景：高并发高可用。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。订单服务每次发布，0.1% 请求报 500（连接重置），消费者消息重复消费。架构师必须设计完整的优雅停机流程，保证零请求丢失、零消息重复。
 
-## 一、先明确问题边界
+## 一、概念层：优雅停机的三阶段
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**优雅停机是什么**：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+```
+K8s 删除 Pod
+   │
+   ├─ 1. 发送 SIGTERM（同时 preStop hook 执行）
+   │     │
+   │     ├─ preStop: sleep 10（等 LB iptables 刷新）
+   │     └─ preStop: 调注册中心注销（主动摘流量）
+   │
+   ├─ 2. Spring Boot 收到 SIGTERM
+   │     │
+   │     ├─ ContextClosedEvent 触发
+   │     ├─ WebServer 停止接受新请求（503）
+   │     └─ 等在途请求完成（timeout 30s）
+   │
+   ├─ 3. 销毁资源（按 Bean 依赖逆序）
+   │     │
+   │     ├─ Kafka Consumer 停止（不拉新消息）
+   │     ├─ 等在途消息处理完 + 提交 offset
+   │     ├─ 线程池 shutdown（await 30s）
+   │     ├─ 连接池关闭（HikariCP close）
+   │     └─ Bean 销毁（@PreDestroy）
+   │
+   └─ 4. JVM 退出（exit code 0）
+         │
+         │  如果超时（terminationGracePeriodSeconds）
+         ▼
+       K8s 发 SIGKILL（强制杀）
+```
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 优雅停机 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**核心配置对比**（这张表面试必问）：
 
-## 二、推荐架构思路
+| 配置 | 作用 | 默认值 | 生产建议 |
+|------|------|--------|---------|
+| `terminationGracePeriodSeconds` | K8s 等优雅退出的最长时间 | 30s | 60s（含 preStop sleep） |
+| `preStop` hook | 摘流量前的 hook | 无 | sleep 10 + 调注销 |
+| `spring.lifecycle.timeout-per-shutdown-phase` | Spring 各阶段超时 | 30s | 30s |
+| `server.shutdown` | Spring graceful 模式 | immediate | graceful |
+| `spring.boot.graceful-timeout` | 等在途请求时间 | 30s | 30s |
+| HikariCP `closing` | 连接池关闭等待 | 即时 | 等活动连接完成 |
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+## 二、机制层：完整配置示例
 
-## 三、技术落地点
+**1. K8s Deployment 配置**：
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+spec:
+  template:
+    spec:
+      containers:
+      - name: order-service
+        image: registry.jd.com/order-service:latest
+        lifecycle:
+          preStop:                          # 摘流量 hook
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - |
+                # 1. 主动调注册中心注销（Nacos/Eureka）
+                curl -X POST http://localhost:8080/actuator/service-registry?status=DOWN
+                # 2. sleep 等 LB iptables 刷新（kube-proxy 异步更新）
+                sleep 10
+        ports:
+        - containerPort: 8080
+      terminationGracePeriodSeconds: 60     # K8s 等优雅退出最长时间
+```
 
-## 四、常见坑
+**2. Spring Boot 配置**：
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+```yaml
+# application.yml
+server:
+  shutdown: graceful                        # 启用 graceful shutdown（默认 immediate）
 
-## 五、面试回答模板
+spring:
+  lifecycle:
+    timeout-per-shutdown-phase: 30s         # 各阶段超时（含 Bean 销毁）
 
-可以按下面结构作答：
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true                       # 启用 K8s 探针
+  endpoints:
+    web:
+      exposure:
+        include: health,info,service-registry,prometheus
+```
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“Java 服务优雅停机与流量摘除”，核心是 优雅停机 与 Kubernetes 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+**3. ApplicationListener 自定义停机逻辑**：
 
-## 六、加分点
+```java
+@Component
+public class GracefulShutdownListener implements ApplicationListener<ContextClosedEvent> {
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+    private static final Logger log = LoggerFactory.getLogger(GracefulShutdownListener.class);
 
-## 七、企业级面试定位：从“会用”到“能负责”
+    @Autowired
+    private KafkaListenerEndpointRegistry kafkaRegistry;
 
-企业级面试不会只问“优雅停机 是什么”，而是看你能不能对一条真实生产链路负责。回答“Java 服务优雅停机与流量摘除”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+    @Autowired
+    @Qualifier("cpuExecutor")
+    private ThreadPoolExecutor cpuExecutor;
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 高并发高可用 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 优雅停机、Kubernetes、发布 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 availability_slo、failover_seconds、backup_restore_success、dependency_error_rate 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+    @Autowired
+    private HikariDataSource dataSource;
 
-### 企业级回答骨架
+    @Override
+    public void onApplicationEvent(ContextClosedEvent event) {
+        log.info("Graceful shutdown started");
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 优雅停机 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+        // 阶段 1：停止 Kafka 消费者（不拉新消息）
+        log.info("Stopping Kafka consumers...");
+        kafkaRegistry.getListenerContainers().forEach(container -> {
+            container.pause();                          // 暂停拉取
+            // 等当前批次处理完
+            container.stop(() -> log.info("Consumer {} stopped", container));
+        });
 
-### 面试中要主动补的生产细节
+        // 阶段 2：等待在途消息处理完 + 提交 offset
+        // （Spring Kafka 的 container.stop() 自动等待当前批次完成 + 提交 offset）
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+        // 阶段 3：关闭业务线程池
+        log.info("Shutting down CPU executor...");
+        cpuExecutor.shutdown();                         // 不接受新任务
+        try {
+            if (!cpuExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
+                log.warn("CPU executor did not terminate, forcing shutdown");
+                cpuExecutor.shutdownNow();              // 中断剩余任务
+            }
+        } catch (InterruptedException e) {
+            cpuExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
 
-## 八、苏格拉底式面试追问
+        // 阶段 4：关闭连接池（HikariCP 自动等活动连接完成）
+        // dataSource.close() 由 Spring 自动处理（Bean 销毁）
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+        log.info("Graceful shutdown completed");
+    }
+}
+```
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“Java 服务优雅停机与流量摘除”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 availability_slo、failover_seconds、backup_restore_success、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 优雅停机 负责的范围，以及必须依赖 Kubernetes、发布 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 单 AZ 或单实例成为隐性单点，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+**4. 消费者优雅停（Spring Kafka）**：
 
-### 现场对话示例
+```java
+@Configuration
+@EnableKafka
+public class KafkaConsumerConfig {
 
-**面试官**：你说要做“Java 服务优雅停机与流量摘除”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 availability_slo、failover_seconds、业务失败率和事故记录。
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, OrderEvent> factory(
+            ConsumerFactory<String, OrderEvent> cf) {
+        ConcurrentKafkaListenerContainerFactory<String, OrderEvent> factory =
+            new ConcurrentKafkaListenerContainerFactory<>();
+        factory.setConsumerFactory(cf);
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 availability_slo 没有改善，或者 failover_seconds 反而变差，就停止扩大范围，回到假设层重新复盘。
+        // 关键：容器停止时的行为
+        ContainerProperties props = factory.getContainerProperties();
+        props.setAckMode(AckMode.MANUAL_IMMEDIATE);    // 手动提交 offset
+        // 停止时：等待当前批次处理完 + 提交 offset
+        props.setSyncCommits(true);                    // 同步提交（确保 offset 落库）
+        props.setShutdownTimeout(30_000L);             // 停止超时 30 秒
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 availability_slo、failover_seconds、backup_restore_success。这样它不是个人经验，而是团队机制。
+        return factory;
+    }
+}
 
-## 九、专项架构深挖：对象、链路、失败模式
+@Service
+public class OrderConsumer {
 
-这一题不要停在“知道 优雅停机”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+    @KafkaListener(topics = "orders", groupId = "order-group")
+    public void consume(List<OrderEvent> events, Acknowledgment ack) {
+        try {
+            orderService.batchCreate(events);          // 批量处理
+            ack.acknowledge();                          // 处理成功才提交 offset
+        } catch (Exception e) {
+            log.error("Consume failed, will retry", e);
+            // 不 ack，下次重启重新消费（at-least-once）
+        }
+    }
+}
+```
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 多副本、健康检查、故障转移、备份恢复；RPO/RTO、演练脚本、依赖拓扑；限流降级和回滚开关 |
-| 设计主线 | 核心服务按故障域部署，依赖按重要性分级；预案必须脚本化并定期演练；把恢复时间和数据丢失窗口量化 |
-| 失败模式 | 单 AZ 或单实例成为隐性单点；备份存在但恢复不可用；故障转移后缓存或配置不一致 |
-| 验证指标 | availability_slo、failover_seconds、backup_restore_success、dependency_error_rate |
+**5. PID 1 问题（Dockerfile）**：
 
-**架构拆解**：
+```dockerfile
+# 反例：JVM 不是 PID 1，SIGTERM 发给 shell 没转发
+ENTRYPOINT ["sh", "-c", "java -jar app.jar"]
+# shell（sh）是 PID 1，java 是子进程，SIGTERM 发给 shell 不转发
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 Kubernetes 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 Java 服务优雅停机与流量摘除 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 发布 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+# 正确：exec 替换 shell，java 成为 PID 1
+ENTRYPOINT ["java", "-jar", "app.jar"]
+# 或
+ENTRYPOINT ["sh", "-c", "exec java -jar app.jar"]
+# exec 让 java 替换 shell 进程，成为 PID 1，直接收 SIGTERM
+```
 
-**高分回答细节**：
+## 三、实战层：完整发布流程
 
-- 不要只说“可以用 优雅停机”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+**场景：订单服务滚动发布**
 
-## 十、二轮场景追问与项目表达
+```
+正常 Pod: order-service-5d4b6c7d8-x9z9a（运行中）
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+K8s 发布新版本（kubectl apply）：
+1. 新 Pod 创建：order-service-5d4b6c7d8-a1b2c
+2. 新 Pod Ready，加入 Service Endpoints
+3. 旧 Pod 开始删除：
+   ┌──────────────────────────────────────────────────────────┐
+   │ 旧 Pod order-service-5d4b6c7d8-x9z9a 收到 SIGTERM        │
+   ├──────────────────────────────────────────────────────────┤
+   │ T+0s:   preStop hook 执行                                │
+   │         - 调 /actuator/service-registry?status=DOWN       │
+   │           （注册中心标记 DOWN，LB 慢慢剔除）              │
+   │         - sleep 10（等 kube-proxy iptables 刷新）         │
+   │                                                            │
+   │ T+10s:  Spring 收到 SIGTERM（ContextClosedEvent）        │
+   │         - Tomcat 拒绝新请求（503）                        │
+   │         - 等在途 HTTP 请求完成（最长 30s）                 │
+   │         - Kafka Consumer 停止拉取                         │
+   │         - 等在途 Kafka 消息处理完 + 提交 offset           │
+   │         - 线程池 shutdown（await 30s）                    │
+   │         - 连接池关闭                                       │
+   │         - Bean 销毁（@PreDestroy）                        │
+   │                                                            │
+   │ T+25s:  所有在途请求完成，JVM 退出（exit 0）             │
+   └──────────────────────────────────────────────────────────┘
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+4. K8s 确认旧 Pod 终止，发布完成
+5. 用户无感知（0 请求丢失，0 消息重复）
+```
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“Java 服务优雅停机与流量摘除”，重点看 availability_slo、failover_seconds、backup_restore_success，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+**常见坑点排查**：
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+```
+坑 1：SIGTERM 被吞
+症状：JVM 立即退出（没等在途请求）
+原因：ENTRYPOINT ["sh", "-c", "java -jar"]，shell 是 PID 1 不转发 SIGTERM
+修复：ENTRYPOINT ["java", "-jar"] 或 exec java
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 优雅停机 和 Kubernetes 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+坑 2：preStop sleep 不够
+症状：摘流量后仍有新请求（LB 还在转发）
+原因：kube-proxy iptables 刷新慢（1-2 秒），LB 缓存未过期
+修复：preStop sleep 加长（10-15 秒）+ 主动调注册中心注销
 
-### 追问 3：你如何判断这个方案值得做？
+坑 3：消费者 offset 未提交
+症状：消息重复消费
+原因：消费者没等处理完就关闭，offset 没 ack
+修复：container.stop() 自动等待 + 同步提交 offset
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 发布 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+坑 4：线程池 shutdown 顺序错
+症状：Bean 销毁时还有任务在跑（报错）
+原因：先关连接池，后关线程池，任务用到连接报错
+修复：先关消费者 → 再关线程池 → 最后关连接池（Spring Bean 依赖顺序）
 
-### STAR 项目表达
+坑 5：terminationGracePeriodSeconds 不够
+症状：K8s 强杀（SIGKILL）
+原因：优雅停机耗时超过 gracePeriod（默认 30s）
+修复：调大到 60-90 秒
+```
 
-- **S（背景）**：原系统在 优雅停机 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 Java 服务优雅停机与流量摘除 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 availability_slo、failover_seconds 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+## 四、底层本质：为什么优雅停机难
 
-### 二轮复盘清单
+回到第一性：**为什么不能直接 kill，要优雅停？**
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+- **在途请求不丢**：HTTP 请求处理到一半（已扣库存，未下订单），kill -9 中断，用户报错 + 数据不一致。优雅停等在途完成，请求正常返回。
+- **消息不重复**：消费者拉了一批消息，处理到一半 kill，offset 未提交，重启后重新消费（重复）。优雅停等批次处理完 + 提交 offset，不重复。
+- **资源不泄漏**：连接池 borrow 的连接没归还，kill 后 socket 泄漏（DB 端连接也不释放）。优雅停等连接归还 + 连接池关闭。
+- **数据一致**：事务执行到一半 kill，事务回滚或不一致。优雅停等事务完成。
 
-## 十一、面试官 5 个企业级追问
+**摘流量为什么难**：
+- **多层 LB**：请求经过 Ingress → Service → Pod，每层有缓存/刷新延迟。
+- **kube-proxy iptables**：K8s 删 Pod 时，kube-proxy 异步更新 iptables 规则（1-2 秒延迟），期间仍有请求转发到已删 Pod。
+- **注册中心延迟**：Nacos/Eureka 注销后，消费者缓存可能 30 秒才刷新。
+- **解决**：① preStop sleep（等 iptables 刷新）；② 主动调注册中心注销（不等心跳超时）；③ 双保险。
 
-1. **你在真实项目里怎么判断“Java 服务优雅停机与流量摘除”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 availability_slo、failover_seconds、backup_restore_success。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+**Spring graceful shutdown 原理**：
+- `ContextClosedEvent` 触发时，Spring 发布事件，各组件监听。
+- Tomcat 的 `WebServerGracefulShutdownLifecycle` 先执行——停止接受新连接，等在途请求完成。
+- 然后按 Bean 依赖逆序销毁（@PreDestroy、DisposableBean）。
+- 每阶段有 timeout（`timeout-per-shutdown-phase`），超时强制进入下一阶段。
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，优雅停机 是否真是瓶颈，Kubernetes 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+**线程池 shutdown 的本质**：
+- `shutdown()`：不再接受新任务，已提交任务继续执行。
+- `awaitTermination(timeout)`：阻塞等待所有任务完成（或超时）。
+- `shutdownNow()`：尝试中断正在执行的任务（Interrupt），返回未执行的任务列表。
+- 正确顺序：shutdown → awaitTermination（给足时间）→ 必要时 shutdownNow（兜底）。
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 单 AZ 或单实例成为隐性单点。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 availability_slo 和 failover_seconds 做分钟级观察，一旦越过阈值立即止损。
+**Kafka 消费者优雅停的本质**：
+- `container.stop()` 内部：停止拉取新消息 → 等当前批次处理完 → 提交 offset（同步）→ 关闭 consumer。
+- 如果用 `enable.auto.commit=true`，offset 定期自动提交（可能丢失刚提交的，重启重复）。生产建议手动提交（处理完才 ack）。
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 发布，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+## 五、AI 架构师加问：5 个
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“Java 服务优雅停机与流量摘除”，至少要沉淀 多副本、健康检查、故障转移、备份恢复 的建模规范，以及 availability_slo、failover_seconds 的验收标准。
+1. **AI 推理服务的优雅停机特点？**
+   LLM 推理是长任务（单次几秒到几十秒），graceful timeout 要配长（60-120 秒）。模型加载慢，scale-to-zero 后冷启动久。GPU 资源释放要等推理完成（不能强杀，可能损坏模型状态）。建议：minReplicaCount=1 + 长 graceful timeout + 推理任务可中断检查点。
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
+2. **AI 能预测最佳停机时机吗？**
+   AI 学习服务的请求模式（QPS 周期、长尾请求耗时），预测"安全停机时机"——在途请求数 < 阈值 + 非高峰期。AI 输出："当前在途 5 请求，预计 10 秒完成，建议立即停机"。避免高峰期停机 + 减少等待时间。
 
-1. **如果把“Java 服务优雅停机与流量摘除”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 优雅停机 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
+3. **大模型推理的长任务优雅停？**
+   ① 推理任务 checkpoint（中断后可恢复，不丢进度）；② graceful timeout 配 120 秒（LLM 推理 30 秒+）；③ 拒绝新请求后，等当前推理完成；④ GPU 资源释放确认（nvidia-smi 确认 GPU 空闲再退出）；⑤ 模型权重缓存（重启不用重新加载）。
 
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“Java 服务优雅停机与流量摘除”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 availability_slo、failover_seconds 对业务链路的影响。
+4. **AI Agent 多轮对话的优雅停？**
+   对话状态持久化（Redis/DB），Pod 停机前把进行中的对话状态保存。新请求路由到其他 Pod（通过 traceId 恢复上下文）。长对话（Agent 执行任务）支持中断 + 恢复（checkpoint）。用户无感（对话不丢失）。
 
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 单 AZ 或单实例成为隐性单点，要能通过 trace、tool_call_id 和业务流水快速回放。
+5. **AI 怎么检测优雅停机问题？**
+   AI 分析发布期间的指标：① 5xx 错误率（>0 说明请求中断）；② 消息重复消费率（>0 说明 offset 丢失）；③ 连接泄漏（DB 连接数不降）；④ 停机耗时（超过 gracePeriod 被 SIGKILL）。AI 告警 + 定位坑点（如 PID 1 问题、preStop 不够）。
 
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 六、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：灾备演练指挥官拿着健康检查、切流开关、备份和演练脚本，在处理“主链路突然失去一个关键节点”。
+抓 **"三阶段、摘流量、SIGTERM、PID 1、gracePeriod"**。
 
-- **场景**：先说明“Java 服务优雅停机与流量摘除”服务于什么业务目标，不要上来就堆 优雅停机。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 单 AZ 或单实例成为隐性单点、备份存在但恢复不可用。
-- **验证**：最后落到 availability_slo、failover_seconds、backup_restore_success，让面试官感觉你真的上线过。
+- **三阶段**：① preStop 摘流量（sleep + 注销）；② Spring graceful 等在途；③ 销毁资源（消费者→线程池→连接池）
+- **摘流量**：注册中心注销（主动）+ preStop sleep（等 iptables 刷新）
+- **SIGTERM → ContextClosedEvent**：Spring 监听，触发 graceful shutdown
+- **线程池**：shutdown() → awaitTermination() → shutdownNow()
+- **消费者**：停拉取 → 等批次完成 → 提交 offset
+- **PID 1 问题**：用 `exec java`，不用 `sh -c java`
+- **gracePeriod**：terminationGracePeriodSeconds=60（含 preStop sleep）
 
 ### 拟人化理解
 
-可以把“Java 服务优雅停机与流量摘除”想成一个灾备演练指挥官：优雅停机 是他的健康检查、切流开关、备份和演练脚本，Kubernetes 是他面对的现场信号，发布 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先保核心业务，再恢复非核心能力。这样记，比死背组件名更稳。
+把优雅停机想成**餐厅关门的礼貌流程**。粗暴关（kill -9）是直接赶走客人（请求中断，客人不爽）。优雅关是：① 门口挂"停业牌"（摘流量，新客人不进）；② 等桌上的客人吃完（在途请求完成）；③ 服务员收拾（关线程池/连接池）；④ 关灯锁门（JVM 退出）。preStop sleep 是"等门口广告牌刷新"（LB 还在转发，睡 10 秒等刷新）。PID 1 问题是"经理没通知到服务员"（SIGTERM 发给 shell 没转发给 java）。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“Java 服务优雅停机与流量摘除”，我会这样答：我会先把故障域、RPO/RTO、切流路径和恢复演练讲清楚，高可用不是多部署几个副本就结束。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 单 AZ 或单实例成为隐性单点，所以我会提前设计灰度、监控和止损阈值，重点看 availability_slo、failover_seconds。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 availability_slo 或 failover_seconds 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> 优雅停机是 Java 服务无感下线的核心，三阶段：① K8s preStop 摘流量——主动调注册中心注销（Nacos/Eureka 标记 DOWN）+ sleep 10 秒等 kube-proxy iptables 刷新（防止 LB 继续转发）；② Spring graceful shutdown——ContextClosedEvent 触发，Tomcat 拒绝新请求（503），等在途请求完成（timeout 30s）；③ 销毁资源按顺序：停 Kafka 消费者（不拉新消息，等当前批次处理完 + 提交 offset）→ 关线程池（shutdown → awaitTermination 30s → shutdownNow 兜底）→ 关连接池 → Bean 销毁。坑点：① PID 1 问题（ENTRYPOINT 用 exec java，不用 sh -c，否则 SIGTERM 不转发）；② preStop sleep 不够（LB 还在转发）；③ 线程池关闭顺序（先消费者再线程池最后连接池）；④ terminationGracePeriodSeconds 配 60 秒（含 preStop sleep）。消费者手动提交 offset（处理完才 ack），防止重启重复消费。K8s 超过 gracePeriod 发 SIGKILL 强杀。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司服务部署在 K8s 还是 VM？注册中心是 Nacos 还是 Eureka？这决定我聊 preStop hook 还是 VM 的脚本方案。
 
+## 七、苏格拉底式面试追问
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么要优雅停机，kill 不行吗？ | kill -9 中断在途请求（用户报错）、消费者 offset 未提交（消息重复）、连接泄漏（DB 端不释放）、事务不一致。优雅停保证零请求丢失、零消息重复、资源释放 |
+| 证据追问 | 怎么证明优雅停机生效？ | ① 发布期间 5xx 错误率 = 0（无请求中断）；② 消息重复消费率 = 0（offset 已提交）；③ DB 连接数正常波动（无泄漏）；④ 发布耗时在 gracePeriod 内（未被 SIGKILL） |
+| 边界追问 | 优雅停机能解决所有发布问题吗？ | 不能。① 长事务（超过 gracePeriod 仍被杀）；② 有状态服务（内存状态丢失，需持久化）；③ 数据库 schema 变更（要兼容期）。优雅停主要解决"流量/资源"层 |
+| 反例追问 | 什么场景优雅停机没用？ | ① OOM 崩溃（JVM 挂了，没机会 graceful）；② SIGKILL（无法捕获）；③ 死锁（线程卡住，awaitTermination 超时）；④ 容器被驱逐（kubelet eviction 直接 SIGTERM，时间短） |
+| 风险追问 | 优雅停机最大风险？ | ① gracePeriod 不够（被 SIGKILL，前功尽弃）；② preStop 失败（hook 执行失败仍继续删 Pod）；③ 依赖服务先停（下游先下线，本服务请求失败）。治法：gracePeriod 60s+、preStop 健壮、有序发布 |
+| 验证追问 | 怎么验证 preStop sleep 够不够？ | ① 发布期间监控本 Pod 的请求量（摘流量后应降到 0）；② 测 LB 到本 Pod 的连接（应无新连接）；③ 多次验证（不同流量场景） |
+| 沉淀追问 | 团队规范沉淀什么？ | ① Dockerfile 规范（exec java）；② Deployment 模板（preStop + gracePeriod）；③ Spring graceful 配置；④ 消费者手动提交 offset；⑤ 发布监控（5xx/重复消费） |
+
+### 现场对话示例
+
+**面试官**：为什么 preStop 要 sleep 10 秒？
+
+**候选人**：因为 kube-proxy 删 Pod 时更新 iptables 是异步的，有 1-2 秒延迟。这期间 LB（kube-proxy/客户端缓存）还会把新请求转发到已下线的 Pod。sleep 10 秒等 iptables 刷新完成，确保没有新请求进来。同时主动调注册中心注销（/actuator/service-registry?status=DOWN），让上游消费者尽快感知。双保险——preStop sleep + 主动注销。
+
+**面试官**：PID 1 问题怎么解决？
+
+**候选人**：容器 ENTRYPOINT 如果用 shell 启动（`sh -c "java -jar app.jar"`），shell 是 PID 1，java 是子进程。K8s 发 SIGTERM 给 PID 1（shell），shell 不会转发给 java 子进程，java 收不到 SIGTERM 直接被 SIGKILL。解决：① `ENTRYPOINT ["java", "-jar", "app.jar"]`（exec 形式，java 直接是 PID 1）；② 或 `ENTRYPOINT ["sh", "-c", "exec java -jar app.jar"]`（exec 替换 shell，java 成为 PID 1）。最佳实践用第一种。
+
+**面试官**：消费者怎么保证不重复消费？
+
+**候选人**：三步。① 关闭自动提交：`enable.auto.commit=false`，用手动提交。② 处理完才 ack：业务逻辑成功后调 `ack.acknowledge()`，失败不 ack。③ 优雅停时 container.stop() 等当前批次处理完 + 同步提交 offset。这样：处理完的消息 offset 已提交，重启不重复；未处理完的不提交，重启重新消费（at-least-once，配合幂等避免重复影响）。坑点：auto.commit=true 时 offset 定期提交，处理到一半 kill 可能刚提交 offset 但没处理完，重启丢失（实际是重复，因为 offset 提交了但业务没完成）。
+
+## 常见考点
+
+1. **优雅停机三阶段？**——① preStop 摘流量（sleep + 注销）；② Spring graceful 等在途；③ 销毁资源（消费者→线程池→连接池）。
+2. **preStop 为什么要 sleep？**——kube-proxy iptables 异步刷新有延迟，sleep 等 LB 不再转发新请求。
+3. **PID 1 问题？**——ENTRYPOINT 用 shell 启动，SIGTERM 发给 shell 不转发给 JVM。用 exec java 解决。
+4. **消费者优雅停？**——停拉取 → 等批次处理完 → 手动提交 offset（处理完才 ack，防重复消费）。
+5. **terminationGracePeriodSeconds？**——K8s 等优雅退出最长时间，超时发 SIGKILL。生产配 60 秒（含 preStop sleep）。

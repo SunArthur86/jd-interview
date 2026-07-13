@@ -5,263 +5,429 @@ category: java-architect
 subcategory: 高可用
 tags:
 - Java 架构师
-- 探针
-- 重启
-- 雪崩
+- K8s 探针
+- Pod 重启
+- 雪崩防控
 feynman:
-  essence: Pod 重启、探针与服务雪崩防控的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: K8s 三探针（startup/liveness/readiness）+ 重启机制是服务自愈的核心，但配置不当会引发雪崩——liveness 误判导致 Pod 反复重启、readiness 失败导致流量摘除、级联重启打爆下游。核心原则：① startup 先判断启动完成（慢启动场景）；② liveness 只判"死锁/僵死"（不判慢）；③ readiness 判"能否接流量"（包含依赖检查）。配合优雅停机 + PDB + 限流，才能防控雪崩。
+  analogy: 像医院的"病人监护系统"——startup 是"术后苏醒监测"（确认病人清醒），liveness 是"心跳监测"（心跳停了=死亡，要抢救），readiness 是"能否接客"（病人能否被探视）。误判会误抢救（重启）或误隔离（摘流量），引发连锁反应（雪崩）。
+  first_principle: 探针的本质是"让 K8s 判断 Pod 健康状态，自动决策（重启/摘流量）"。但"健康"是多维的——能启动、能运行、能服务是不同状态。配置不当的代价：liveness 太敏感 → Pod 反复重启（JVM 预热慢，重启期间不接流量，雪崩）；readiness 检查下游 → 下游故障导致所有 Pod 摘流量（级联故障）。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 三探针：startup（启动完成）/liveness（存活）/readiness（接流量）
+  - startup 先于 liveness（慢启动场景，JVM 预热期不杀 Pod）
+  - liveness 只判死锁/僵死，不判慢（慢不是死）
+  - readiness 不检查下游（防级联雪崩）
+  - 重启策略：Always（默认）/OnFailure/Never
+  - PDB（PodDisruptionBudget）防止批量重启
 first_principle:
-  problem: 面对“Pod 重启、探针与服务雪崩防控”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: Pod 偶发重启，或下游故障导致本服务 Pod 全部摘流量，怎么防控？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 探针配置不当会误判（liveness 太敏感导致重启雪崩）
+  - readiness 检查下游会导致级联（下游挂了，本服务也摘流量）
+  - 重启期间不接流量，批量重启打爆服务
+  rebuild: "三探针分工。① startup：判\"启动完成\"，failureThreshold 大（10 次 × 10 秒 = 100 秒，覆盖 JVM 预热），期间 liveness 不生效（不杀 Pod）。② liveness：判\"死锁/僵死\"（如 GC 长时间 STW、死锁），timeout 短（1 秒），不判慢请求（慢不是死）。③ readiness：判\"能否接流量\"，只查本 Pod 状态（HTTP 200 + 本地资源），不查下游（下游故障不摘本 Pod 流量，避免级联）。配合：优雅停机（preStop 摘流量）+ PDB（minAvailable: 1，防批量重启）+ 限流（Sentinel，防下游慢打爆线程池）。"
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - 三探针区别？——startup（启动完成，先于 liveness）；liveness（存活，失败重启）；readiness（接流量，失败摘流量不重启）
+  - 为什么 readiness 不能检查下游？——下游故障时，本服务 readiness 失败 → 全 Pod 摘流量 → 服务完全不可用（级联雪崩）。下游故障应靠熔断（Sentinel）降级
+  - liveness 失败会怎样？——K8s 重启 Pod（kill + 重新拉起）。重启期间（JVM 预热 10-30 秒）不接流量。频繁重启会雪崩
+  - startup 解决什么问题？——慢启动应用（如加载大模型、预热缓存）期间 liveness 误判杀 Pod。startup 先判断启动完成，期间 liveness 不生效
+  - 怎么防雪崩？——① liveness 不判慢；② readiness 不查下游；③ PDB 防批量重启；④ 优雅停机；⑤ 限流熔断
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 三探针：startup（启动完成）/liveness（存活，重启）/readiness（接流量，摘流量）
+  - startup 先于 liveness（慢启动保护，JVM 预热期不杀）
+  - liveness 只判死锁/僵死，不判慢（慢不是死）
+  - readiness 不检查下游（防级联雪崩）
+  - 重启策略：Always（默认）
+  - PDB：PodDisruptionBudget，防批量重启（minAvailable）
+  - 配合：优雅停机 + 限流熔断（Sentinel）
 ---
 
-# 【Java 后端架构师】Pod 重启、探针与服务雪崩防控？
+# 【Java 后端架构师】Pod 重启、探针与服务雪崩防控
 
-> 适用场景：高并发高可用。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。订单服务上线后偶发 Pod 重启，某次下游 MySQL 慢导致 readiness 全失败，所有 Pod 摘流量，服务完全不可用 5 分钟。架构师必须重新设计探针策略，防控雪崩。
 
-## 一、先明确问题边界
+## 一、概念层：K8s 三探针的分工
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**三探针是什么**：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+```
+Pod 生命周期：
+┌──────────────────────────────────────────────────────────────┐
+│ 启动期（Pending → ContainerCreating → Running）              │
+│                                                                │
+│ ┌────────────────────────────────────────┐                    │
+│ │ startup probe（启动探针）               │                    │
+│ │ - 判"启动完成"                          │                    │
+│ │ - 期间 liveness/readiness 不生效        │                    │
+│ │ - failureThreshold 大（覆盖 JVM 预热） │                    │
+│ └────────────────┬───────────────────────┘                    │
+│                  │ 成功                                         │
+│                  ▼                                              │
+│ ┌────────────────────────────────────────┐                    │
+│ │ liveness probe（存活探针）              │                    │
+│ │ - 判"存活"（死锁/僵死）                 │                    │
+│ │ - 失败 → 重启 Pod                       │                    │
+│ └────────────────────────────────────────┘                    │
+│                                                                │
+│ ┌────────────────────────────────────────┐                    │
+│ │ readiness probe（就绪探针）             │                    │
+│ │ - 判"能否接流量"                        │                    │
+│ │ - 失败 → 摘流量（从 Endpoints 移除）    │                    │
+│ │ - 不重启 Pod                            │                    │
+│ └────────────────────────────────────────┘                    │
+└──────────────────────────────────────────────────────────────┘
+```
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 探针 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**三探针对比**（这张表面试必问）：
 
-## 二、推荐架构思路
+| 探针 | 作用 | 失败后果 | 适用场景 |
+|------|------|---------|---------|
+| **startup** | 判断启动完成 | 重启 Pod（启动失败） | 慢启动（JVM 预热/模型加载） |
+| **liveness** | 判断存活（死锁/僵死） | **重启 Pod** | GC 长时间 STW、死锁检测 |
+| **readiness** | 判断能否接流量 | **摘流量**（不重启） | 依赖检查（但不应查下游） |
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+**关键参数**：
 
-## 三、技术落地点
+```yaml
+livenessProbe:           # 同样适用 readiness/startup
+  httpGet:
+    path: /actuator/health/liveness
+    port: 8080
+  initialDelaySeconds: 0     # 启动后多久开始探测（startup 配合后可设 0）
+  periodSeconds: 10          # 每 10 秒探测一次
+  timeoutSeconds: 1          # 超时 1 秒
+  successThreshold: 1        # 成功 1 次算"就绪"
+  failureThreshold: 3        # 连续失败 3 次算"不健康"
+```
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+## 二、机制层：探针配置实战
 
-## 四、常见坑
+**Spring Boot Actuator 健康端点**：
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+```yaml
+# application.yml
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true                # 启用 liveness/readiness 端点
+      show-details: always           # 显示健康详情
+      group:
+        liveness:                    # liveness 组（只查 JVM 存活）
+          include: ping              # 只 ping（不查下游）
+        readiness:                   # readiness 组（查本 Pod 能否服务）
+          include: ping,db,redis     # 查本地依赖
+  health:
+    livenessstate:
+      enabled: true                  # 启用 liveness state（Spring 内部判断）
+    readinessstate:
+      enabled: true
+```
 
-## 五、面试回答模板
+**Spring Boot 探针状态**：
 
-可以按下面结构作答：
+```java
+// Spring Boot 2.3+ 自动管理探针状态
+// ApplicationAvailability 接口
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“Pod 重启、探针与服务雪崩防控”，核心是 探针 与 重启 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+@Component
+public class AvailabilityListener {
 
-## 六、加分点
+    @EventListener
+    public void onReadinessState(AvailabilityStateChangeEvent<ReadinessState> event) {
+        switch (event.getState()) {
+            case ACCEPTING_TRAFFIC:
+                log.info("Ready to accept traffic");
+                break;
+            case REFUSING_TRAFFIC:
+                log.info("Refusing traffic（启动中/优雅停机中）");
+                break;
+        }
+    }
+}
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+// 自定义健康指标（readiness 组）
+@Component
+public class CustomReadinessIndicator implements HealthIndicator {
 
-## 七、企业级面试定位：从“会用”到“能负责”
+    @Override
+    public Health health() {
+        // 只查本地资源（不查下游，防级联）
+        if (localCache.isReady()) {
+            return Health.up().build();
+        }
+        return Health.down().withDetail("error", "cache not ready").build();
+    }
+}
+```
 
-企业级面试不会只问“探针 是什么”，而是看你能不能对一条真实生产链路负责。回答“Pod 重启、探针与服务雪崩防控”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+**K8s Deployment 探针配置**：
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 高并发高可用 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 探针、重启、雪崩 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 availability_slo、failover_seconds、backup_restore_success、dependency_error_rate 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+spec:
+  template:
+    spec:
+      containers:
+      - name: order-service
+        image: registry.jd.com/order-service:latest
+        livenessProbe:
+          httpGet:
+            path: /actuator/health/liveness
+            port: 8080
+          periodSeconds: 10
+          timeoutSeconds: 1          # 超时 1 秒（快速判死锁）
+          failureThreshold: 3        # 连续失败 3 次（30 秒）才重启
+          # 不配 initialDelaySeconds（用 startup 代替）
 
-### 企业级回答骨架
+        readinessProbe:
+          httpGet:
+            path: /actuator/health/readiness
+            port: 8080
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 探针 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+        startupProbe:                # 慢启动保护
+          httpGet:
+            path: /actuator/health/liveness
+            port: 8080
+          periodSeconds: 10
+          failureThreshold: 30       # 30 × 10 秒 = 300 秒（5 分钟启动期）
+          # 期间 liveness/readiness 不生效（不杀 Pod）
 
-### 面试中要主动补的生产细节
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: 1000m
+            memory: 2Gi
+```
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+**PDB（PodDisruptionBudget）防批量重启**：
 
-## 八、苏格拉底式面试追问
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: order-service-pdb
+  namespace: order
+spec:
+  minAvailable: 2                    # 至少保 2 个 Pod 可用（防全部同时重启）
+  # 或 maxUnavailable: 1             # 最多 1 个不可用
+  selector:
+    matchLabels:
+      app: order-service
+```
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+## 三、实战层：雪崩场景与防控
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“Pod 重启、探针与服务雪崩防控”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 availability_slo、failover_seconds、backup_restore_success、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 探针 负责的范围，以及必须依赖 重启、雪崩 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 单 AZ 或单实例成为隐性单点，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+**场景 1：liveness 太敏感导致重启雪崩**
 
-### 现场对话示例
+```
+错误配置：
+  livenessProbe:
+    httpGet:
+      path: /api/orders   # 业务接口（慢请求）
+    timeoutSeconds: 1     # 超时 1 秒
+    failureThreshold: 3
 
-**面试官**：你说要做“Pod 重启、探针与服务雪崩防控”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 availability_slo、failover_seconds、业务失败率和事故记录。
+问题：
+  1. 业务接口慢（GC/下游慢），P99 > 1 秒
+  2. liveness 超时（1 秒），连续失败 3 次
+  3. K8s 重启 Pod
+  4. 重启期间 JVM 预热 30 秒，不接流量
+  5. 其他 Pod 流量增加，也变慢，也重启
+  6. 雪崩：所有 Pod 轮流重启
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 availability_slo 没有改善，或者 failover_seconds 反而变差，就停止扩大范围，回到假设层重新复盘。
+修复：
+  livenessProbe:
+    httpGet:
+      path: /actuator/health/liveness   # 只 ping，不调业务
+    timeoutSeconds: 1
+    failureThreshold: 5                 # 容忍 5 次失败（50 秒）
+  + startupProbe 保护启动期
+```
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 availability_slo、failover_seconds、backup_restore_success。这样它不是个人经验，而是团队机制。
+**场景 2：readiness 检查下游导致级联雪崩**
 
-## 九、专项架构深挖：对象、链路、失败模式
+```
+错误配置：
+  readinessProbe:
+    httpGet:
+      path: /actuator/health   # 默认查所有依赖（含 MySQL）
 
-这一题不要停在“知道 探针”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+  management.endpoint.health.group.readiness.include: db,redis
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 多副本、健康检查、故障转移、备份恢复；RPO/RTO、演练脚本、依赖拓扑；限流降级和回滚开关 |
-| 设计主线 | 核心服务按故障域部署，依赖按重要性分级；预案必须脚本化并定期演练；把恢复时间和数据丢失窗口量化 |
-| 失败模式 | 单 AZ 或单实例成为隐性单点；备份存在但恢复不可用；故障转移后缓存或配置不一致 |
-| 验证指标 | availability_slo、failover_seconds、backup_restore_success、dependency_error_rate |
+问题：
+  1. MySQL 慢（连接池打满）
+  2. 本服务 readiness 失败（db 检查失败）
+  3. 所有 Pod 摘流量
+  4. 服务完全不可用（级联雪崩）
 
-**架构拆解**：
+修复：
+  # readiness 只查本地，不查下游
+  management.endpoint.health.group.readiness.include: ping
+  # 下游故障用熔断降级（Sentinel）
+  @SentinelResource(value = "queryOrder", fallback = "queryOrderFallback")
+```
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 重启 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 Pod 重启、探针与服务雪崩防控 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 雪崩 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+**场景 3：慢启动 Pod 被 liveness 误杀**
 
-**高分回答细节**：
+```
+错误配置（无 startup probe）：
+  livenessProbe:
+    httpGet:
+      path: /actuator/health/liveness
+    initialDelaySeconds: 30
+    failureThreshold: 3
 
-- 不要只说“可以用 探针”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+问题：
+  1. JVM 预热 + 加载缓存需要 60 秒
+  2. initialDelaySeconds=30，30 秒后开始探测
+  3. 但 JVM 还在预热（预热期响应慢）
+  4. liveness 失败 3 次（30 秒），Pod 被杀
+  5. 反复重启（启动 → 被杀 → 启动 → 被杀）
 
-## 十、二轮场景追问与项目表达
+修复：加 startup probe
+  startupProbe:
+    httpGet:
+      path: /actuator/health/liveness
+    periodSeconds: 10
+    failureThreshold: 30       # 300 秒（5 分钟）启动期
+  # startup 成功前，liveness 不生效（不杀 Pod）
+  livenessProbe:
+    httpGet:
+      path: /actuator/health/liveness
+    # 不配 initialDelaySeconds（startup 保护）
+```
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+**场景 4：批量发布打爆服务**
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+```
+错误配置（无 PDB）：
+  Deployment replicas: 10
+  发布时 K8s 滚动更新，可能同时重启多个 Pod
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“Pod 重启、探针与服务雪崩防控”，重点看 availability_slo、failover_seconds、backup_restore_success，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+问题：
+  1. 滚动更新，maxUnavailable 默认 25%（10 × 25% = 2 个同时不可用）
+  2. 但如果 readiness 失败（如启动慢），更多 Pod 处于 NotReady
+  3. 可用 Pod 少，流量集中，打爆剩余 Pod
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+修复：PDB + 滚动策略
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 1          # 最多 1 个不可用
+      maxSurge: 1                # 最多多 1 个（先起新再删旧）
+  + PDB minAvailable: 8          # 至少 8 个可用
+```
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 探针 和 重启 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+## 四、底层本质：为什么会雪崩
 
-### 追问 3：你如何判断这个方案值得做？
+回到第一性：**为什么探针配置不当会雪崩？**
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 雪崩 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+- **重启是"重"操作**：Pod 重启 = kill 容器 + 重新拉镜像（如果缓存） + 启动 JVM + 预热（10-30 秒）。期间不接流量。批量重启导致可用 Pod 减少，流量集中打爆剩余 Pod，剩余 Pod 也重启，雪崩。
+- **liveness 的边界**：liveness 应判"死锁/僵死"（GC 长时间 STW、死锁、OOM edge case），不判"慢"。慢请求（业务逻辑重/下游慢）不是死，重启无用反而恶化（重启更慢）。
+- **readiness 的级联风险**：readiness 失败摘流量，如果 readiness 查下游（DB/Redis），下游故障时本服务所有 Pod 摘流量，服务完全不可用。下游故障应靠熔断降级（Sentinel），不靠 readiness 摘流量。
 
-### STAR 项目表达
+**startup probe 解决的本质问题**：
+- 慢启动应用（JVM 预热、加载大模型、预热缓存）启动需要 1-5 分钟。
+- 如果只有 liveness，initialDelaySeconds 配短 → 启动期被误杀；配长 → 真死锁时响应慢。
+- startup probe 分离"启动判断"和"存活判断"——startup 期间 liveness 不生效，startup 成功后 liveness 接管。两者职责清晰。
 
-- **S（背景）**：原系统在 探针 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 Pod 重启、探针与服务雪崩防控 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 availability_slo、failover_seconds 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+**探针端点分离的本质**：
+- Spring Boot Actuator 提供 `/actuator/health/liveness` 和 `/actuator/health/readiness` 两个独立端点。
+- liveness 组只包含"存活"检查（如 ping），不查依赖（避免慢）。
+- readiness 组包含"能否服务"检查（如本地缓存、本地资源），但不查下游（避免级联）。
+- 分离让探针职责清晰，配置灵活。
 
-### 二轮复盘清单
+**PDB 的本质**：
+- PodDisruptionBudget 限制"自愿中断"（Voluntary Disruption，如发布、缩容）的最大数量。
+- minAvailable: 2 表示任何时候至少 2 个 Pod 可用，K8s 不会同时重启超过（replicas - 2）个。
+- 注意：PDB 只防"自愿中断"（kubectl drain / 滚动更新），不防"非自愿中断"（Pod 崩溃、节点故障）。
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+**K8s 重启策略的本质**：
+- `restartPolicy: Always`（默认）：任何退出都重启。
+- `OnFailure`：非 0 退出码才重启。
+- `Never`：不重启（Job/CronJob 用）。
+- Deployment 默认 Always，保证自愈。
 
-## 十一、面试官 5 个企业级追问
+## 五、AI 架构师加问：5 个
 
-1. **你在真实项目里怎么判断“Pod 重启、探针与服务雪崩防控”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 availability_slo、failover_seconds、backup_restore_success。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+1. **AI 推理服务的探针怎么设计？**
+   startup 配长（模型加载 1-5 分钟，failureThreshold × period = 5 分钟）；liveness 只 ping（不查 GPU，GPU 故障用业务指标告警）；readiness 查模型是否加载完成（/actuator/health 含 model loaded）。PDB minAvailable=1（防全部重启，模型加载慢）。
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，探针 是否真是瓶颈，重启 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+2. **AI 能预测探针误判吗？**
+   AI 学习历史探针失败 + 重启模式，检测异常：① liveness 失败但 Pod 实际健康（误判，如 GC 期间）；② readiness 频繁抖动（边界问题）；③ 批量重启征兆（多个 Pod 同时失败）。AI 告警 + 建议调整参数（如 failureThreshold 加大）。
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 单 AZ 或单实例成为隐性单点。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 availability_slo 和 failover_seconds 做分钟级观察，一旦越过阈值立即止损。
+3. **大模型推理的 startup 探针？**
+   startup probe failureThreshold × period = 模型加载时间 × 2（留余量）。如 LLaMA-70B 加载 3 分钟，startup 配 6 分钟（periodSeconds=10, failureThreshold=36）。期间 liveness 不生效，避免加载中被杀。startup 成功后 liveness 接管（只 ping）。
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 雪崩，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+4. **AI Agent 服务的探针策略？**
+   startup：JVM 预热 + 初始化（30-60 秒）。liveness：只 ping（判 JVM 存活）。readiness：查本地资源（向量库连接、模型加载）。不查下游 LLM API（用熔断降级处理 LLM 不可用）。PDB minAvailable: 1（Agent 状态持久化，重启可恢复）。
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“Pod 重启、探针与服务雪崩防控”，至少要沉淀 多副本、健康检查、故障转移、备份恢复 的建模规范，以及 availability_slo、failover_seconds 的验收标准。
+5. **AI 怎么优化探针配置？**
+   AI 分析历史数据：启动耗时分布（定 startup failureThreshold）、GC 停顿分布（定 liveness timeout）、请求延迟分布（定 readiness timeout）。AI 输出推荐配置 + 模拟验证（不直接改生产）。定期优化（应用变更后参数可能要调）。
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“Pod 重启、探针与服务雪崩防控”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 探针 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“Pod 重启、探针与服务雪崩防控”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 availability_slo、failover_seconds 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 单 AZ 或单实例成为隐性单点，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 六、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：灾备演练指挥官拿着健康检查、切流开关、备份和演练脚本，在处理“主链路突然失去一个关键节点”。
+抓 **"三探针、不判慢、不查下游、PDB 防批量"**。
 
-- **场景**：先说明“Pod 重启、探针与服务雪崩防控”服务于什么业务目标，不要上来就堆 探针。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 单 AZ 或单实例成为隐性单点、备份存在但恢复不可用。
-- **验证**：最后落到 availability_slo、failover_seconds、backup_restore_success，让面试官感觉你真的上线过。
+- **三探针**：startup（启动完成，先于 liveness）/liveness（存活，失败重启）/readiness（接流量，失败摘流量不重启）
+- **liveness 不判慢**：只判死锁/僵死（GC STW、死锁），慢请求不是死，重启恶化
+- **readiness 不查下游**：只查本地资源，下游故障用熔断降级（防级联雪崩）
+- **startup 保护慢启动**：JVM 预热期 liveness 不生效（startup probe 接管）
+- **PDB 防批量重启**：minAvailable: 2，K8s 滚动更新不超阈值
+- **端点分离**：/actuator/health/liveness（只 ping）/readiness（查本地资源）
 
 ### 拟人化理解
 
-可以把“Pod 重启、探针与服务雪崩防控”想成一个灾备演练指挥官：探针 是他的健康检查、切流开关、备份和演练脚本，重启 是他面对的现场信号，雪崩 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先保核心业务，再恢复非核心能力。这样记，比死背组件名更稳。
+把探针想成**医院的三层监护**。startup 是"术后苏醒监测"——病人刚做完手术（Pod 刚启动），苏醒期（JVM 预热）不判心跳，只判"清醒没"。liveness 是"心跳监护"——病人清醒后，心跳停了（死锁/僵死）要抢救（重启）。readiness 是"能否接客"——病人能否被探视（接流量），但不能因为"朋友没来"（下游故障）就拒绝所有探视（级联）。PDB 是"病房管理"——不能所有病人同时手术（批量重启），至少留几个清醒的接客。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“Pod 重启、探针与服务雪崩防控”，我会这样答：我会先把故障域、RPO/RTO、切流路径和恢复演练讲清楚，高可用不是多部署几个副本就结束。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 单 AZ 或单实例成为隐性单点，所以我会提前设计灰度、监控和止损阈值，重点看 availability_slo、failover_seconds。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 availability_slo 或 failover_seconds 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> K8s 三探针分工：startup 判"启动完成"（慢启动保护，JVM 预热期 liveness 不生效，failureThreshold × period = 5 分钟）；liveness 判"存活"（死锁/僵死，失败重启 Pod），只 ping 不查业务（不判慢，慢不是死，重启恶化）；readiness 判"能否接流量"（失败摘流量，不重启），只查本地资源不查下游（防级联雪崩，下游故障用熔断降级）。雪崩场景：① liveness 查业务接口 + timeout 短 → 慢请求被判死 → 重启雪崩；② readiness 查下游 → 下游故障全 Pod 摘流量 → 级联。防控：startup 保护启动、liveness 只 ping、readiness 不查下游、PDB（minAvailable: 2）防批量重启、优雅停机配合（preStop 摘流量）、限流熔断（Sentinel 处理下游慢）。Spring Boot 用 /actuator/health/liveness 和 /readiness 分离端点，配置灵活。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司探针配置有规范吗？readiness 查不查下游？这决定我聊探针设计还是雪崩复盘。
 
+## 七、苏格拉底式面试追问
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 有 liveness 不够，为什么还要 readiness？ | liveness 失败重启 Pod（重操作），readiness 失败只摘流量（轻操作）。场景不同：liveness 判"死"（要重启），readiness 判"忙"（暂不接流量但还活着，如启动中/优雅停机中） |
+| 证据追问 | 怎么证明探针配置合理？ | ① 误重启率 < 0.1%（liveness 没误判）；② 雪崩次数 = 0（无级联故障）；③ 启动成功率 100%（startup 保护生效）；④ 发布期间可用性 > 99.9% |
+| 边界追问 | 探针能解决所有高可用问题吗？ | 不能。① OOM 崩溃（探针来不及响应）；② 数据库故障（用熔断）；③ 网络分区（用多集群）；④ 流量洪峰（用限流）。探针主要解决"Pod 级故障自愈" |
+| 反例追问 | 什么场景探针反而有害？ | ① liveness 太敏感（GC 期间误杀）；② readiness 查下游（级联雪崩）；③ startup 不配（慢启动被误杀）；④ 无 PDB（批量重启打爆）。治法：按规范配置 |
+| 风险追问 | 探针最大风险？ | ① 误判重启（liveness 配置不当，雪崩）；② 级联故障（readiness 查下游）；③ 启动失败（无 startup，慢启动被杀）。治法：liveness 只 ping、readiness 不查下游、startup 必配 |
+| 验证追问 | 怎么验证探针生效？ | ① 模拟死锁（kill -19 主线程，liveness 应失败重启）；② 模拟下游故障（readiness 不应失败）；③ 模拟慢启动（startup 应保护）；④ 模拟批量发布（PDB 应限制） |
+| 沉淀追问 | 团队规范沉淀什么？ | ① 探针配置模板（startup/liveness/readiness 标准参数）；② 端点规范（liveness 只 ping、readiness 查本地）；③ PDB 规范（minAvailable）；④ 滚动策略（maxUnavailable: 1） |
+
+### 现场对话示例
+
+**面试官**：readiness 为什么不能检查下游？
+
+**候选人**：级联雪崩风险。假设 readiness 查 MySQL，MySQL 慢时，本服务所有 Pod 的 readiness 失败（db 检查失败），K8s 把所有 Pod 从 Endpoints 移除，服务完全不可用——而本服务其实还活着（能处理缓存命中的请求）。正确做法：readiness 只查本地资源（cache、本地线程池），下游故障用熔断（Sentinel）降级——下游慢时返回降级响应，而不是把整个服务摘掉。熔断是"部分降级"（降级单个依赖），readiness 摘流量是"全部摘除"（雪崩）。
+
+**面试官**：startup probe 解决什么问题？
+
+**候选人**：慢启动应用的 liveness 误杀问题。JVM 启动需要预热（JIT 编译热点代码、加载缓存、建立连接池），可能 1-5 分钟。如果只有 liveness，initialDelaySeconds 配短（30 秒）→ 预热期 liveness 失败被杀，反复重启。配长（5 分钟）→ 真死锁时要等 5 分钟才响应。startup probe 分离职责：startup 期间（failureThreshold × period = 5 分钟）判断"启动完成"，liveness 不生效（不杀 Pod）。startup 成功后 liveness 接管（快速响应死锁）。两者职责清晰，互不干扰。
+
+**面试官**：PDB 防什么？
+
+**候选人**：PDB（PodDisruptionBudget）防"自愿中断"（Voluntary Disruption）的批量重启。自愿中断包括：kubectl drain（节点维护）、滚动更新（发布）、HPA 缩容。PDB 的 minAvailable: 2 表示任何时候至少 2 个 Pod 可用，K8s 不会同时重启超过（replicas - 2）个。注意 PDB 只防自愿中断，不防非自愿中断（Pod 崩溃、节点故障）——那些要靠多副本 + 反亲和性。生产必配 PDB，否则滚动更新可能一次干掉太多 Pod。
+
+## 常见考点
+
+1. **三探针区别？**——startup（启动完成，先于 liveness）；liveness（存活，失败重启）；readiness（接流量，失败摘流量不重启）。
+2. **liveness 为什么不判慢？**——慢请求不是死，重启恶化（重启更慢）。liveness 只判死锁/僵死（GC STW、死锁）。
+3. **readiness 为什么不查下游？**——下游故障时所有 Pod 摘流量，级联雪崩。下游故障用熔断降级（Sentinel）。
+4. **startup 解决什么？**——慢启动（JVM 预热）期间 liveness 误杀。startup 先判断启动完成，期间 liveness 不生效。
+5. **PDB 防什么？**——防自愿中断（发布/缩容）的批量重启，minAvailable 保证最少可用 Pod 数。

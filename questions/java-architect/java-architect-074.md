@@ -9,259 +9,421 @@ tags:
 - Java
 - 资源
 feynman:
-  essence: Kubernetes 上 Java 服务的资源治理的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: K8s 上 Java 服务资源治理的核心矛盾是"容器 cgroup 限制"与"JVM 内存模型"的认知错位。K8s 用 request/limit 控制 CPU 和内存，JVM 按堆/非堆/直接内存划分，两者不对齐会导致 OOMKilled（容器超限被杀）或资源浪费（堆设太小）。CPU 限流（CFS throttle）会让 JVM STW 看起来像 GC 停顿。
+  analogy: 像把一头大象（JVM 完整内存模型：堆+栈+元空间+直接内存+GC overhead）关进一个精确到克的笼子（K8s memory limit）。笼子标了 4GB，但大象实际要吃堆 3GB + 元空间 512MB + 线程栈 512MB + GC overhead 512MB = 4.5GB，结果被饿死（OOMKilled）。
+  first_principle: 容器的 CPU/内存限制是硬约束（超了被 kill 或 throttle），JVM 看不到容器边界（早期版本按宿主机内存算）。要让 JVM 在容器里稳定运行，必须让 JVM 内存各区（堆+元空间+线程栈+直接内存+JIT+GC overhead）的总和小于容器 memory limit，且 CPU limit 要留余量避免 CFS throttle。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - JVM 内存 ≠ 堆内存：总内存 = 堆 + Metaspace + 线程栈×线程数 + 直接内存 + JIT cache + GC overhead
+  - 容器 memory limit 必须 > JVM 总内存 + 安全余量（通常留 25%）
+  - 用 MaxRAMPercentage 而非 -Xmx 设堆（自动适配容器内存）
+  - CPU limit 过低导致 CFS throttle（JVM 表现为偶发 STW、RT 抖动），Java 11+ 用 +UseContainerSupport
+  - HPA（水平自动扩缩）基于 CPU/内存利用率，阈值要配合 JVM 行为调（如 GC 频繁时 CPU 会飙）
 first_principle:
-  problem: 面对“Kubernetes 上 Java 服务的资源治理”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 一个 4C8G 容器里跑 Java 服务，线上偶发 OOMKilled 和 RT 抖动，如何定位是容器资源配比问题还是 JVM 配置问题？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 容器 memory limit 是硬上限，JVM 各内存区总和超了就被 OOMKilled（不是 OOM 异常，是内核 SIGKILL）
+  - CPU limit 用 CFS 调度，超了被 throttle（不是报错，是进程暂停执行）
+  - JVM 早期版本（8u191 前）不识别 cgroup，按宿主机内存算堆大小导致 OOMKilled
+  rebuild: 分三步——第一，算清 JVM 总内存（堆+元空间+线程栈+直接内存+GC overhead），确保 < 容器 memory limit × 0.75。第二，用 -XX:MaxRAMPercentage=75 替代 -Xmx（JDK 10+ 自动适配容器内存），加 -XX:+UseContainerSupport。第三，CPU request/limit 配置合理（request 用于调度，limit 用于 CFS），监控 container_cpu_cfs_throttled_seconds，throttle 高就调大 limit 或减并发。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - OOMKilled 和 Java OOM 有什么区别？——OOMKilled 是内核 SIGKILL（容器超 memory limit），JVM 来不及打印堆栈，dmesg 或 kubectl describe 能看到 OOMKilled。Java OOM（java.lang.OutOfMemoryError）是 JVM 内部异常，能打堆栈，容器没超限
+  - 为什么 CPU limit 要用但不设太低？——CPU limit 设太低导致 CFS throttle（时间片用完后等到下个周期才能执行），JVM 看起来像偶发停顿，GC、网络处理都受影响。生产建议 request=limit（绑核避免 throttle）或 limit=2×request
+  - JVM 怎么看容器内存？——JDK 8u191+ 支持 -XX:+UseContainerSupport（默认开），能读 cgroup 内存限制。-XX:InitialRAMPercentage/MaxRAMPercentage 按容器内存百分比设堆
+  - HPA 基于 CPU 利用率，但 GC 时 CPU 会飙怎么办？——HPA 误判会频繁扩缩容。解法：HPA 阈值设宽（如 80% 而非 50%）、用自定义指标（QPS/RT）而非 CPU、GC 调优减少 Full GC
+  - Pod 重启（OOMKilled）怎么定位？——kubectl describe pod 看 Last State 的 Reason（OOMKilled）和 Exit Code（137）；kubectl get events 看 pod_restart_count；JVM 加 -XX:+HeapDumpOnOutOfMemorySeparator 但 OOMKilled 抓不到 dump（来不及）
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - JVM 总内存 = 堆 + Metaspace + 线程栈×线程数 + 直接内存 + JIT + GC overhead
+  - 容器 memory limit > JVM 总内存 × 1.25（留 25% 余量）
+  - 用 MaxRAMPercentage=75 替代 -Xmx（自动适配容器）
+  - OOMKilled = 容器超限被内核杀（Exit Code 137），Java OOM = JVM 异常（能打堆栈）
+  - CFS throttle = CPU limit 被限流，监控 container_cpu_cfs_throttled_seconds
+  - HPA 用业务指标（QPS/RT）而非 CPU，避免 GC 抖动误扩缩
 ---
 
-# 【Java 后端架构师】Kubernetes 上 Java 服务的资源治理？
+# 【Java 后端架构师】Kubernetes 上 Java 服务的资源治理
 
-> 适用场景：高并发高可用。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。交易服务容器化部署在 K8s，规格 4C8G。大促期间偶发 OOMKilled（容器被杀）和 RT 抖动。架构师必须算清 JVM 各内存区与容器 limit 的关系、定位 CFS throttle、设计 HPA 策略保证大促弹性。
 
-## 一、先明确问题边界
+## 一、概念层：容器限制与 JVM 内存模型
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**JVM 在容器里的完整内存画像**（面试必画）：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+```
+┌────────────────── 容器 memory limit = 8 GB ──────────────────┐
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │           JVM 进程总内存 ≈ 7.5 GB                    │   │
+│  │                                                      │   │
+│  │  ┌─────────────────────┐  堆 Heap = 6 GB (75%)       │   │
+│  │  │  Eden + Survivor    │  -XX:MaxRAMPercentage=75    │   │
+│  │  │  Old (G1 Region)    │                             │   │
+│  │  └─────────────────────┘                             │   │
+│  │  ┌─────────────────────┐  Metaspace ≈ 256 MB         │   │
+│  │  │  类元信息、常量池    │  -XX:MaxMetaspaceSize=256m │   │
+│  │  └─────────────────────┘                             │   │
+│  │  ┌─────────────────────┐  线程栈 = 200×1MB = 200 MB  │   │
+│  │  │  200 个线程 × 1MB    │  -Xss1m (默认 1MB/线程)    │   │
+│  │  └─────────────────────┘                             │   │
+│  │  ┌─────────────────────┐  直接内存 ≈ 512 MB          │   │
+│  │  │  DirectByteBuffer   │  -XX:MaxDirectMemorySize   │   │
+│  │  │  (Netty/NIO)        │                             │   │
+│  │  └─────────────────────┘                             │   │
+│  │  ┌─────────────────────┐  JIT + GC overhead ≈ 500 MB │   │
+│  │  │  CodeCache、G1 内部 │  -XX:ReservedCodeCacheSize │   │
+│  │  └─────────────────────┘                             │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                              │
+│  ┌─────────────────────┐  安全余量 = 512 MB (留给 OS、cgroup)│
+│  └─────────────────────┘                                     │
+└──────────────────────────────────────────────────────────────┘
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 Kubernetes 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+关键：堆 6G + 元空间 256M + 线程栈 200M + 直接内存 512M + JIT/GC 500M = 7.46G
+      + 余量 512M = 7.98G < 8G limit（刚好安全）
+```
 
-## 二、推荐架构思路
+**OOMKilled vs Java OOM 对比**（面试必考）：
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+| 维度 | OOMKilled（容器级） | Java OOM（JVM 级） |
+|------|---------------------|-------------------|
+| **触发** | JVM 进程总内存 > 容器 memory limit | 堆/Metaspace/直接内存 用满 |
+| **执行者** | Linux 内核（cgroup OOM Killer） | JVM 自己抛异常 |
+| **信号** | SIGKILL（进程立即终止） | 无信号，抛 OutOfMemoryError |
+| **Exit Code** | 137（128 + 9，SIGKILL） | 1（或自定义） |
+| **堆栈** | 抓不到（来不及 dump） | 能打 heap dump（-XX:+HeapDumpOnOutOfMemorySeparator） |
+| **容器状态** | RestartCount +1，Last State OOMKilled | 进程退出，容器也可能重启 |
+| **定位方式** | kubectl describe pod / dmesg | GC 日志 + heap dump + MAT |
 
-## 三、技术落地点
+## 二、机制层：Deployment YAML + JVM 容器参数
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+**生产级 Deployment YAML**（核心配置，逐字段能解释）：
 
-## 四、常见坑
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  labels:
+    app: order-service
+spec:
+  replicas: 10
+  selector:
+    matchLabels:
+      app: order-service
+  template:
+    metadata:
+      labels:
+        app: order-service
+        version: v1
+    spec:
+      containers:
+        - name: order-service
+          image: registry.jd.com/order-service:1.0.0
+          ports:
+            - containerPort: 8080
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+          # 资源配额（核心）
+          resources:
+            requests:
+              cpu: "2000m"        # 2 核（调度依据，保证拿到）
+              memory: "8Gi"       # 8G（调度依据）
+            limits:
+              cpu: "4000m"        # 4 核（CFS 上限，最多用 4 核）
+              memory: "8Gi"       # 8G（硬上限，超了 OOMKilled）
+              # 注意：memory request=limit 避免内存超卖导致的 OOM 风暴
 
-## 五、面试回答模板
+          # JVM 参数（通过 JAVA_OPTS 环境变量传入）
+          env:
+            - name: JAVA_OPTS
+              value: >-
+                -XX:+UseContainerSupport
+                -XX:InitialRAMPercentage=50.0
+                -XX:MaxRAMPercentage=75.0
+                -XX:+UseG1GC
+                -XX:MaxGCPauseMillis=100
+                -XX:+HeapDumpOnOutOfMemorySeparator
+                -XX:HeapDumpPath=/data/heapdump/
+                -XX:MaxMetaspaceSize=256m
+                -XX:MaxDirectMemorySize=512m
+                -Xss512k
+                -Djava.security.egd=file:/dev/./urandom
+                -XX:+UseZGC                        # JDK 21+ 用 Generational ZGC
+                -XX:+ZGenerational
 
-可以按下面结构作答：
+          # 健康检查（保证 K8s 能摘除不健康 Pod）
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 60     # JVM 启动慢，给足时间
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            failureThreshold: 3
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“Kubernetes 上 Java 服务的资源治理”，核心是 Kubernetes 与 Java 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+          # 启动探针（JDK 启动慢，避免被 liveness 误杀）
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            failureThreshold: 30        # 30×10s=5 分钟启动窗口
+            periodSeconds: 10
 
-## 六、加分点
+          # 优雅终止（保证请求处理完才停）
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 15"]   # 先等负载均衡摘除
+            # 配合 terminationGracePeriodSeconds: 60
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+      terminationGracePeriodSeconds: 60
+```
 
-## 七、企业级面试定位：从“会用”到“能负责”
+**JVM 容器参数详解**（每个都要能解释）：
 
-企业级面试不会只问“Kubernetes 是什么”，而是看你能不能对一条真实生产链路负责。回答“Kubernetes 上 Java 服务的资源治理”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+```bash
+# 1. 容器感知（JDK 10+ 默认开，JDK 8u191+ 需确认）
+-XX:+UseContainerSupport
+#   JVM 读取 cgroup 内存/CPU 限制，按容器规格算堆
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 高并发高可用 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 Kubernetes、Java、资源 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 availability_slo、failover_seconds、backup_restore_success、dependency_error_rate 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+# 2. 堆按容器内存百分比（替代 -Xmx，自动适配不同规格）
+-XX:InitialRAMPercentage=50.0    # 初始堆 = 容器内存 × 50%
+-XX:MaxRAMPercentage=75.0        # 最大堆 = 容器内存 × 75%
+#   8G 容器 → 初始堆 4G，最大堆 6G
+#   不要用 -Xmx6g 硬编码（换规格要改参数）
 
-### 企业级回答骨架
+# 3. 非堆内存限制（防止 Metaspace/直接内存泄漏撑爆容器）
+-XX:MaxMetaspaceSize=256m        # 元空间上限
+-XX:MaxDirectMemorySize=512m     # 直接内存上限（Netty/NIO 用）
+-Xss512k                         # 线程栈（默认 1MB 太大，200 线程省 100M）
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 Kubernetes 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+# 4. GC 配置
+-XX:+UseG1GC                     # 或 ZGC（JDK 21+ 用 Generational ZGC）
+-XX:MaxGCPauseMillis=100
+-XX:+UseZGC -XX:+ZGenerational   # JDK 21+ 超低延迟
 
-### 面试中要主动补的生产细节
+# 5. OOM 诊断
+-XX:+HeapDumpOnOutOfMemorySeparator     # Java OOM 时自动 dump（OOMKilled 抓不到）
+-XX:HeapDumpPath=/data/heapdump/
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+# 6. 容器特殊优化
+-Djava.security.egd=file:/dev/./urandom  # 加速 SecureRandom（否则启动慢）
+```
 
-## 八、苏格拉底式面试追问
+## 三、机制层：CFS CPU 限流与 HPA 弹性
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+**CFS Throttle 原理**（CPU limit 导致的偶发停顿）：
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“Kubernetes 上 Java 服务的资源治理”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 availability_slo、failover_seconds、backup_restore_success、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 Kubernetes 负责的范围，以及必须依赖 Java、资源 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 单 AZ 或单实例成为隐性单点，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+```
+CPU limit = 2000m（2 核），CFS period = 100ms
+每个 100ms 周期，进程最多用 200ms CPU 时间（2 核 × 100ms）
 
-### 现场对话示例
+时间线：
+├── 0-50ms：满负载运行（用掉 100ms 配额，因为 2 核）
+├── 50-100ms：THROTTLED（配额用完，进程暂停）
+├── 100ms：新周期，恢复运行
+├── ...
 
-**面试官**：你说要做“Kubernetes 上 Java 服务的资源治理”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 availability_slo、failover_seconds、业务失败率和事故记录。
+现象：RT 抖动、GC 停顿延长（GC 线程也被 throttle）
+监控：container_cpu_cfs_throttled_seconds_total 持续增长
+```
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 availability_slo 没有改善，或者 failover_seconds 反而变差，就停止扩大范围，回到假设层重新复盘。
+**CFS Throttle 的 JVM 表现**：
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 availability_slo、failover_seconds、backup_restore_success。这样它不是个人经验，而是团队机制。
+```bash
+# JVM 看到的：偶发 STW，但不是 GC 引起
+# GC 日志：没有对应的 GC pause
+# 火焰图：出现大量 kernel态的 sched 等待
 
-## 九、专项架构深挖：对象、链路、失败模式
+# 查看是否被 throttle
+cat /sys/fs/cgroup/cpu/cpu.stat
+#   nr_periods 12345
+#   nr_throttled 678      # 被 throttle 的周期数
+#   throttled_time 12.5s  # 总 throttle 时间
+```
 
-这一题不要停在“知道 Kubernetes”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+**HPA 配置**（水平自动扩缩）：
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 多副本、健康检查、故障转移、备份恢复；RPO/RTO、演练脚本、依赖拓扑；限流降级和回滚开关 |
-| 设计主线 | 核心服务按故障域部署，依赖按重要性分级；预案必须脚本化并定期演练；把恢复时间和数据丢失窗口量化 |
-| 失败模式 | 单 AZ 或单实例成为隐性单点；备份存在但恢复不可用；故障转移后缓存或配置不一致 |
-| 验证指标 | availability_slo、failover_seconds、backup_restore_success、dependency_error_rate |
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: order-service-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: order-service
+  minReplicas: 10
+  maxReplicas: 100              # 大促扩到 100 副本
+  metrics:
+    # 基于 CPU 利用率（阈值 70%）
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    # 基于内存利用率（阈值 80%）
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+    # 基于自定义指标（QPS，更准）
+    - type: Pods
+      pods:
+        metric:
+          name: http_requests_per_second
+        target:
+          type: AverageValue
+          averageValue: "500"   # 每副本 500 QPS 触发扩容
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0   # 扩容立即生效
+      policies:
+        - type: Percent
+          value: 100                   # 一次最多翻倍
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300  # 缩容等 5 分钟（避免抖动）
+      policies:
+        - type: Percent
+          value: 10                    # 一次最多缩 10%
+          periodSeconds: 60
+```
 
-**架构拆解**：
+## 四、实战层：OOMKilled 与 CFS Throttle 排查
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 Java 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 Kubernetes 上 Java 服务的资源治理 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 资源 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+**OOMKilled 排查链路**：
 
-**高分回答细节**：
+```bash
+# 1. 看容器重启原因
+kubectl describe pod order-service-xxx
+#   Last State: Terminated
+#     Reason: OOMKilled        # ← 容器内存超限被杀
+#     Exit Code: 137           # 128 + 9 (SIGKILL)
 
-- 不要只说“可以用 Kubernetes”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+# 2. 看重启次数
+kubectl get pods -o wide
+#   NAME              READY   STATUS    RESTARTS   # RESTARTS > 0 说明重启过
+#   order-service-1   1/1     Running   3
 
-## 十、二轮场景追问与项目表达
+# 3. 看事件
+kubectl get events --field-selector involvedObject.name=order-service-xxx
+#   LAST SEEN   TYPE     REASON      MESSAGE
+#   2m          Warning  BackOff     Container failed liveness probe...
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+# 4. 算 JVM 内存各区总和，定位哪个区超了
+#    堆 6G + 元空间 256M + 线程栈（可能泄漏到 1000 线程 × 1M = 1G）
+#    定位：线程数泄漏（线程池没上限），线程栈撑爆容器
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+# 5. 修复：限制线程数 + 调小堆给线程栈留余量
+```
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“Kubernetes 上 Java 服务的资源治理”，重点看 availability_slo、failover_seconds、backup_restore_success，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+**CFS Throttle 排查链路**：
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+```bash
+# 1. Prometheus 看 throttle 指标
+rate(container_cpu_cfs_throttled_seconds_total{pod="order-service-xxx"}[5m]) > 0
+#   如果持续 > 0，说明在 throttle
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 Kubernetes 和 Java 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+# 2. 计算 throttle 比例
+sum(rate(container_cpu_cfs_throttled_seconds_total[5m])) by (pod)
+  / sum(rate(container_cpu_cfs_periods_total[5m])) by (pod)
+#   > 10% 就要关注
 
-### 追问 3：你如何判断这个方案值得做？
+# 3. 定位：CPU limit 设太低，或线程数太多导致竞争
+#    解法：调大 CPU limit（如 2000m → 4000m），或减少并发线程数
+```
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 资源 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+## 五、底层本质：为什么 Java 在容器里容易翻车
 
-### STAR 项目表达
+回到第一性：**Java 设计于物理机时代，假设能独占整机资源；K8s 用 cgroup 做硬隔离，两者心智模型不对齐**。
 
-- **S（背景）**：原系统在 Kubernetes 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 Kubernetes 上 Java 服务的资源治理 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 availability_slo、failover_seconds 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+- **内存认知错位**：早期 JVM（8u191 前）按宿主机内存算堆（如 64G 物理机，默认堆 16G），但容器 limit 只给 4G，堆还没满容器就 OOMKilled。8u191 后才默认识别 cgroup。即使现在，JVM 的堆/非堆/直接内存分区与容器的单一 memory limit 不对齐——堆设 6G 但忘了限制直接内存，Netty 用了 3G 直接内存，总内存超 8G 还是 OOMKilled。
+- **CPU 认知错位**：JVM 的 GC、JIT、线程调度假设能瞬间拿到 CPU。容器的 CFS 调度按时间片分配（100ms 周期），CPU limit 低时 GC 线程被 throttle，原本 50ms 的 GC pause 变成 200ms（中间被暂停）。这不是 GC 问题，是调度问题，但表现为 RT 抖动。
+- **启动慢**：JVM 启动要加载类、JIT 预热，比 Go/Python 慢（几十秒 vs 几秒）。K8s 的 livenessProbe 默认快速探测，JVM 还没起来就被判不健康重启（循环重启）。解法是 startupProbe + 长 initialDelaySeconds。Spring Boot 用 AOT compilation（GraalVM Native Image）能解决启动慢但牺牲灵活性。
 
-### 二轮复盘清单
+**资源配比的核心公式**：`容器 memory limit > 堆 + Metaspace + 线程栈×线程数 + 直接内存 + JIT/GC overhead + 安全余量(25%)`。用 MaxRAMPercentage 设堆，其他区也要显式限制（MaxMetaspaceSize、MaxDirectMemorySize），不能只盯堆。
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+## 六、AI 架构师加问：5 个
 
-## 十一、面试官 5 个企业级追问
+1. **AI 能自动推荐容器的 request/limit 配比吗？**
+   能做辅助。AI 分析历史 metrics（cpu_usage、memory_usage、gc_pause）+ 应用画像（QPS、线程数），推荐 request/limit。但必须人工确认——AI 可能推荐过低的 limit 导致 OOMKilled 或 throttle。上线后监控 restart_count 和 throttled_time，持续调优。
 
-1. **你在真实项目里怎么判断“Kubernetes 上 Java 服务的资源治理”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 availability_slo、failover_seconds、backup_restore_success。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+2. **HPA 的弹性扩缩怎么避免 GC 抖动误判？**
+   HPA 基于 CPU 利用率时，Full GC 会让 CPU 短暂飙到 100%，HPA 误扩容。解法：用自定义指标（QPS、RT）替代 CPU，或设扩容冷却窗口（stabilizationWindowSeconds）。AI 能做更智能的弹性——预测大促流量提前扩容，而非反应式。
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，Kubernetes 是否真是瓶颈，Java 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+3. **AI 推理服务（GPU）在 K8s 上怎么资源治理？**
+   GPU 是独占资源（一张卡一个 Pod 或 MIG 分区）。CPU/内存仍用 cgroup，但 GPU 显存要单独监控（nvidia_gpu_memory_used）。JVM 跑 CPU 推理时用常规配置，跑 GPU 推理时要注意 JVM 不占 GPU 但占 CPU（数据预处理），要预留。
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 单 AZ 或单实例成为隐性单点。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 availability_slo 和 failover_seconds 做分钟级观察，一旦越过阈值立即止损。
+4. **用 AI 做容器 OOMKilled 的根因分析？**
+   AI 分析 Pod 的 metrics 历史（内存增长曲线）+ JVM 内存各区分布 + 容器事件，归因到"线程泄漏/Metaspace 泄漏/直接内存泄漏/堆 OOM/堆外 OOM"。但 OOMKilled 抓不到 heap dump，AI 只能基于趋势分析给出假设，人工验证。
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 资源，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+5. **Serverless Java（Knative/Scale-to-zero）怎么处理 JVM 启动慢？**
+   JVM 冷启动几十秒，Scale-to-zero 后首次请求超时。解法：GraalVM Native Image（启动 < 100ms 但牺牲反射/GC 调优）、CRaC（Coordinated Restore at Checkpoint，快照恢复）、或 minReplicas=1 保持热实例。AI 能预测流量模式，提前 warm up 冷实例。
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“Kubernetes 上 Java 服务的资源治理”，至少要沉淀 多副本、健康检查、故障转移、备份恢复 的建模规范，以及 availability_slo、failover_seconds 的验收标准。
-
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“Kubernetes 上 Java 服务的资源治理”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 Kubernetes 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“Kubernetes 上 Java 服务的资源治理”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 availability_slo、failover_seconds 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 单 AZ 或单实例成为隐性单点，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 七、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：灾备演练指挥官拿着健康检查、切流开关、备份和演练脚本，在处理“主链路突然失去一个关键节点”。
+抓 **"各区内存算总和、MaxRAMPercentage、CFS throttle、startupProbe"**。
 
-- **场景**：先说明“Kubernetes 上 Java 服务的资源治理”服务于什么业务目标，不要上来就堆 Kubernetes。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 单 AZ 或单实例成为隐性单点、备份存在但恢复不可用。
-- **验证**：最后落到 availability_slo、failover_seconds、backup_restore_success，让面试官感觉你真的上线过。
+- **内存总和**：堆+元空间+线程栈+直接内存+GC overhead < limit×0.75
+- **堆配置**：MaxRAMPercentage=75 替代 -Xmx，自动适配容器规格
+- **OOMKilled**：容器超 memory limit 被内核 SIGKILL（Exit 137），非 Java OOM
+- **CFS throttle**：CPU limit 低导致进程暂停，监控 throttled_seconds
+- **HPA**：用 QPS/RT 自定义指标，避免 GC 抖动误扩缩
+- **启动**：startupProbe + 长 initialDelaySeconds 防 JVM 被误杀
 
 ### 拟人化理解
 
-可以把“Kubernetes 上 Java 服务的资源治理”想成一个灾备演练指挥官：Kubernetes 是他的健康检查、切流开关、备份和演练脚本，Java 是他面对的现场信号，资源 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先保核心业务，再恢复非核心能力。这样记，比死背组件名更稳。
+把容器资源治理想成**精确配料的厨房**。K8s 给你一口 8L 的锅（memory limit），JVM 这道菜要用米（堆）6L + 调料（元空间）0.25L + 配菜（线程栈）0.2L + 水（直接内存）0.5L + 火候余量（GC）0.5L，总和 7.45L < 8L 锅才不溢出。火候（CPU）开太大被限流（CFS throttle），菜就半生不熟（RT 抖动）。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“Kubernetes 上 Java 服务的资源治理”，我会这样答：我会先把故障域、RPO/RTO、切流路径和恢复演练讲清楚，高可用不是多部署几个副本就结束。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 单 AZ 或单实例成为隐性单点，所以我会提前设计灰度、监控和止损阈值，重点看 availability_slo、failover_seconds。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 availability_slo 或 failover_seconds 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> 核心是 JVM 内存各区总和要小于容器 memory limit。堆用 MaxRAMPercentage=75 自动适配（不用 -Xmx 硬编码），但元空间（MaxMetaspaceSize）、直接内存（MaxDirectMemorySize）、线程栈（Xss×线程数）也要显式限制，否则 Netty 直接内存泄漏或线程数泄漏都会撑爆容器。OOMKilled 是容器超 limit 被内核 SIGKILL（Exit 137），和 Java OOM（能打堆栈）不同，排查要看 kubectl describe 的 Last State。CPU 用 CFS 调度，limit 太低导致 throttle，表现为 RT 抖动但 GC 日志没停顿，监控 container_cpu_cfs_throttled_seconds。HPA 用 QPS/RT 自定义指标而非 CPU，避免 Full GC 时 CPU 飙升误扩容。JVM 启动慢要配 startupProbe + 长 initialDelaySeconds，否则被 liveness 误杀循环重启。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司容器规格是多大（如 4C8G）？有没有遇到过 OOMKilled 频发或 CFS throttle？HPA 是基于 CPU 还是自定义指标？这决定我聊内存配比还是 CPU 治理。
 
+## 八、苏格拉底式面试追问
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么用容器而不是物理机？容器对 Java 有什么坑？ | 用数据说话：容器提升资源利用率（物理机 20%→容器 60%）、弹性快。坑是 JVM 内存模型与 cgroup 不对齐（OOMKilled）、CFS throttle、启动慢。证明：restart_count、throttled_time 指标 |
+| 证据追问 | 怎么证明某个 Pod 是 OOMKilled 而不是代码 bug？ | kubectl describe 看 Last State Reason=OOMKilled、Exit Code=137；kubectl get events 看 BackOff；dmesg 看内核 OOM 日志；JVM heap dump 抓不到（来不及）则确认是容器级而非 JVM 级 |
+| 边界追问 | 容器资源治理能解决所有 Java 稳定性问题吗？ | 不能。解决不了 GC 调优（堆设对但 GC 算法不合适）、线程池打满（业务并发太高）、慢 SQL（DB 瓶颈）、网络抖动。资源治理是基础，还要 JVM 调优 + 业务治理 |
+| 反例追问 | 什么场景 Java 不该上 K8s？ | 超低延迟（微秒级，高频交易，容器调度开销不可接受）、超大堆（> 64G，G1/ZGC 在容器里效果不如物理机）、强依赖本地存储（如数据库本身）。这类用物理机或专属调度 |
+| 风险追问 | 容器化 Java 最大风险？ | 主动点出：memory request≠limit 导致内存超卖 OOM 风暴（多个 Pod 同时 OOMKilled）、CPU limit 低导致 CFS throttle（RT 抖动难定位）、JVM 启动慢被 liveness 误杀（循环重启）、cgroup v1 vs v2 差异 |
+| 验证追问 | 怎么证明资源配比合理？ | 压测单 Pod 极限（CPU 80% 时 QPS），按 SLA 倒推副本数；监控 restart_count=0（无 OOMKilled）、throttled_time<1%（无 CPU 限流）、GC pause 正常；故障演练（kill Pod 验证 HPA 扩容时效） |
+| 沉淀追问 | 团队容器规范沉淀什么？ | 按服务类型的 Deployment 模板（网关/交易/批处理不同配比）、JVM 参数标准模板（MaxRAMPercentage + 非堆限制）、HPA 配置 SOP（指标选择、阈值、冷却窗口）、OOMKilled 排查 checklist |
+
+### 现场对话示例
+
+**面试官**：线上 Java 服务偶发 RT 抖动，GC 日志正常，你怎么定位？
+
+**候选人**：GC 正常说明不是 GC 停顿，先怀疑 CFS throttle。看 Prometheus 的 container_cpu_cfs_throttled_seconds_total，如果抖动时段这个指标飙升，就是 CPU limit 被限流了。根因是 limit 设太低（如 2 核）但实际 CPU 需求高于 2 核（如 GC 线程 + 业务线程 + JIT 同时竞争）。解法：调大 CPU limit（如 4 核），或减少并发线程数。彻底解法是 request=limit 绑核（独占 CPU 避免 throttle）。另一个可能是内存接近 limit 导致内核频繁回收 page cache，表现为 RT 抖动，看 container_memory_working_set_bytes 接近 limit。
+
+**面试官**：OOMKilled 抓不到 heap dump，怎么排查内存泄漏？
+
+**候选人**：OOMKilled 是内核杀的，JVM 来不及 dump。排查思路：第一，看是堆 OOM 还是堆外 OOM——如果堆没用满（jstat 看 O 区没满）但容器超限，是堆外（直接内存、Metaspace、线程栈）。第二，用 Native Memory Tracking（-XX:NativeMemoryTracking=detail）看 JVM 各区内存分布。第三，jcmd 看 Thread 数（线程栈泄漏）和 DirectByteBuffer（直接内存泄漏）。第四，临时加 -XX:MaxDirectMemorySize 限制直接内存，看是否还 OOMKilled。长期：给所有非堆区设上限，堆用 MaxRAMPercentage，总和留 25% 余量。
+
+**面试官**：HPA 基于 CPU 扩容，大促时扩太慢怎么办？
+
+**候选人**：两个问题。第一，CPU 指标滞后——等 CPU 飙到 70% 才扩容，新 Pod 启动要 1-2 分钟（JVM 启动+预热），这时流量已经打满了。解法：用 QPS 作为前置指标（QPS 涨比 CPU 快），或大促前定时预扩容（CronHPA 提前扩）。第二，缩容抖动——流量波动导致 HPA 频繁扩缩，新 Pod 预热没完成就被缩。解法：scaleDown 的 stabilizationWindowSeconds 设大（5-10 分钟）、缩容步长小（一次 10%）。最佳实践：HPA + 预扩容 + 业务低峰期定时缩容，三者结合。
+
+## 常见考点
+
+1. **OOMKilled 和 Java OOM 区别？**——OOMKilled 是容器超 memory limit 被内核 SIGKILL（Exit 137），抓不到堆栈；Java OOM 是 JVM 内部异常（OutOfMemoryError），能打 heap dump。排查 OOMKilled 看 kubectl describe 的 Last State + dmesg。
+2. **JVM 在容器里怎么配堆？**——用 -XX:MaxRAMPercentage=75（JDK 10+），不用 -Xmx 硬编码。8G 容器自动算出堆 6G。还要配 MaxMetaspaceSize、MaxDirectMemorySize 限制非堆。
+3. **CFS throttle 是什么？**——K8s CPU limit 用 CFS 调度，周期（100ms）内 CPU 时间用完就暂停进程。表现为 RT 抖动、GC 延长。监控 container_cpu_cfs_throttled_seconds，解法是调大 limit 或 request=limit 绑核。
+4. **HPA 怎么配置才不抖？**——用 QPS/RT 自定义指标（比 CPU 准）、scaleDown stabilizationWindowSeconds 设 5-10 分钟、缩容步长小、大促前定时预扩容。
+5. **JVM 启动慢被 liveness 误杀怎么办？**——配 startupProbe（failureThreshold=30, period=10s 给 5 分钟启动窗口）+ livenessProbe 的 initialDelaySeconds 设够长。

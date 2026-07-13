@@ -9,259 +9,344 @@ tags:
 - pinning
 - JFR
 feynman:
-  essence: 虚拟线程 pinning 问题如何发现与治理的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: pinning 是虚拟线程在阻塞时无法把 continuation unmount 到堆，导致 carrier 平台线程被"钉死"的现象。三大元凶：synchronized 块内阻塞、JNI 内阻塞、特定 native IO。治理不是"换 ReentrantLock"那么简单——要先靠 JFR 的 jdk.VirtualThreadPinned 事件定位热点、再按代价（改造 vs 升级 JDK 24）排序修复。
+  analogy: 像地铁乘客（虚拟线程）霸座（pinning）——车厢（carrier）眼看还有 50 个空位，但被霸座的座位不能用。霸座乘客越多，地铁实际运力越接近车厢数。JFR 是车厢监控摄像头，能精确拍到哪个乘客在哪个站霸座多久。
+  first_principle: carrier 数 = CPU 核数，是吞吐上限。pinning 让 carrier 无法服务其他虚拟线程，等价于把虚拟线程降级回平台线程。pinning 率（pinned 时长 / 总运行时长）超过 10% 就基本没有虚拟线程收益了。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - pinning 三大元凶：synchronized 块内阻塞、JNI/native 阻塞、Object.wait（已部分修复）
+  - 诊断利器：JFR jdk.VirtualThreadPinned 事件，含 duration + 堆栈
+  - jcmd + jstack 看 carrier 数和虚拟线程挂起原因
+  - JDK 21/22/23 都有 pinning，JDK 24（JEP 491）才修 synchronized
+  - 治理路径：JFR 画像 → 按热点排序 → synchronized 换 ReentrantLock / native 调用换 NIO
 first_principle:
-  problem: 面对“虚拟线程 pinning 问题如何发现与治理”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 虚拟线程在 carrier 上执行时，哪些情况无法 unmount continuation，如何量化发现并修复？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - carrier 是稀缺资源（CPU 核数个），pinning 一个就少一个
+  - JVM 无法 unmount 的根因是栈帧被外部持有（monitor 的 owner 字段、JNI 局部引用）
+  - 阻塞 + 无法 unmount = pinning；阻塞 + 能 unmount = 正常虚拟线程行为
+  rebuild: 先用 JFR 持续采集 jdk.VirtualThreadPinned 事件（duration threshold 默认 20ms），按堆栈聚合找出 Top N pinning 代码段。再分类治理：① synchronized → ReentrantLock（最常见）；② native IO → NIO/AsyncClient；③ 第三方库（如老版 DatabaseDriver）→ 升级或替换。最后 JDK 24 GA 后整体升级根治 synchronized。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - 怎么判断一个 pinning 是"严重"还是"可忽略"？——看 duration × frequency。100ms 以上的 pinning 即使频率低也有问题；< 1ms 的 pinning 即使每秒万次也基本无感
+  - JFR 的 jdk.VirtualThreadPinned 阈值怎么设？——jdk.VirtualThreadPinned 默认 threshold=20ms，生产可调到 10ms 看高频小 pinning；开销可控（事件本身很轻）
+  - 第三方库（如 JDBC 驱动、HttpClient）的 pinning 怎么办？——升到 JDK 友好版本。MySQL Connector/J 8.0.33+、PostgreSQL 42.6+ 已修常见 pinning
+  - pinning 会导致吞吐下降多少？——按 pinning 率算。100% pinning = 退化为平台线程；10% pinning = 吞吐损失约 10%（与 carrier 数相关）
+  - JDK 24 之后 synchronized 就完全不 pinning 了吗？——基本是，JEP 491 把 Object.wait/synchronized 都改为可 unmount；但 JNI 内阻塞仍可能 pinning
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - pinning = 虚拟线程阻塞但 carrier 无法让出 = 退化为平台线程
+  - 三大元凶：synchronized 块内阻塞、JNI/native 阻塞、第三方库老版本
+  - 诊断：JFR jdk.VirtualThreadPinned 事件（duration threshold 20ms）
+  - 治理：synchronized → ReentrantLock；native → NIO；第三方库升级
+  - JDK 24（JEP 491）彻底修 synchronized pinning
+  - jstack 看 carrier 数 = `ForkJoinPool-1-worker-N`，挂起 reason = "wait" 时是 pinned
 ---
 
-# 【Java 后端架构师】虚拟线程 pinning 问题如何发现与治理？
+# 【Java 后端架构师】虚拟线程 pinning 问题如何发现与治理
 
-> 适用场景：JD 核心技术。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。订单服务迁移到 JDK 21 虚拟线程后，压测发现 QPS 只比平台线程池高 20%（预期是 5 倍），jstack 一片 carrier 在 RUNNABLE 但实际啥也没干。架构师必须能用 JFR 在线诊断 pinning、按 ROI 排序治理。
 
-## 一、先明确问题边界
+## 一、概念层：pinning 的本质与载体代价
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**pinning 是什么**：虚拟线程在 carrier 上执行时遇到阻塞，但 JVM 无法把它的 continuation unmount 到堆，于是 carrier 平台线程被"钉死"陪着虚拟线程一起阻塞。pinning 期间这个 carrier 无法服务其他虚拟线程。
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+**carrier 数 = 吞吐上限**：
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 虚拟线程 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+```
+CPU 8 核 → ForkJoinPool 平台 carrier 8 个
 
-## 二、推荐架构思路
+正常情况（无 pinning）：
+  100 万虚拟线程，8 个 carrier 高速 mount/unmount，吞吐拉满
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+pinning 情况（synchronized 阻塞）：
+  100 万虚拟线程，5 个 carrier 被钉死等数据库
+  实际只有 3 个 carrier 在工作 → 吞吐接近平台线程 8 个的水平
+```
 
-## 三、技术落地点
+**三大 pinning 元凶对比**（这张表面试必问）：
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+| 元凶 | 触发场景 | 修复方法 | JDK 24 是否根治 |
+|------|---------|---------|----------------|
+| **synchronized 块内阻塞** | `synchronized(lock){ db.query(); }` | 换 ReentrantLock | 是（JEP 491） |
+| **JNI / native 方法阻塞** | 老 JDK IO、第三方 native 库 | 换 NIO / 升级库 | 部分（Object.wait 修复） |
+| **Object.wait()** | 部分并发工具的内部实现 | JDK 21 已修大部分 | 是 |
+| **第三方库内部 synchronized** | MySQL Connector/J < 8.0.33 | 升级版本 | 升级后自动获益 |
 
-## 四、常见坑
+## 二、机制层：JFR + jstack 诊断 pinning
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+**JFR 开启 VirtualThreadPinned 事件**（生产必开）：
 
-## 五、面试回答模板
+```bash
+# 1. 启动时配 JFR（持续低开销画像）
+java -XX:StartFlightRecording=\
+  filename=/data/jfr/vt-$(date +%s).jfr,\
+  settings=profile,\
+  maxage=1h,\
+  maxsize=512m \
+  -jar app.jar
 
-可以按下面结构作答：
+# 2. 或运行时 jcmd 启动
+jcmd <pid> JFR.start name=vt-profile settings=profile maxage=1h maxsize=512m
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“虚拟线程 pinning 问题如何发现与治理”，核心是 虚拟线程 与 pinning 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+# 3. 自定义 JFR 配置，开启 VirtualThreadPinned（默认开启但 threshold 20ms）
+# 文件 vt-config.jfc 关键片段：
+# <event name="jdk.VirtualThreadPinned">
+#   <setting name="enabled">true</setting>
+#   <setting name="threshold">10ms</setting>   <!-- 调低能抓小 pinning -->
+# </event>
+jcmd <pid> JFR.start name=vt settings=vt-config.jfc maxage=1h
 
-## 六、加分点
+# 4. dump 当前 JFR 到文件
+jcmd <pid> JFR.dump name=vt filename=/data/jfr/dump.jfr
+```
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+**JFR 事件查询（jfrprint / JMC）**：
 
-## 七、企业级面试定位：从“会用”到“能负责”
+```bash
+# 用 jfr print 工具（JDK 自带）查询 pinning 事件 Top N
+jfr print --events jdk.VirtualThreadPinned dump.jfr | head -50
 
-企业级面试不会只问“虚拟线程 是什么”，而是看你能不能对一条真实生产链路负责。回答“虚拟线程 pinning 问题如何发现与治理”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+# 输出示例：
+# jdk.VirtualThreadPinned {
+#   startTime = 2026-07-13T10:23:45.123Z
+#   duration = 245 ms        ← pinning 时长
+#   thread = "vt-order-123" (java.lang.VirtualThread)
+#   stackTrace = {
+#     java.lang.Object.wait0(Object.java)        ← synchronized wait
+#     com.example.OrderService.queryDB(OrderService.java:45)
+#     ...
+#   }
+# }
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 JD 核心技术 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 虚拟线程、pinning、JFR 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 pool_active_ratio、queue_wait_ms_p99、rejected_tasks、lock_blocked_threads 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+# 按 pinning 时长排序找热点
+jfr print --events jdk.VirtualThreadPinned dump.jfr \
+  | grep "duration =" | sort -t= -k2 -nr | head -20
+```
 
-### 企业级回答骨架
+**jstack 看 carrier 与虚拟线程状态**：
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 虚拟线程 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+```bash
+jcmd <pid> Thread.print > thread-dump.txt
 
-### 面试中要主动补的生产细节
+# 关键看：
+# "vt-order-123" #456 VirtualThread            ← 虚拟线程
+#   java.lang.Thread.State: WAITING (on object monitor)
+#       at java.lang.Object.wait0(...)
+#       - locked <0x...> (a java.lang.Object)   ← 有 monitor = pinning
+# 
+# "ForkJoinPool-1-worker-3" #12                ← carrier 平台线程
+#   java.lang.Thread.State: RUNNABLE
+#       at java.lang.VirtualThread$VThreadContinuation.yield(...)  ← 正常调度
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+# carrier 在 RUNNABLE 但 CPU 利用率低 = 大量 pinning
+```
 
-## 八、苏格拉底式面试追问
+**Carrier 数与利用率关系**：
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+```bash
+# 查 ForkJoinPool 的并行度（carrier 数）
+jcmd <pid> VM.flags | grep -i parallelism
+#   ForkJoinPool.common.parallelism = 8   ← 默认 = CPU 核数
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“虚拟线程 pinning 问题如何发现与治理”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 pool_active_ratio、queue_wait_ms_p99、rejected_tasks、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 虚拟线程 负责的范围，以及必须依赖 pinning、JFR 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 队列无界导致内存被打满，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+# 用 Micrometer 监控
+# 指标 1：jvm.threads.virtual.count（虚拟线程数）
+# 指标 2：carrier CPU 利用率（process_cpu_usage）
+# 指标 3：自定义 pinned_counter（从 JFR 事件聚合）
+```
 
-### 现场对话示例
+## 三、实战层：典型 pinning 场景与治理案例
 
-**面试官**：你说要做“虚拟线程 pinning 问题如何发现与治理”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 pool_active_ratio、queue_wait_ms_p99、业务失败率和事故记录。
+**场景 1：synchronized + IO 阻塞（最高频）**
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 pool_active_ratio 没有改善，或者 queue_wait_ms_p99 反而变差，就停止扩大范围，回到假设层重新复盘。
+```java
+// 反例（pinning 元凶）
+public class OrderCache {
+    private final Map<String, Order> cache = new HashMap<>();
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 pool_active_ratio、queue_wait_ms_p99、rejected_tasks。这样它不是个人经验，而是团队机制。
+    public Order get(String id) {
+        synchronized (cache) {            // ← 整个 carrier 钉死
+            Order o = cache.get(id);
+            if (o == null) {
+                o = db.query(id);         // ← IO 阻塞 + synchronized = pinning
+                cache.put(id, o);
+            }
+            return o;
+        }
+    }
+}
 
-## 九、专项架构深挖：对象、链路、失败模式
+// 修复 1：换 ConcurrentHashMap（无锁）
+public class OrderCache {
+    private final ConcurrentHashMap<String, Order> cache = new ConcurrentHashMap<>();
 
-这一题不要停在“知道 虚拟线程”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+    public Order get(String id) {
+        return cache.computeIfAbsent(id, this::dbQuery);  // ← dbQuery 在虚拟线程上 unmount
+    }
+}
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 业务线程池、队列、Future 链、锁竞争点；CPU 密集型与 IO 密集型任务；上下文、超时和取消信号 |
-| 设计主线 | 线程池按业务域隔离，拒绝策略要可解释；异步链路必须有超时、取消、降级和上下文透传；共享状态优先不可变或分片，减少大锁 |
-| 失败模式 | 队列无界导致内存被打满；异步任务丢失 trace 和安全上下文；锁竞争把 CPU 消耗在阻塞和唤醒上 |
-| 验证指标 | pool_active_ratio、queue_wait_ms_p99、rejected_tasks、lock_blocked_threads |
+// 修复 2：换 ReentrantLock（功能等价）
+public class OrderCache {
+    private final Map<String, Order> cache = new HashMap<>();
+    private final ReentrantLock lock = new ReentrantLock();
 
-**架构拆解**：
+    public Order get(String id) {
+        lock.lock();
+        try {
+            // ... 业务
+        } finally {
+            lock.unlock();               // ← ReentrantLock 不 pinning
+        }
+    }
+}
+```
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 pinning 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 虚拟线程 pinning 问题如何发现与治理 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 JFR 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+**场景 2：第三方 JDBC 驱动内部 synchronized**
 
-**高分回答细节**：
+```java
+// 反例：MySQL Connector/J 8.0.32 内部有 synchronized + socket read
+// JFR jdk.VirtualThreadPinned 堆栈：
+//   com.mysql.cj.jdbc.StatementImpl.executeQuery(...)
+//   com.mysql.cj.protocol.a.NativeProtocol.readMessage(...)
+//   synchronized(this.connectionLock) {   ← 第三方库内部 pinning
+//       socketImpl.read(...)
+//   }
 
-- 不要只说“可以用 虚拟线程”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+// 修复：升级到 8.0.33+（已修 synchronized pinning）
+// pom.xml
+<dependency>
+    <groupId>mysql</groupId>
+    <artifactId>mysql-connector-java</artifactId>
+    <version>8.0.33</version>            <!-- 或 8.4.0 -->
+</dependency>
+```
 
-## 十、二轮场景追问与项目表达
+**场景 3：FileInputStream / 老 IO**
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+```java
+// 反例：FileInputStream.read() 在 JDK 21 部分实现仍 pinning
+FileInputStream fis = new FileInputStream("big.log");
+byte[] buf = new byte[8192];
+fis.read(buf);                            // ← 可能 pinning
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+// 修复：用 NIO（虚拟线程友好）
+try (FileChannel ch = FileChannel.open(Path.of("big.log"))) {
+    ByteBuffer buf = ByteBuffer.allocate(8192);
+    ch.read(buf);                         // ← NIO 在虚拟线程上正常 unmount
+}
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“虚拟线程 pinning 问题如何发现与治理”，重点看 pool_active_ratio、queue_wait_ms_p99、rejected_tasks，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+// 或用 java.net.http.HttpClient（已针对虚拟线程优化）
+HttpClient client = HttpClient.newHttpClient();
+HttpRequest req = HttpRequest.newBuilder(URI.create("https://api.jd.com")).build();
+HttpResponse<String> resp = client.send(req, BodyHandlers.ofString());  // ← 友好
+```
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+**治理工作流（架构师必备 SOP）**：
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 虚拟线程 和 pinning 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+```
+1. 压测建立基线：QPS / P99 / carrier CPU / jvm.threads.virtual
+        │
+        ▼
+2. JFR 持续采集 jdk.VirtualThreadPinned，dump 分析
+        │
+        ▼
+3. 按堆栈聚合 Top 10 pinning 代码段（duration × frequency 排序）
+        │
+        ▼
+4. 分类治理：
+   - synchronized → ReentrantLock（业务代码）
+   - 第三方库 synchronized → 升级到 JDK 21 友好版本
+   - native IO → NIO / AsyncClient
+        │
+        ▼
+5. 验证：同一压测对比 QPS 提升、pinning 事件数下降
+        │
+        ▼
+6. 上线灰度：10% 流量跑 3 天看 P99 不退化、pinning 持续下降
+        │
+        ▼
+7. 中长期：评估升级 JDK 24（JEP 491）根治 synchronized pinning
+```
 
-### 追问 3：你如何判断这个方案值得做？
+## 四、底层本质：为什么 synchronized 不能 unmount
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 JFR 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+回到第一性：**为什么 synchronized 块内阻塞无法 unmount continuation，而 ReentrantLock 可以？**
 
-### STAR 项目表达
+- **synchronized 的 monitor**：JVM 用对象头（Mark Word）存储 monitor 状态，wait queue 由 JVM 管理。当线程进入 synchronized 块时，JVM 把线程 ID 写入对象头，unmount continuation 会破坏这个映射（continuation 复制到堆后，对象头的线程 ID 失效）。所以 JDK 21/22/23 选择 pinning（保守），JDK 24（JEP 491）通过重写 monitor 实现（脱离对象头，用单独的 ObjectMonitor 数据结构）才允许 unmount。
+- **ReentrantLock**：基于 AQS（AbstractQueuedSynchronizer），等待队列是 Java 对象，park/unpark 通过 `LockSupport` 实现，与 continuation 协调好（park 时 JVM 知道这是 Java 层阻塞，可以 unmount）。
+- **JNI 内阻塞**：JVM 看不到 native 栈（C/C++ 栈），无法把 native 栈打包成 continuation，所以 JNI 内阻塞必然 pinning。这是 JDK 24 也无法解决的——native 代码必须自己改用非阻塞 IO。
 
-- **S（背景）**：原系统在 虚拟线程 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 虚拟线程 pinning 问题如何发现与治理 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 pool_active_ratio、queue_wait_ms_p99 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+**pinning 不一定是 bug**：synchronized 块内的纯 CPU 计算（不阻塞 IO）不 pinning，因为没阻塞就没 unmount 需求。pinning 只在"synchronized + 阻塞 IO/wait/sleep"组合时发生。所以"看到 synchronized 就紧张"是过度反应——要看块内是否有阻塞操作。
 
-### 二轮复盘清单
+## 五、AI 架构师加问：5 个
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+1. **让 AI 自动扫描代码找 pinning 风险，怎么设计？**
+   静态规则 + 历史堆栈学习。静态规则：synchronized 块内调用 sleep/wait/IO/socket/db 的代码段（AST 扫描）；历史：JFR jdk.VirtualThreadPinned 的堆栈做语料训练分类器。输出风险评分 + 修复建议（换 ReentrantLock / 改 NIO）。误报主要来自 synchronized 块内纯 CPU 计算，要 AI 区分。
 
-## 十一、面试官 5 个企业级追问
+2. **AI 自动把 synchronized 改成 ReentrantLock 安全吗？**
+   不全自动。语义差异：synchronized 是块结构（自动释放），ReentrantLock 要显式 unlock（漏掉 finally 就死锁）；synchronized 不可中断，ReentrantLock.lockInterruptibly 可中断。AI 改造必须保证 try-finally 包裹、评估中断语义变化、跑回归测试。建议 AI 出 diff，人工 review。
 
-1. **你在真实项目里怎么判断“虚拟线程 pinning 问题如何发现与治理”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 pool_active_ratio、queue_wait_ms_p99、rejected_tasks。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+3. **AI 推理服务用 JNI 调 GPU 库（CUDA/ONNX Runtime），怎么避免 pinning？**
+   JNI 内阻塞必然 pinning，无法绕过。解法：把 GPU 推理调用包到固定大小的平台线程池（不要走虚拟线程），通过队列和虚拟线程解耦。即：虚拟线程接收 HTTP 请求 → 提交推理任务到 platform executor → 等结果（虚拟线程 unmount）→ 返回。GPU 限制的是平台线程池大小（按 GPU 显存和并发算）。
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，虚拟线程 是否真是瓶颈，pinning 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+4. **怎么用 AI 评估 JDK 24 升级的 pinning 收益？**
+   用 JFR 历史数据：把所有 synchronized 相关的 jdk.VirtualThreadPinned 事件按 duration 求和，估算升级后这部分 pinning 全部消失能提升多少 carrier 利用率。结合吞吐公式（吞吐 ≈ carrier 数 / (1 - pinning 率)）算预期 QPS 增益，再对比升级风险（JDK 24 兼容性、新 GC 行为）做决策。
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 队列无界导致内存被打满。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 pool_active_ratio 和 queue_wait_ms_p99 做分钟级观察，一旦越过阈值立即止损。
+5. **大模型 Agent 调用工具时频繁 pinning，AI 怎么自愈？**
+   Agent 的 tool_call 内部如果调用第三方 SDK（如某些 SaaS API 用老 IO），会 pinning。自愈策略：① AI 检测 pinning 频发自动切换 SDK 实现（如 Apache HttpClient → java.net.http.HttpClient）；② 用 circuit breaker 跳过 pinning 频发的 tool，返回降级结果；③ 长期重写 tool wrapper 用虚拟线程友好的 IO 库。
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 JFR，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
-
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“虚拟线程 pinning 问题如何发现与治理”，至少要沉淀 业务线程池、队列、Future 链、锁竞争点 的建模规范，以及 pool_active_ratio、queue_wait_ms_p99 的验收标准。
-
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“虚拟线程 pinning 问题如何发现与治理”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 虚拟线程 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“虚拟线程 pinning 问题如何发现与治理”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 pool_active_ratio、queue_wait_ms_p99 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 队列无界导致内存被打满，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 六、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：交通调度员拿着信号灯、匝道和应急车道，在处理“早高峰车辆突然涌入”。
+抓 **"三大元凶、JFR 看 pinned、按 ROI 治理、JDK 24 根治"**。
 
-- **场景**：先说明“虚拟线程 pinning 问题如何发现与治理”服务于什么业务目标，不要上来就堆 虚拟线程。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 队列无界导致内存被打满、异步任务丢失 trace 和安全上下文。
-- **验证**：最后落到 pool_active_ratio、queue_wait_ms_p99、rejected_tasks，让面试官感觉你真的上线过。
+- **三大元凶**：synchronized+IO、JNI/native、第三方库老版本
+- **诊断**：JFR `jdk.VirtualThreadPinned` 事件（threshold 20ms）+ jstack 看 carrier
+- **治理**：synchronized → ReentrantLock；native → NIO；第三方库 → 升级
+- **指标**：pinning 率 > 10% 基本没收益；duration × frequency 排序找热点
+- **根治**：JDK 24（JEP 491）让 synchronized 可 unmount
+- **carrier**：CPU 核数个，是吞吐上限，pinning 等于退化
 
 ### 拟人化理解
 
-可以把“虚拟线程 pinning 问题如何发现与治理”想成一个交通调度员：虚拟线程 是他的信号灯、匝道和应急车道，pinning 是他面对的现场信号，JFR 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先分流，再限速，最后处理事故点。这样记，比死背组件名更稳。
+把 pinning 想成**地铁霸座**。carrier 是车厢（CPU 核数节），虚拟线程是乘客。正常情况下乘客到站下车（unmount），车厢立刻接新乘客。但有的乘客（synchronized 阻塞）霸座——上车后赖着不动，车厢眼看是空的也用不了。JFR 是车厢监控摄像头（jdk.VirtualThreadPinned 事件），能精确拍到"vt-order-123 在 OrderService.java:45 霸座 245ms"。治理就是劝离霸座乘客（换 ReentrantLock），或者等地铁升级（JDK 24）让所有座位都不允许霸座。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“虚拟线程 pinning 问题如何发现与治理”，我会这样答：我会先区分 CPU 密集、IO 密集和等待型任务，再决定线程模型、隔离策略和取消传播。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 队列无界导致内存被打满，所以我会提前设计灰度、监控和止损阈值，重点看 pool_active_ratio、queue_wait_ms_p99。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 pool_active_ratio 或 queue_wait_ms_p99 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> pinning 是虚拟线程阻塞时无法 unmount continuation，导致 carrier 被钉死，吞吐退化到平台线程水平。三大元凶：synchronized 块内 IO 阻塞、JNI/native 阻塞、第三方库老版本（如 MySQL Connector/J < 8.0.33）。诊断用 JFR 的 jdk.VirtualThreadPinned 事件（threshold 默认 20ms），按 duration × frequency 排序找 Top N 热点，jstack 看 carrier 数和挂起 reason。治理路径：synchronized 换 ReentrantLock 或 ConcurrentHashMap、native IO 换 NIO、第三方库升级到 JDK 21 友好版本。根治要等 JDK 24 的 JEP 491（让 synchronized 可 unmount）。pinning 率超过 10% 就基本没虚拟线程收益，所以治理要按 ROI 排序——先改 Top 3 高频 pinning 代码段。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司 JDK 版本是 21 还是 24+？synchronized 用得多吗（可以扫一下代码或问业务背景）？JFR 配置是默认还是自定义？这决定我聊 pinning 治理还是直接推荐升级 JDK 24。
 
+## 七、苏格拉底式面试追问
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么不直接等 JDK 24 再上虚拟线程，现在治理 pinning 有意义吗？ | 业务时间窗：现在有 IO 密集瓶颈（线程池打满），等 JDK 24 GA + 生产验证要 1 年。先用 JDK 21 + 治理 Top N pinning 拿 80% 收益，再升级 JDK 24 拿剩下 20%。证明：pinning 率从 30% 降到 5% 时 QPS 已翻倍 |
+| 证据追问 | 怎么证明线上真的有 pinning 问题？ | JFR 采集 jdk.VirtualThreadPinned 事件统计 duration 总和、frequency；jstack 看 carrier RUNNABLE 但 CPU 利用率低；对比虚拟线程开启前后 QPS 没提升。证据：pinning 事件 Top 堆栈都指向 OrderService.queryDB |
+| 边界追问 | pinning 是不是只要 synchronized 就有？ | 不是。synchronized 块内纯 CPU 计算不 pinning（没阻塞没 unmount 需求），只有 synchronized + 阻塞 IO/wait/sleep 才 pinning。要看块内代码。Object.wait() 在 JDK 21 已基本修复 |
+| 反例追问 | 什么 pinning 可以忽略不治理？ | duration < 1ms 且 frequency 低（如启动时初始化锁）、synchronized 块内无 IO 操作（纯内存）、第三方库 pinning 但调用频率极低（如配置加载）。按 ROI（duration × frequency）排序，Top 20% 代码段贡献 80% pinning 时长 |
+| 风险追问 | 治理 pinning 时换 ReentrantLock 最大风险？ | 主动点出：① 漏 finally unlock 死锁（synchronized 自动释放，ReentrantLock 显式）；② 中断语义变化（synchronized 不可中断，ReentrantLock 可）；③ 公平锁 vs 非公平锁行为差异。治法：Code Review 强制 try-finally 模板、跑并发回归测试 |
+| 验证追问 | 怎么证明治理后真的减少了 pinning？ | 同一压测对比：JFR jdk.VirtualThreadPinned 事件数下降 80%+；jstack carrier RUNNABLE 占比和 CPU 利用率匹配；QPS 提升 + P99 不退化。线上灰度 10% 流量跑 3 天 |
+| 沉淀追问 | 团队防 pinning 沉淀什么？ | Code Review checklist（synchronized 块内是否有 IO、是否用 NIO）、JFR 配置模板（含 VirtualThreadPinned threshold=10ms）、第三方库 JDK 21 友好版本清单、pinning 治理 SOP（JFR 画像 → Top N → ROI 排序） |
+
+### 现场对话示例
+
+**面试官**：你们订单服务上了虚拟线程，压测 QPS 只比平台线程高 30%，怎么定位？
+
+**候选人**：第一反应是 pinning。先 jcmd 启动 JFR 持续画像（settings=profile，maxage=1h），跑半小时压测，dump 出 jfr 文件用 `jfr print --events jdk.VirtualThreadPinned` 看 pinning 事件。如果事件多且 duration 长（> 100ms），就是 pinning 问题。按堆栈聚合 Top 10，常见的是 synchronized 块内调数据库（业务代码）或第三方库（MySQL 驱动老版本）。算 pinning 率（pinning 总时长 / 总运行时长），如果 > 10%，carrier 实际有效工作时间只有 (1 - 10%) × 8 核 = 7.2 核，吞吐自然上不去。
+
+**面试官**：具体怎么治理？
+
+**候选人**：按 ROI 排序。第一步，JFR Top 3 堆栈定位代码——比如 OrderService.queryDB 用了 `synchronized(cache)` 包 IO 调用，换成 ConcurrentHashMap.computeIfAbsent。第二步，检查第三方库版本——MySQL Connector/J 升到 8.0.33+，PostgreSQL 42.6+，这些版本都修了 synchronized pinning。第三步，治理后再压测对比，pinning 事件应下降 80%+，QPS 提升 3-5 倍。如果治理后还有 20% pinning 残留（第三方库 native 调用），评估升级 JDK 24（JEP 491）根治。
+
+**面试官**：JDK 21 的 Object.wait() 还会 pinning 吗？
+
+**候选人**：JDK 21 已经修了 Object.wait() 的大部分 pinning（JEP 444 的工作），但 synchronized 块内的 wait/notify 在 JDK 24 之前仍可能 pinning。具体来说：纯 Object.wait()（不在 synchronized 块）不 pinning；synchronized 块内调 wait() 会 pinning（因为 monitor 持有）。所以生产代码里如果用 synchronized + wait/notify 的并发工具（如老版 LinkedBlockingQueue），升级 JDK 或换 ReentrantLock 版本的实现。
+
+## 常见考点
+
+1. **pinning 是什么？**——虚拟线程阻塞时 carrier 无法 unmount continuation，被钉死。三大元凶：synchronized 块内阻塞、JNI/native 阻塞、第三方库老版本。
+2. **怎么诊断 pinning？**——JFR 的 jdk.VirtualThreadPinned 事件（threshold 默认 20ms，可调到 10ms）；jstack 看 carrier 状态和挂起 reason；Micrometer jvm.threads.virtual 指标。
+3. **synchronized 为什么会 pinning？**——JVM 用对象头存 monitor 状态，unmount continuation 会破坏线程 ID 映射。JDK 24（JEP 491）重写 monitor 实现才允许 unmount。
+4. **pinning 怎么治理？**——synchronized → ReentrantLock 或 ConcurrentHashMap；native IO → NIO；第三方库 → 升级 JDK 21 友好版本。按 ROI（duration × frequency）排序。
+5. **JDK 24 后 synchronized 还 pinning 吗？**——基本不。JEP 491（Synchronize Virtual Threads without Pinning）让 Object.wait 和 synchronized 都可 unmount。但 JNI 内阻塞仍 pinning（JVM 看不到 native 栈）。

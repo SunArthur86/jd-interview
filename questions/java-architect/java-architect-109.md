@@ -9,259 +9,354 @@ tags:
 - 性能画像
 - 诊断
 feynman:
-  essence: JFR 在线诊断与持续性能画像的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: JFR（Java Flight Recorder，JDK 11+ 开源）是 JVM 内置的低开销持续性能画像——生产环境一直开（< 1% 开销），事件流式写入环形缓冲区，事故时 dump 最近 1 小时数据。它把 GC、内存、锁、IO、CPU、虚拟线程等画像合一，是"不重启 JVM 排查问题"的杀手锏。
+  analogy: 像飞机黑匣子：平时一直录（飞行数据、机舱对话），出事故时取出来回放。JFR 录 JVM 的"飞行数据"（GC、锁、IO、内存），事故时 dump 最近 1 小时回放，不用复现。
+  first_principle: JVM 性能问题的复现成本高（线上环境、生产数据、特殊流量），等"重启后开监控"常常问题已消失。JFR 让监控在生产常态化运行（< 1% 开销），事件存环形缓冲区（自动滚动），事后回放——把"事故后无法复现"变成"事故后必有数据"。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - JFR（JDK 11+ 开源）：JVM 内置，< 1% 开销，生产常开
+  - jcmd JFR.start / JFR.dump / JFR.stop 在线控制
+  - 事件类型：GC、内存、锁、IO、CPU、虚拟线程、对象分配
+  - 两种模式：continuous（生产常驻，maxage/maxsize 滚动）+ profiling（短期压测）
+  - 工具：jfr print（命令行）、JMC（GUI）、Grafana（JFR datasource）
 first_principle:
-  problem: 面对“JFR 在线诊断与持续性能画像”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: JVM 性能问题怎么"不重启、不加大开销"地持续观测？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 重启会丢失现场（问题不再复现）
+  - 传统监控（jstack/jmap）是侵入性的（STW 或开销大）
+  - 性能问题需要"事件流"（什么时间发生什么），不是"快照"
+  rebuild: JFR 在 JVM 内部持续记录事件（GC、对象分配、锁竞争、IO、方法采样），事件按类型分到不同缓冲区，线程本地缓冲 → 全局缓冲 → 磁盘。开销 < 1%（HotSpot 高度优化），生产常驻。事故时 jcmd JFR.dump 取最近 N 小时数据，离线分析。从"事故后无法复现"变成"事故后必有数据"。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - JFR 和 async-profiler 区别？——JFR 是 JVM 内置（事件驱动，含锁/IO/对象分配），async-profiler 是外部工具（采样为主，火焰图好）。两者互补：JFR 全景画像常驻，async-profiler 深度采样按需
+  - JFR 开销真的小吗？——JDK 11+ 开源后实测 < 1%（OpenJDK 文档承诺 < 1%）。开 settings=profile 时 1-3%（更详细事件）
+  - 怎么看 JFR 数据？——jfr print（命令行，简单查询）、JDK Mission Control（GUI，深度分析）、Grafana JFR datasource（看板）、自定义解析（jfr tools 库）
+  - 事件阈值怎么定？——duration threshold（如 jdk.VirtualThreadPinned 默认 20ms）控制记录哪些事件。生产建议默认 settings，需要深度排查用 settings=profile
+  - 持续画像和按需画像区别？——continuous（maxage=1h maxsize=512m，常驻滚动）适合生产；profiling（duration=60s，详细事件）适合压测。两者可叠加
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - JFR（JDK 11+ 开源）：JVM 内置，< 1% 开销，生产常开
+  - jcmd JFR.start/dump/stop 在线控制
+  - continuous（生产常驻，maxage/maxsize 滚动）+ profiling（短期压测）
+  - 事件类型：GC、内存、锁、IO、CPU、虚拟线程、对象分配
+  - jdk.VirtualThreadPinned / jdk.GCPhasePause / jdk.ObjectAllocationSample
+  - 工具：jfr print（CLI）、JMC（GUI）、Grafana（看板）
 ---
 
-# 【Java 后端架构师】JFR 在线诊断与持续性能画像？
+# 【Java 后端架构师】JFR 在线诊断与持续性能画像
 
-> 适用场景：JD 核心技术。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。订单服务大促期间偶发 P99 抖动，但等运维 jstack / jmap 时问题已消失。JFR 让生产环境持续画像（< 1% 开销），事故时 jcmd JFR.dump 取最近 1 小时数据回放，定位 GC、锁、IO、对象分配的真实瓶颈。
 
-## 一、先明确问题边界
+## 一、概念层：JFR 是什么、为什么生产常开
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**JFR 的核心特性**（这张表面试必问）：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+| 特性 | 说明 |
+|------|------|
+| **JVM 内置** | JDK 11+ 开源（Oracle JDK 11 之前是商业特性） |
+| **低开销** | < 1%（continuous 模式，OpenJDK 承诺） |
+| **事件驱动** | 不是采样，是事件（GC、锁、IO、方法执行、对象分配） |
+| **环形缓冲** | 线程本地 → 全局 → 磁盘，maxage/maxsize 自动滚动 |
+| **在线控制** | jcmd JFR.start/dump/stop 不重启 JVM |
+| **可扩展** | 自定义事件（JFR Event API），业务关键路径可埋点 |
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 JFR 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**JFR vs 传统监控工具**：
 
-## 二、推荐架构思路
+| 工具 | 开销 | 模式 | 适合场景 |
+|------|------|------|---------|
+| **JFR** | < 1% | 持续 + 按需 | 生产常态画像 + 事故回放 |
+| jstack | 中（STW） | 按需快照 | 线程死锁、CPU 飙升 |
+| jmap | 高（STW） | 按需快照 | OOM 后堆分析 |
+| async-profiler | < 1% | 按需采样 | 火焰图、CPU/Memory profile |
+| jstat | 低 | 持续采样 | GC 频率、堆使用率 |
+| Prometheus | 低 | 持续聚合 | 业务指标、告警 |
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+**JFR 的不可替代性**：
+- jstack/jmap 是"快照"（一次性），错过就没数据
+- Prometheus 是"聚合"（QPS/P99），无个体事件
+- JFR 是"事件流"（每个 GC、每次锁竞争、每个慢方法都记录），事故后回放
 
-## 三、技术落地点
+## 二、机制层：JFR 启动、事件、分析
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+**JFR 启动方式**：
 
-## 四、常见坑
+```bash
+# 方式 1：启动时配 JFR（生产推荐）
+java -XX:StartFlightRecording=\
+  filename=/data/jfr/app-$(date +%s).jfr,\
+  settings=profile,\
+  maxage=1h,\
+  maxsize=512m,\
+  disk=true \
+  -jar app.jar
+# settings=profile：详细事件（含方法采样、对象分配）
+# settings=default：基础事件（轻量，< 1% 开销）
+# maxage=1h：保留最近 1 小时
+# maxsize=512m：磁盘文件最大 512MB（自动滚动）
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+# 方式 2：运行时启动（不重启 JVM）
+jcmd <pid> JFR.start name=live settings=profile maxage=1h maxsize=512m
 
-## 五、面试回答模板
+# 方式 3：dump 当前 JFR（不停止录制）
+jcmd <pid> JFR.dump name=live filename=/data/jfr/dump-$(date +%s).jfr
 
-可以按下面结构作答：
+# 方式 4：停止录制
+jcmd <pid> JFR.stop name=live
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“JFR 在线诊断与持续性能画像”，核心是 JFR 与 性能画像 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+# 方式 5：查看录制中的 JFR 列表
+jcmd <pid> JFR.check
+```
 
-## 六、加分点
+**核心事件类型**（架构师必须能列出）：
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+| 事件类型 | 用途 | 关键事件 |
+|---------|------|---------|
+| **GC** | GC 频率、停顿、回收效率 | jdk.GCPhasePause, jdk.GarbageCollection |
+| **内存** | 对象分配、堆使用 | jdk.ObjectAllocationSample, jdk.GCHeapSummary |
+| **锁** | 锁竞争、死锁 | jdk.JavaMonitorEnter, jdk.JavaMonitorWait |
+| **IO** | 文件、Socket | jdk.FileRead/Write, jdk.SocketRead/Write |
+| **方法** | 方法采样（CPU profile） | jdk.ExecutionSample |
+| **虚拟线程** | pinning、调度 | jdk.VirtualThreadStart/Pinned/Submit |
+| **类加载** | 类加载冲突、Metaspace | jdk.ClassLoad, jdk.ClassDefine |
+| **JVM** | 异常、错误 | jdk.JavaExceptionThrow, jdk.JavaErrorThrow |
 
-## 七、企业级面试定位：从“会用”到“能负责”
+**自定义业务事件**（JFR Event API）：
 
-企业级面试不会只问“JFR 是什么”，而是看你能不能对一条真实生产链路负责。回答“JFR 在线诊断与持续性能画像”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+```java
+// 自定义事件：记录关键业务流程
+@Name("jd.OrderCreate")
+@Label("Order Create")
+@Category({"JD", "Business"})
+@Description("Order creation event")
+public class OrderCreateEvent extends jdk.jfr.Event {
+    @Label("Order ID")
+    String orderId;
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 JD 核心技术 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 JFR、性能画像、诊断 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 young_gc_pause_p99、old_gc_count、allocation_rate_mb_s、heap_after_gc_ratio 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+    @Label("User ID")
+    Long userId;
 
-### 企业级回答骨架
+    @Label("Amount")
+    BigDecimal amount;
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 JFR 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+    @Label("Duration")
+    @Timespan(Timespan.NANOSECONDS)
+    long duration;
+}
 
-### 面试中要主动补的生产细节
+// 业务代码使用
+public Order createOrder(OrderDTO dto) {
+    OrderCreateEvent evt = new OrderCreateEvent();
+    evt.orderId = dto.getOrderId();
+    evt.userId = dto.getUserId();
+    evt.begin();
+    try {
+        Order order = doCreate(dto);
+        evt.amount = order.getAmount();
+        return order;
+    } finally {
+        evt.end();
+        evt.commit();    // 写入 JFR 缓冲区
+    }
+}
+```
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+## 三、实战层：典型排查场景
 
-## 八、苏格拉底式面试追问
+**场景 1：定位 P99 RT 抖动**
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+```bash
+# 1. 启动时配 continuous JFR（生产常驻）
+java -XX:StartFlightRecording=filename=/data/jfr/app.jfr,settings=profile,maxage=1h,maxsize=512m -jar app.jar
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“JFR 在线诊断与持续性能画像”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 young_gc_pause_p99、old_gc_count、allocation_rate_mb_s、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 JFR 负责的范围，以及必须依赖 性能画像、诊断 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 Full GC 或并发标记跟不上导致 P99 抖动，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+# 2. 抖动发生时 dump JFR
+jcmd <pid> JFR.dump name=1 filename=/data/jfr/p99-spike.jfr
 
-### 现场对话示例
+# 3. 分析
+jfr print --events jdk.GCPhasePause,jdk.JavaMonitorEnter p99-spike.jfr | head -100
+# 看抖动时间点有没有 GC pause（> 100ms）
+# 看有没有锁竞争（jdk.JavaMonitorEnter 的 duration > 50ms）
 
-**面试官**：你说要做“JFR 在线诊断与持续性能画像”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 young_gc_pause_p99、old_gc_count、业务失败率和事故记录。
+# 4. 方法采样定位慢方法
+jfr print --events jdk.ExecutionSample p99-spike.jfr \
+  | awk '/^StackTrace/ {flag=1} flag' \
+  | grep -A 20 "com.jd.order" | head -50
+# 看抖动时段哪些方法采样最多
+```
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 young_gc_pause_p99 没有改善，或者 old_gc_count 反而变差，就停止扩大范围，回到假设层重新复盘。
+**场景 2：虚拟线程 pinning 排查**
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 young_gc_pause_p99、old_gc_count、allocation_rate_mb_s。这样它不是个人经验，而是团队机制。
+```bash
+# 自定义 JFR 配置（开启 pinning 事件，threshold 调到 10ms）
+cat > /data/jfr/vt.jfc << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration version="2.0">
+  <event name="jdk.VirtualThreadPinned">
+    <setting name="enabled">true</setting>
+    <setting name="threshold">10ms</setting>
+  </event>
+  <event name="jdk.VirtualThreadStart">
+    <setting name="enabled">true</setting>
+  </event>
+  <event name="jdk.VirtualThreadSubmit">
+    <setting name="enabled">true</setting>
+  </event>
+</configuration>
+EOF
 
-## 九、专项架构深挖：对象、链路、失败模式
+jcmd <pid> JFR.start name=vt settings=/data/jfr/vt.jfc maxage=1h
 
-这一题不要停在“知道 JFR”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+# 1 小时后 dump
+jcmd <pid> JFR.dump name=vt filename=/data/jfr/vt-dump.jfr
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 堆内存、线程栈、Metaspace、直接内存；GC 日志、JFR 事件、对象分配速率；容器内存限制与 JVM ergonomics |
-| 设计主线 | 按服务类型区分吞吐优先和延迟优先 GC；把堆、直接内存、线程数、连接池放到同一张容量表里；用压测和线上画像校准停顿目标 |
-| 失败模式 | Full GC 或并发标记跟不上导致 P99 抖动；容器内存被低估触发 OOMKilled；大对象和缓存无上限污染老年代 |
-| 验证指标 | young_gc_pause_p99、old_gc_count、allocation_rate_mb_s、heap_after_gc_ratio |
+# 分析 pinning 热点
+jfr print --events jdk.VirtualThreadPinned vt-dump.jfr | head -50
+# 按 duration 排序找 Top N pinning 代码段
+```
 
-**架构拆解**：
+**场景 3：对象分配热点（allocation stall / OOM 前兆）**
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 性能画像 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 JFR 在线诊断与持续性能画像 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 诊断 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+```bash
+jcmd <pid> JFR.dump name=1 filename=/data/jfr/alloc.jfr
 
-**高分回答细节**：
+# 查对象分配采样（哪个类分配最多）
+jfr print --events jdk.ObjectAllocationSample alloc.jfr \
+  | grep "objectClass" | sort | uniq -c | sort -nr | head -10
 
-- 不要只说“可以用 JFR”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+# 输出示例：
+# 12345 byte[]                  ← 大量 byte[] 分配
+#  8721 java.lang.String
+#  5432 java.util.HashMap$Node
+#  3210 com.jd.OrderItem
+```
 
-## 十、二轮场景追问与项目表达
+**场景 4：锁竞争定位**
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+```bash
+jfr print --events jdk.JavaMonitorEnter alloc.jfr \
+  | awk '/duration/ {print $3}' | sort -nr | head -10
+# 看锁等待最久的 Top 10
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+# 结合堆栈定位锁竞争点
+jfr print --events jdk.JavaMonitorEnter alloc.jfr \
+  | awk '/duration = [0-9]{4,}/' \
+  | head -20
+# 找 duration > 1000ms（1s）的锁等待
+```
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“JFR 在线诊断与持续性能画像”，重点看 young_gc_pause_p99、old_gc_count、allocation_rate_mb_s，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+## 四、底层本质：JFR 为什么低开销
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+回到第一性：**JFR 怎么做到 < 1% 开销的？**
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 JFR 和 性能画像 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+- **事件分类 + 缓冲区分层**：
+  ```
+  线程本地缓冲（无锁，每线程一个） → 全局缓冲（少量锁） → 磁盘（异步写）
+  ```
+  线程写事件到本地缓冲无竞争（无锁），定期 flush 到全局缓冲（少量锁），全局缓冲异步写磁盘（IO 不阻塞业务）。
 
-### 追问 3：你如何判断这个方案值得做？
+- **采样 vs 全量**：
+  - 高频事件（方法执行、对象分配）用采样（如每 10ms 采一次方法、每 1KB 分配采一次），不全量记录
+  - 低频事件（GC、锁竞争、IO 慢）全量记录（本身就少）
+  - 这让"事件数量"可控（万级/秒），不会拖垮业务
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 诊断 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+- **JIT 优化**：
+  - JFR 代码被 JIT 内联（事件写入是几条指令）
+  - 关闭 JFR 时，相关代码被 JIT 完全消除（dead code elimination），开销为 0
+  - 开启 JFR 时，事件写入是 thread-local 数组操作，纳秒级
 
-### STAR 项目表达
+- **OpenJDK 的承诺**：
+  - settings=default：< 1% 开销（生产可常驻）
+  - settings=profile：1-3% 开销（含详细方法采样、对象分配采样）
+  - 即使开 profile，对业务延迟影响 < 5%
 
-- **S（背景）**：原系统在 JFR 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 JFR 在线诊断与持续性能画像 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 young_gc_pause_p99、old_gc_count 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+**为什么 JFR 比 BCI（Byte Code Instrumentation）工具低开销**：
 
-### 二轮复盘清单
+- BCI 工具（如 SkyWalking、Pinpoint 的 agent）在每个方法前后插桩（埋点），所有方法都受影响
+- JFR 用 JVM 内部钩子（不是字节码插桩），JIT 可以优化掉
+- JFR 的事件写入是 thread-local 无锁，BCI 工具的埋点常常有锁或同步
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+**JFR 的环形缓冲设计**：
 
-## 十一、面试官 5 个企业级追问
+```
+Thread 1 ──→ Thread-local Buffer ─┐
+Thread 2 ──→ Thread-local Buffer ─┼─→ Global Buffer ──→ Disk File
+Thread N ──→ Thread-local Buffer ─┘   (maxage 滚动)      (maxsize 滚动)
 
-1. **你在真实项目里怎么判断“JFR 在线诊断与持续性能画像”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 young_gc_pause_p99、old_gc_count、allocation_rate_mb_s。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+maxage=1h：保留最近 1 小时事件，老的自动滚动删除
+maxsize=512m：磁盘文件最大 512MB，满了自动滚动
+```
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，JFR 是否真是瓶颈，性能画像 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+事故时 dump 当前环形缓冲内容，拿到最近 1 小时的所有事件。
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 Full GC 或并发标记跟不上导致 P99 抖动。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 young_gc_pause_p99 和 old_gc_count 做分钟级观察，一旦越过阈值立即止损。
+## 五、AI 架构师加问：5 个
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 诊断，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+1. **AI 自动分析 JFR 找性能瓶颈怎么设计？**
+   AI 解析 jfr 文件（jfr tools 库），按事件类型分类：GC pause Top N、锁竞争 Top N、对象分配 Top N、方法采样 Top N。结合业务知识（高频方法是否关键路径）输出"Top 3 优化建议 + 证据（事件 + 堆栈）"。误报控制：要 AI 区分"高频但非热点"（如日志方法采样多但不是瓶颈）和"真热点"（CPU 时间占比高）。
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“JFR 在线诊断与持续性能画像”，至少要沉淀 堆内存、线程栈、Metaspace、直接内存 的建模规范，以及 young_gc_pause_p99、old_gc_count 的验收标准。
+2. **AI 推理服务用 JFR 监控什么？**
+   关键事件：jdk.ObjectAllocationSample（大对象分配，如 attention matrix）、jdk.JavaMonitorEnter（锁竞争）、jdk.SocketRead/Write（RPC 调用）、jdk.GarbageCollection（GC pause）。自定义事件：ModelInference（每次推理的延迟、token 数、模型版本）。AI 分析推理 P99 抖动时关联 GC、锁、IO 事件归因。
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
+3. **AI Copilot 帮业务写 JFR 自定义事件，最容易翻车在哪？**
+   三个点：① 事件 begin/end/commit 调用顺序（begin 必须在 try 前，commit 必须在 finally，否则事件不记录或记录错误）；② 字段类型（JFR 限定支持基本类型和 String，复杂对象要 toString）；③ 事件频率（高频事件如每次循环都 commit 会撑爆缓冲，要采样）。AI 输出要 lint 这些规则。
 
-1. **如果把“JFR 在线诊断与持续性能画像”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 JFR 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
+4. **JFR 数据接入 RAG 让 AI 助手回答性能问题怎么做？**
+   知识库分层：JFR 事件类型文档、JDK 官方调优指南、事故复盘（JFR 数据 + 根因）。检索时按问题类型过滤（GC 问题只检索 GC 事件文档）。AI 看到当前服务的 jfr print 输出，RAG 检索相似历史事故，输出"这个 GC pause 模式像 XX 事故，建议检查 YY"。
 
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“JFR 在线诊断与持续性能画像”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 young_gc_pause_p99、old_gc_count 对业务链路的影响。
+5. **大模型推理服务的 JFR 自定义事件设计？**
+   核心：ModelInferenceEvent（begin/end/commit 包住一次推理）。字段：model_version（字符串）、prompt_tokens（int）、completion_tokens（int）、latency_ms（long）、cache_hit（boolean）。配合 jdk.GCPhasePause（GC 是否影响推理）和 jdk.SocketRead（推理调下游）做归因。AI Agent 分析"为什么 P99 推理慢"时把这些事件关联。
 
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 Full GC 或并发标记跟不上导致 P99 抖动，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 六、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：急诊科医生拿着听诊器和监护仪，在处理“线上延迟突然升高”。
+抓 **"JVM 内置、< 1% 开销、事件驱动、生产常开、jcmd 控制"**。
 
-- **场景**：先说明“JFR 在线诊断与持续性能画像”服务于什么业务目标，不要上来就堆 JFR。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 Full GC 或并发标记跟不上导致 P99 抖动、容器内存被低估触发 OOMKilled。
-- **验证**：最后落到 young_gc_pause_p99、old_gc_count、allocation_rate_mb_s，让面试官感觉你真的上线过。
+- **本质**：JVM 内置的低开销持续画像（< 1% 开销）
+- **模式**：continuous（生产常驻，maxage/maxsize 滚动）+ profiling（短期压测）
+- **事件**：GC、内存、锁、IO、方法采样、虚拟线程、对象分配
+- **控制**：jcmd JFR.start/dump/stop，不重启 JVM
+- **工具**：jfr print（CLI）、JMC（GUI）、Grafana（看板）
+- **低开销原理**：线程本地缓冲 + 采样 + JIT 优化
+- **不可替代**：jstack/jmap 是快照，JFR 是事件流，事故必有数据
 
 ### 拟人化理解
 
-可以把“JFR 在线诊断与持续性能画像”想成一个急诊科医生：JFR 是他的听诊器和监护仪，性能画像 是他面对的现场信号，诊断 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看生命体征，再决定是降温、输液还是手术。这样记，比死背组件名更稳。
+把 JFR 想成**飞机黑匣子**。平时一直录（飞行数据、机舱对话），出事故时取出来回放。JFR 录 JVM 的"飞行数据"——GC pause、锁竞争、IO 慢、对象分配热点。事故发生时 jcmd JFR.dump 取最近 1 小时回放，看到"10:23:45 有 200ms GC pause"、"10:23:50 锁竞争 1s"、"10:23:55 大量 byte[] 分配"，定位根因不用复现。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“JFR 在线诊断与持续性能画像”，我会这样答：我会先把 JVM 当成线上服务的生命体征系统来看：内存、线程、GC 和容器资源必须放在一张图里判断。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 Full GC 或并发标记跟不上导致 P99 抖动，所以我会提前设计灰度、监控和止损阈值，重点看 young_gc_pause_p99、old_gc_count。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 young_gc_pause_p99 或 old_gc_count 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> JFR（Java Flight Recorder）是 JVM 内置的低开销持续画像（< 1% 开销），生产环境一直开。事件驱动（GC、内存、锁、IO、方法采样、虚拟线程、对象分配），事件流式写入线程本地缓冲 → 全局缓冲 → 磁盘，maxage/maxsize 自动滚动。生产用 settings=default（轻量）+ continuous 模式，事故时 jcmd JFR.dump 取最近 1 小时数据。核心排查场景：P99 抖动（关联 GC pause 和锁竞争）、虚拟线程 pinning（jdk.VirtualThreadPinned 事件）、对象分配热点（jdk.ObjectAllocationSample）、OOM 前兆。和 async-profiler 互补：JFR 全景画像常驻，async-profiler 深度采样按需。低开销靠线程本地缓冲（无锁）+ 采样（不全量）+ JIT 优化。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司生产环境 JFR 是常驻还是事故时开？事故平均定位时间（MTTR）多少？有没有用过 JMC 或自研 JFR 分析工具？这决定我聊 JFR 持续画像还是按需排查。
 
+## 七、苏格拉底式面试追问
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 已经有 Prometheus 监控了，为什么还要 JFR？ | Prometheus 是聚合指标（QPS/P99），无个体事件；JFR 是事件流（每个 GC、每次锁竞争、每个慢方法都记录）。事故时 Prometheus 看到 P99 抖动，但不知道为什么——JFR 能看到抖动时段的 GC、锁、IO、方法采样。证明：P99 抖动排查时间从 30 分钟降到 5 分钟 |
+| 证据追问 | 怎么证明 JFR 真的 < 1% 开销？ | OpenJDK 官方承诺 < 1%；压测对比开/关 JFR 的 QPS 差异（应 < 1%）；JFR 自己有 jdk.ActiveRecording 事件记录开销。生产长期开 JFR 的服务 QPS 和未开的服务对比无差异 |
+| 边界追问 | JFR 能解决所有 JVM 问题吗？ | 不能。业务逻辑 bug（如计算错误）看代码；网络问题要抓包；JVM crash 看 core dump；操作系统问题看 dmesg。JFR 主要解决"性能画像"问题 |
+| 反例追问 | 什么场景不要开 JFR？ | 极致吞吐场景（< 1% 也想省）、JDK < 11（不开源）、磁盘紧张（JFR 写盘）、容器无持久化存储（jfr 文件丢失）。但大多数生产场景都应该开 |
+| 风险追问 | 长期开 JFR 最大风险？ | ① 磁盘占用（maxsize 控制，但要注意）；② 事件缓冲内存（小，但极端场景要监控）；③ 敏感数据（业务事件可能含 PII，要脱敏）。治法：maxsize 限制、敏感字段不进 JFR、定期清理 |
+| 验证追问 | 怎么证明 JFR 帮助了排查？ | 对比"开 JFR 前"vs"开 JFR 后"的 MTTR（平均定位时间）；统计事故"JFR 提供关键证据"的比例；团队反馈排查效率提升 |
+| 沉淀追问 | 团队推广 JFR 沉淀什么？ | 默认 JVM 启动参数模板（含 -XX:StartFlightRecording）、JFR 事件查询 SOP（按场景）、JMC 培训、自定义业务事件规范、JFR 数据接入告警平台 |
+
+### 现场对话示例
+
+**面试官**：生产环境 JFR 一直开会影响性能吗？
+
+**候选人**：OpenJDK 承诺 < 1% 开销，实测确实如此。三个原因：第一，事件写入是线程本地缓冲（无锁），几条指令搞定；第二，高频事件用采样（如方法采样每 10ms 一次、对象分配每 1KB 采样一次），不全量记录；第三，JIT 优化——JFR 代码被内联，关闭时相关代码被消除。生产建议 settings=default（轻量）+ maxage=1h + maxsize=512m，磁盘 512MB 滚动。事故时 jcmd JFR.dump 取最近 1 小时数据。
+
+**面试官**：JFR 和 async-profiler 用哪个？
+
+**候选人**：互补。JFR 是 JVM 内置、事件驱动（GC、锁、IO、对象分配都记录）、生产常驻；async-profiler 是外部工具、采样为主、火焰图好、按需启动。生产常态画像用 JFR（一直在录），深度排查某个性能问题时用 async-profiler 出火焰图。两者数据可以交叉验证。JFR 是"全景"，async-profiler 是"放大镜"。
+
+**面试官**：怎么用 JFR 排查虚拟线程 pinning？
+
+**候选人**：JDK 21+ 内置 jdk.VirtualThreadPinned 事件（threshold 默认 20ms）。第一步，自定义 JFR 配置把 threshold 调到 10ms（抓更小 pinning），jcmd JFR.start settings=vt.jfc 启动。第二步，跑半小时压测，dump jfr 文件。第三步，`jfr print --events jdk.VirtualThreadPinned dump.jfr` 查所有 pinning 事件，按 duration 排序找 Top N。第四步，结合堆栈定位代码——如 com.example.OrderService.queryDB 在 synchronized 块内 IO 阻塞。最后换 ReentrantLock 治理。
+
+## 常见考点
+
+1. **JFR 是什么？**——JDK 11+ 开源的 JVM 内置持续画像，< 1% 开销，事件驱动，生产常驻。
+2. **JFR 怎么启用？**——启动时 -XX:StartFlightRecording=settings=profile,maxage=1h,maxsize=512m；运行时 jcmd JFR.start/dump/stop。
+3. **JFR 低开销原理？**——线程本地缓冲（无锁）+ 采样（不全量）+ JIT 优化（事件代码内联/消除）。
+4. **JFR 和 async-profiler 区别？**——JFR 内置、事件驱动、生产常驻；async-profiler 外部、采样为主、按需启动。互补。
+5. **怎么用 JFR 排查 P99 抖动？**——dump 抖动时段的 jfr，jfr print 查 GC/锁/IO/方法采样事件，关联时间点定位瓶颈。

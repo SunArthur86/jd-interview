@@ -9,259 +9,390 @@ tags:
 - 超卖
 - 预占
 feynman:
-  essence: 库存扣减、超卖防控与预占释放的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: 库存扣减的核心挑战是"高并发下的超卖防控"——100 个人抢 10 件商品，必须保证只卖 10 件不多卖。Redis Lua 脚本实现原子扣减（CHECK + DEC 一个脚本内完成，无竞态）。预占释放是"超时未支付的库存回收"——下单时预占库存（frozen+1），支付成功确认扣减（frozen-1, available-1），超时未支付释放（frozen-1, available 不变）。
+  analogy: 像酒店订房。available 是"空房数"，frozen 是"已预订未入住"。客人下单预订（frozen+1），入住确认（frozen-1, available-1），取消预订（frozen-1）。超卖就是"订出 11 间但只有 10 间"——客人到店没房，是严重事故。
+  first_principle: 为什么 MySQL 的 UPDATE WHERE stock>0 不够？因为高并发下多个请求同时读到 stock=1，都判断 >0 都执行 UPDATE，结果 stock 变成负数（超卖）。MySQL 的行锁可以保证串行化（SELECT FOR UPDATE），但性能差。Redis 单线程模型 + Lua 脚本保证原子性（CHECK + DEC 不可分割），性能远优于 DB 行锁。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 库存模型：available（可用）+ frozen（预占）+ sold（已售）
+  - Redis Lua 原子扣减：if stock >= n then stock -= n return 1 else return 0
+  - 预占三阶段：下单预占（frozen+1）→ 支付确认（frozen-1, sold+1）→ 超时释放（frozen-1）
+  - 超卖防控：Lua 脚本 CHECK+DEC 原子，DB 兜底 CHECK 约束（stock >= 0）
+  - 分桶库存：热点商品库存分到多个 key（stock_1/stock_2），降低单 key 热点
 first_principle:
-  problem: 面对“库存扣减、超卖防控与预占释放”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 秒杀场景下 1000 人抢 10 件商品，如何保证不多卖（超卖）不少卖（库存有但卖不出），且性能高？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - MySQL UPDATE WHERE stock>0 在高并发下有竞态（同时读到 stock=1 都 UPDATE）
+  - Redis 单线程 + Lua 脚本保证原子性（CHECK 和 DEC 不可分割）
+  - 库存有"预占"生命周期（下单预占→支付确认/超时释放），不是简单的 -1
+  rebuild: Redis Lua 原子扣减。Lua 脚本里 CHECK（stock >= n）+ DEC（stock -= n）一气呵成，Redis 单线程保证不被打断。库存模型用 available + frozen 双字段——下单时 frozen+1（预占），支付成功 frozen-1 + sold+1（确认），超时 frozen-1（释放）。DB 层加 CHECK 约束（stock >= 0）兜底，即使 Redis 异常也不会超卖。热点商品分桶库存（stock_1 到 stock_10），分散单 key 压力。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - Redis 和 DB 库存怎么同步？——Redis 是主（扣减在 Redis），DB 是从（异步同步）。Redis 扣减后发 MQ，消费方异步更新 DB。对账兜底（定期比对 Redis 和 DB）。
+  - 分桶库存怎么设计？——10 件库存分 5 桶（每桶 2 件），key 为 stock_skuId_1 到 stock_skuId_5。扣减时随机选桶，桶空了换下一桶。降低单 key QPS 压力。
+  - 预占超时怎么释放？——下单时记录预占时间，定时任务扫超时预占（> 30 分钟），调释放逻辑（frozen-1, available+1）。或用 Redis 的过期事件（key 带 TTL，过期触发释放）。
+  - 库存扣减失败（售罄）怎么优雅返回？——Lua 脚本返回 0（库存不足），应用层转"售罄"提示，前端展示"已抢完"。可以引导用户到"相似商品"或"下次开抢"。
+  - 分布式库存（多仓）怎么管？——每个仓独立库存（北京仓 100 + 上海仓 200），扣减时按就近原则选仓。跨仓调拨是异步流程。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 库存模型：available（可用）+ frozen（预占）+ sold（已售）
+  - Redis Lua 原子扣减：if stock >= n then dec else fail
+  - 预占三阶段：下单 frozen+1 → 支付确认 frozen-1/sold+1 → 超时释放 frozen-1
+  - DB CHECK 约束兜底：stock >= 0
+  - 分桶库存：热点商品分多 key 降单点压力
 ---
 
-# 【Java 后端架构师】库存扣减、超卖防控与预占释放？
+# 【Java 后端架构师】库存扣减、超卖防控与预占释放
 
-> 适用场景：JD 核心技术。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。京东秒杀（如 iPhone 首发）10000 台库存，10 万人抢购。如果用 MySQL UPDATE 扣库存，高并发下行锁竞争严重且可能超卖。Redis Lua 原子扣减是标配——单线程 + 脚本原子性，保证 10000 台不多卖不少卖。
 
-## 一、先明确问题边界
+## 一、概念层：库存模型与生命周期
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**库存三态模型**：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+```
+┌──────────────────────────────────────────────────┐
+│  总库存 = available + frozen + sold               │
+│                                                   │
+│  available: 可售卖（用户能下单的）                  │
+│  frozen:    预占（已下单未支付，锁定中）            │
+│  sold:      已售（已支付确认）                     │
+└──────────────────────────────────────────────────┘
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 库存 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+库存流转生命周期：
+                                                    超时未支付
+  ┌─────────┐  下单预占   ┌─────────┐ 支付确认  ┌─────────┐
+  │available │ ─────────► │ frozen  │ ────────► │  sold   │
+  │ (可用)   │            │ (预占)  │           │ (已售)  │
+  └─────────┘            └────┬────┘           └─────────┘
+       ▲                      │ 超时释放              │
+       │                      │ (30min 未支付)         │ 退款
+       └──────────────────────┘                       │
+                          frozen 回退 available        ▼
+                                                    退款成功：
+                                                 sold-1, available+1
+```
 
-## 二、推荐架构思路
+## 二、机制层：Redis Lua 原子扣减
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+**Lua 脚本：预占库存**（CHECK + DEC 原子）：
 
-## 三、技术落地点
+```lua
+-- file: deduct_stock.lua
+-- KEYS[1]: 库存 key（stock:sku:12345）
+-- ARGV[1]: 扣减数量
+-- ARGV[2]: 订单ID（用于关联）
+-- 返回: 1=成功, 0=库存不足
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+local stockKey = KEYS[1]
+local quantity = tonumber(ARGV[1])
+local orderId = ARGV[1]
 
-## 四、常见坑
+-- 获取当前可用库存
+local available = tonumber(redis.call('GET', stockKey) or '0')
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+-- 原子检查 + 扣减（关键：CHECK 和 DEC 在同一脚本，不可被其他命令插入）
+if available >= quantity then
+    -- 库存足够，扣减
+    redis.call('DECRBY', stockKey, quantity)
+    -- 记录预占明细（用于超时释放）
+    redis.call('HSET', 'frozen:' .. orderId, 'sku', stockKey, 'qty', quantity)
+    redis.call('EXPIRE', 'frozen:' .. orderId, 1800)   -- 30 分钟过期
+    return 1
+else
+    -- 库存不足
+    return 0
+end
+```
 
-## 五、面试回答模板
+**Java 调用 Lua 脚本**：
 
-可以按下面结构作答：
+```java
+@Service
+public class InventoryService {
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“库存扣减、超卖防控与预占释放”，核心是 库存 与 超卖 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+    @Autowired private RedisTemplate redis;
+    private DefaultRedisScript<Long> deductScript;
 
-## 六、加分点
+    @PostConstruct
+    public void init() {
+        deductScript = new DefaultRedisScript<>();
+        deductScript.setLocation(new ClassPathResource("lua/deduct_stock.lua"));
+        deductScript.setResultType(Long.class);
+    }
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+    /**
+     * 预占库存（下单时调用）
+     */
+    public boolean deduct(String skuId, int quantity, String orderId) {
+        String stockKey = "stock:sku:" + skuId;
+        Long result = (Long) redis.execute(
+            deductScript,
+            Collections.singletonList(stockKey),
+            String.valueOf(quantity),
+            orderId
+        );
+        if (result == 1L) {
+            monitor.record("stock_deduct_success", skuId);
+            return true;
+        } else {
+            monitor.record("stock_deduct_fail_oversell", skuId);
+            return false;   // 库存不足
+        }
+    }
 
-## 七、企业级面试定位：从“会用”到“能负责”
+    /**
+     * 确认扣减（支付成功时调用）
+     * frozen → sold，available 不变（下单时已减）
+     */
+    public boolean confirm(String orderId) {
+        String frozenKey = "frozen:" + orderId;
+        Map<Object, Object> frozen = redis.opsForHash().entries(frozenKey);
+        if (frozen.isEmpty()) {
+            return false;   // 预占已过期或不存在
+        }
+        // 删除预占记录（已转为 sold）
+        redis.delete(frozenKey);
+        // sold 计数（可选，用于统计）
+        redis.opsForValue().increment("sold:sku:" + frozen.get("sku"),
+            Long.parseLong(frozen.get("qty").toString()));
+        return true;
+    }
 
-企业级面试不会只问“库存 是什么”，而是看你能不能对一条真实生产链路负责。回答“库存扣减、超卖防控与预占释放”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+    /**
+     * 释放库存（取消/超时）
+     * frozen → available（加回去）
+     */
+    public boolean release(String orderId) {
+        String frozenKey = "frozen:" + orderId;
+        // 用 Lua 原子释放（防止重复释放）
+        String script =
+            "local frozen = redis.call('HGETALL', KEYS[1]) " +
+            "if #frozen == 0 then return 0 end " +              -- 已释放
+            "local qty = tonumber(frozen[4]) " +                -- hash 里 qty 的值
+            "local sku = frozen[2] " +                          -- hash 里 sku 的值
+            "redis.call('INCRBY', 'stock:sku:' .. sku, qty) " + -- 库存加回
+            "redis.call('DEL', KEYS[1]) " +                     -- 删预占记录
+            "return 1";
+        Long result = (Long) redis.execute(
+            new DefaultRedisScript<>(script, Long.class),
+            Collections.singletonList(frozenKey)
+        );
+        return result == 1L;
+    }
+}
+```
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 JD 核心技术 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 库存、超卖、预占 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 oversell_count、stock_lock_timeout、inventory_diff_count、hot_sku_qps 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+## 三、机制层：DB 层兜底与分桶库存
 
-### 企业级回答骨架
+**MySQL 兜底 CHECK 约束**（即使 Redis 异常也不超卖）：
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 库存 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+```sql
+-- 库存表
+CREATE TABLE t_inventory (
+    sku_id VARCHAR(50) PRIMARY KEY,
+    available INT NOT NULL DEFAULT 0,
+    frozen INT NOT NULL DEFAULT 0,
+    sold INT NOT NULL DEFAULT 0,
+    version INT NOT NULL DEFAULT 0,
+    -- CHECK 约束：库存不能为负（兜底超卖）
+    CHECK (available >= 0 AND frozen >= 0 AND sold >= 0)
+);
 
-### 面试中要主动补的生产细节
+-- 异步同步 Redis 扣减到 DB（乐观锁）
+UPDATE t_inventory
+SET available = available - #{qty},
+    frozen = frozen + #{qty},
+    version = version + 1
+WHERE sku_id = #{skuId}
+  AND available >= #{qty}        -- DB 层兜底：available 不能变负
+  AND version = #{expectedVersion};
+-- 如果 available < qty（超卖），affected_rows = 0，报错回滚 Redis
+```
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+**热点商品分桶库存**（降低单 key QPS）：
 
-## 八、苏格拉底式面试追问
+```java
+@Service
+public class BucketInventoryService {
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+    // 热点商品库存分 N 桶，分散单 key 压力
+    private static final int BUCKET_COUNT = 10;
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“库存扣减、超卖防控与预占释放”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 oversell_count、stock_lock_timeout、inventory_diff_count、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 库存 负责的范围，以及必须依赖 超卖、预占 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 并发扣减导致超卖，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+    /**
+     * 初始化库存：10000 件分 10 桶，每桶 1000
+     */
+    public void initStock(String skuId, int total) {
+        int perBucket = total / BUCKET_COUNT;
+        for (int i = 0; i < BUCKET_COUNT; i++) {
+            String key = "stock:sku:" + skuId + ":" + i;
+            redis.opsForValue().set(key, String.valueOf(perBucket));
+        }
+    }
 
-### 现场对话示例
+    /**
+     * 扣减：随机选桶，空了换下一桶
+     */
+    public boolean deduct(String skuId, int quantity, String orderId) {
+        int startBucket = ThreadLocalRandom.current().nextInt(BUCKET_COUNT);
+        for (int i = 0; i < BUCKET_COUNT; i++) {
+            int bucket = (startBucket + i) % BUCKET_COUNT;   // 轮询所有桶
+            String key = "stock:sku:" + skuId + ":" + bucket;
+            Long result = (Long) redis.execute(deductScript,
+                Collections.singletonList(key),
+                String.valueOf(quantity), orderId);
+            if (result == 1L) {
+                return true;   // 这个桶扣成功
+            }
+            // 当前桶不足，试下一桶
+        }
+        return false;   // 所有桶都不足
+    }
+    // 100 个请求同时扣减，分散到 10 个桶，单桶 QPS 降 10 倍
+}
+```
 
-**面试官**：你说要做“库存扣减、超卖防控与预占释放”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 oversell_count、stock_lock_timeout、业务失败率和事故记录。
+## 四、机制层：预占超时释放
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 oversell_count 没有改善，或者 stock_lock_timeout 反而变差，就停止扩大范围，回到假设层重新复盘。
+**定时任务释放超时预占**：
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 oversell_count、stock_lock_timeout、inventory_diff_count。这样它不是个人经验，而是团队机制。
+```java
+@Component
+public class StockReleaseScheduler {
 
-## 九、专项架构深挖：对象、链路、失败模式
+    @Autowired private InventoryService inventoryService;
+    @Autowired private OrderService orderService;
 
-这一题不要停在“知道 库存”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+    // 每 1 分钟扫描超时未支付的预占
+    @Scheduled(fixedDelay = 60_000)
+    public void releaseTimeoutFrozen() {
+        // 查询超时预占（下单超过 30 分钟未支付）
+        List<Order> timeoutOrders = orderService.findTimeoutFrozen(
+            Instant.now().minus(30, ChronoUnit.MINUTES),
+            500   // 每批 500 个
+        );
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | SKU、仓、库存、预占、释放、出入库流水；库存分片、热点 SKU、补货和调拨任务；库存快照和差异对账 |
-| 设计主线 | 可售库存、占用库存、实物库存分账管理；热点 SKU 通过分片、预扣或队列串行化保护；库存变更必须有流水，差异通过对账修复 |
-| 失败模式 | 并发扣减导致超卖；预占释放失败造成库存挂死；缓存库存与真实库存长期不一致 |
-| 验证指标 | oversell_count、stock_lock_timeout、inventory_diff_count、hot_sku_qps |
+        for (Order order : timeoutOrders) {
+            try {
+                // 释放库存
+                boolean released = inventoryService.release(order.getId());
+                if (released) {
+                    // 取消订单
+                    orderService.autoCancel(order.getId(), "超时未支付自动取消");
+                    monitor.record("stock_release_timeout", order.getId());
+                }
+            } catch (Exception e) {
+                log.error("释放库存失败: orderId={}", order.getId(), e);
+            }
+        }
+    }
+}
+```
 
-**架构拆解**：
+**Redis 过期事件释放**（替代定时任务）：
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 超卖 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 库存扣减、超卖防控与预占释放 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 预占 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+```java
+// 用 Redis Keyspace Notifications 监听过期事件
+@Configuration
+public class RedisExpireConfig {
+    @Bean
+    public RedisMessageListenerContainer container(RedisConnectionFactory factory) {
+        RedisMessageListenerContainer container = new RedisMessageListenerContainer();
+        container.setConnectionFactory(factory);
+        // 监听过期事件
+        container.addMessageListener(new KeyExpiredListener(),
+            new PatternTopic("__keyevent@0__:expired"));
+        return container;
+    }
+}
 
-**高分回答细节**：
+public class KeyExpiredListener implements MessageListener {
+    @Override
+    public void onMessage(Message message, byte[] pattern) {
+        String expiredKey = message.toString();
+        if (expiredKey.startsWith("frozen:")) {
+            String orderId = expiredKey.substring("frozen:".length());
+            // 预占过期，触发释放（HSET 里记录了 sku 和 qty）
+            // 注意：过期时 hash 可能已被删，要在 Lua 里先 HGET 再 INCRBY 再 DEL
+            inventoryService.releaseOnExpire(orderId);
+            orderService.autoCancel(Long.parseLong(orderId), "预占过期自动取消");
+        }
+    }
+}
+// 优点：实时性好（过期立即释放）；缺点：Redis 重启可能丢事件（要定时任务兜底）
+```
 
-- 不要只说“可以用 库存”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+## 五、底层本质：原子性是超卖防控的命门
 
-## 十、二轮场景追问与项目表达
+回到第一性：**超卖的根本原因是"CHECK 和 DEC 不原子"——两个请求同时 CHECK 通过（都读到 stock=1），然后都 DEC（stock 变成 -1）**。
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+- **MySQL UPDATE WHERE stock>0**：看似原子（一条 SQL），但 InnoDB 的行锁机制下，多个事务同时 UPDATE 同一行会串行化（行锁），性能差。且如果用"先 SELECT 再 UPDATE"（应用层逻辑），中间有间隙，必然超卖。
+- **MySQL SELECT FOR UPDATE**（悲观锁）：强行串行化，安全但极慢（秒杀场景万级 QPS 不可行）。
+- **Redis Lua 脚本**：Redis 单线程执行，Lua 脚本执行期间不被其他命令打断。CHECK（GET stock）和 DEC 在同一脚本，原子完成。性能极高（10 万+ QPS）。
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+**预占的本质是"乐观锁定"**：下单时不立即扣减真实库存（available），而是预占（frozen）。用户 30 分钟内支付则确认（frozen→sold），超时则释放（frozen→available）。这样避免了"扣减后用户不支付导致库存虚耗"——预占的库存别人不能买（available 不含 frozen），但超时能回收。这是"用时间换确定性"的设计——给用户支付时间，超时回收库存。
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“库存扣减、超卖防控与预占释放”，重点看 oversell_count、stock_lock_timeout、inventory_diff_count，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+**分桶的本质是"降低锁竞争"**：单 key 库存在万级 QPS 下成为热点（Redis 单线程处理，该 key 成为瓶颈）。分 10 桶后，请求分散到 10 个 key，单 key QPS 降 10 倍。类似 ConcurrentHashMap 的分段锁思想——降低并发冲突。
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+## 六、AI 架构师加问：5 个
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 库存 和 超卖 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+1. **用 AI 预测库存热点，怎么做？**
+   AI 分析商品的关注度（加购/收藏/页面浏览）、历史销量、营销活动排期。预测某 SKU 将成为热点（秒杀），提前分桶库存 + 预热到 Redis。避免秒杀开始时 DB 被打挂。
 
-### 追问 3：你如何判断这个方案值得做？
+2. **AI 辅助库存分配（多仓），怎么做？**
+   AI 根据用户地址、各仓库存、物流时效、调拨成本，推荐最优发货仓。用运筹优化算法（如线性规划）求解。但实时扣减走确定性逻辑（就近原则），AI 做批量优化（离线计算调拨计划）。
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 预占 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+3. **AI Agent 管库存，怎么防超卖？**
+   Agent 的库存操作走标准 Lua 脚本（原子扣减），不能绕过。Agent 做决策（何时补货/调拨），不做扣减（扣减是确定性原子操作）。Agent 的补货建议人工审批后执行。
 
-### STAR 项目表达
+4. **库存系统接入 RAG，知识库放什么？**
+   库存模型文档（available/frozen/sold 三态）、Lua 脚本说明、历史超卖事故分析、多仓调拨规则。AI 查询"为什么库存是负数"时，RAG 返回 CHECK 约束说明+排查步骤。
 
-- **S（背景）**：原系统在 库存 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 库存扣减、超卖防控与预占释放 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 oversell_count、stock_lock_timeout 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+5. **用 AI 检测超卖风险，怎么做？**
+   AI 实时监控 available 字段——如果接近 0 或变负，告警。分析扣减日志，发现"某 SKU 的扣减频率异常高"（可能是刷单/攻击），自动触发限流或下架。用异常检测（Z-score）识别库存异常波动。
 
-### 二轮复盘清单
-
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
-
-## 十一、面试官 5 个企业级追问
-
-1. **你在真实项目里怎么判断“库存扣减、超卖防控与预占释放”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 oversell_count、stock_lock_timeout、inventory_diff_count。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
-
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，库存 是否真是瓶颈，超卖 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
-
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 并发扣减导致超卖。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 oversell_count 和 stock_lock_timeout 做分钟级观察，一旦越过阈值立即止损。
-
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 预占，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
-
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“库存扣减、超卖防控与预占释放”，至少要沉淀 SKU、仓、库存、预占、释放、出入库流水 的建模规范，以及 oversell_count、stock_lock_timeout 的验收标准。
-
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“库存扣减、超卖防控与预占释放”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 库存 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“库存扣减、超卖防控与预占释放”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 oversell_count、stock_lock_timeout 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 并发扣减导致超卖，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 七、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：经验丰富的值班负责人拿着工具箱、调度台和应急预案，在处理“业务流量和系统风险同时出现”。
+抓 **"Lua 原子扣减、三态库存模型、预占超时释放、分桶降热点"**。
 
-- **场景**：先说明“库存扣减、超卖防控与预占释放”服务于什么业务目标，不要上来就堆 库存。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 并发扣减导致超卖、预占释放失败造成库存挂死。
-- **验证**：最后落到 oversell_count、stock_lock_timeout、inventory_diff_count，让面试官感觉你真的上线过。
-
-### 拟人化理解
-
-可以把“库存扣减、超卖防控与预占释放”想成一个经验丰富的值班负责人：库存 是他的工具箱、调度台和应急预案，超卖 是他面对的现场信号，预占 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看指标，再控风险，最后谈优化。这样记，比死背组件名更稳。
+- **Lua 原子**：CHECK（stock>=n）+ DEC 在一脚本，Redis 单线程不打断
+- **三态模型**：available（可用）+ frozen（预占）+ sold（已售）
+- **预占三阶段**：下单 frozen+1 → 支付确认 frozen-1/sold+1 → 超时释放 frozen-1/available+1
+- **DB 兜底**：CHECK 约束 stock >= 0
+- **分桶库存**：热点商品分 N key，降单点 QPS
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“库存扣减、超卖防控与预占释放”，我会这样答：我会先确认业务目标、规模、SLA 和一致性要求，再选择合适的架构手段。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 并发扣减导致超卖，所以我会提前设计灰度、监控和止损阈值，重点看 oversell_count、stock_lock_timeout。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
+> 库存扣减用 Redis Lua 脚本保证原子性——脚本里 CHECK（stock >= quantity）+ DEC（stock -= quantity）一气呵成，Redis 单线程执行不被打断，防超卖。库存三态模型：available（可售卖）+ frozen（预占）+ sold（已售）。下单时预占（available-1, frozen+1），支付成功确认（frozen-1, sold+1），超时 30 分钟未支付释放（frozen-1, available+1）。MySQL 做兜底——CHECK 约束 stock >= 0，即使 Redis 异常 DB 层拒绝负库存。热点商品（秒杀）用分桶库存——10000 件分 10 桶每桶 1000，扣减时随机选桶，单 key QPS 降 10 倍。预占超时释放用定时任务（每分钟扫超时预占）或 Redis 过期事件。最容易翻车的是"先 SELECT 再 UPDATE"——中间间隙导致超卖，必须用 Lua 原子或 DB 乐观锁兜底。
 
-### 被追问时的转场话术
+## 八、苏格拉底式面试追问
 
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 oversell_count 或 stock_lock_timeout 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么不用 MySQL 直接扣减，非要 Redis？ | 用性能说话：MySQL 行锁下单 SKU 千级 QPS（行锁串行化），Redis Lua 10 万+ QPS。秒杀场景 MySQL 扛不住。用 oversell_count（超卖次数，应=0）和 stock_deduct_rt_p99（扣减 RT，应<5ms）量化 |
+| 证据追问 | 怎么证明没超卖？ | 压测：1000 并发抢 10 件，断言只成功 10 个；生产监控：oversell_count（超卖次数，必为 0）、stock_deduct_fail_count（库存不足失败数）、reconcile_diff（Redis 和 DB 库存差异，应=0） |
+| 边界追问 | Redis 挂了库存怎么办？ | Redis 主从+哨兵保证高可用。极端情况 Redis 宕机，降级到 DB 乐观锁扣减（性能差但不超卖）。或拒绝下单（保护性降级）。Redis 恢复后从 DB 同步库存到 Redis |
+| 反例追问 | 什么场景分桶库存没用？ | 库存很少（如 5 件分 10 桶每桶 0-1 件，反而增加跨桶查询）、非热点商品（QPS 低单 key 够用）。分桶只对万级 QPS 的热点商品有效 |
+| 风险追问 | 库存系统最大的风险？ | 主动点出：超卖（Lua 脚本 bug 或 Redis 异常）、预占泄漏（超时未释放导致库存虚耗）、Redis-DB 不一致（异步同步丢失）、重复释放（并发释放同一预占） |
+| 验证追问 | 怎么验证 Lua 脚本正确？ | 单元测试：mock Redis，验证 CHECK+DEC 原子性（并发 100 线程，断言不超卖）；压力测试：10 万 QPS 扣减，监控 available 不变负；混沌测试：kill Redis，验证降级到 DB 不超卖 |
+| 沉淀追问 | 库存系统沉淀什么？ | Lua 脚本库（扣减/确认/释放）、分桶库存框架、库存对账系统（Redis-DB 比对）、预占超时释放框架、超卖监控告警 |
 
-### 反问面试官
+### 现场对话示例
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+**面试官**：Redis Lua 扣减后，MySQL 怎么同步？
 
+**候选人**：异步同步。Redis 扣减成功后，发 MQ 消息（StockDeductedEvent），消费方异步更新 MySQL。这样 Redis 主导扣减（高性能），MySQL 异步落库（持久化）。问题：异步同步可能延迟或丢失（MQ 消息丢）。兜底措施：第一，定时对账——每 5 分钟比对 Redis 和 MySQL 的库存，差异超过阈值告警并修复（以 Redis 为准，因为 Redis 是主）。第二，T+1 全量对账——每日凌晨跑全量库存比对，发现历史差异。第三，MQ 用事务消息（RocketMQ）保证不丢——扣减和消息发放在同一"事务"（Lua 脚本里 LPUSH 到本地列表，异步任务读列表发 MQ）。极端情况（Redis 和 DB 都异常），以支付网关的实际交易为准（每笔支付对应一次库存扣减，逆向对账）。京东库存的实践：Redis 扣减 + 异步 MQ 同步 DB，每 5 分钟增量对账，T+1 全量对账，对账差异率 < 0.001%。发现差异以 Redis 为准修复 DB（因为 Redis 是扣减的权威源）。
+
+**面试官**：分桶库存扣减时，某桶不足但其他桶有，怎么处理？
+
+**候选人**：轮询所有桶。扣减时随机选起始桶（避免所有请求都从桶 0 开始），如果当前桶库存不足（Lua 返回 0），切到下一桶继续尝试，直到所有桶都试过。这样最大化利用库存——不会因为某桶空了而拒绝请求（其他桶还有）。但有个问题：跨桶查询增加 RT（最坏情况试 10 个桶）。优化：第一，记录每桶的库存水位（本地缓存或 Redis），优先选库存充足的桶。第二，动态均衡——发现某桶空了，后台任务从其他桶"搬运"库存（桶间再平衡），保持各桶水位均匀。第三，桶数不宜过多——10 桶够用（单桶 QPS 降到原来的 1/10），太多桶增加管理复杂度。京东秒杀的实践：10 桶 + 动态均衡，单 SKU 10 万 QPS 下单桶 QPS 1 万，Redis 单实例扛住。
+
+**面试官**：预占释放时，Redis 和 DB 都要释放，怎么保证一致？
+
+**候选人**：释放和扣减一样，Redis 主导。释放逻辑：Lua 脚本里 HGET 预占记录（sku + qty）→ INCRBY available → DEL 预占记录，一气呵成。释放后发 MQ 消息，消费方异步更新 DB（frozen-1, available+1）。注意"重复释放"问题——并发场景下，定时任务和用户主动取消可能同时释放同一预占。Lua 脚本里先判断预占记录是否存在（HGETALL 为空说明已释放），已释放直接返回 0，不重复加库存。DB 层也用乐观锁（WHERE version=旧）兜底。还有一个边界：预占已过期（TTL 到了被 Redis 自动删除），此时用户来支付，发现预占没了。处理：支付回调时检查预占记录，如果不存在（已过期释放），尝试重新扣减（如果还有库存则成功，没库存则触发退款）。京东的实践：预占 TTL 30 分钟，定时任务每分钟扫即将超时的预占提前释放（避免 Redis 过期事件丢失），支付回调时预占不存在则重试扣减。
+
+## 常见考点
+
+1. **Redis 扣减和 DB 扣减哪个是主？**——Redis 是主（扣减实时在 Redis），DB 是从（异步同步）。对账时以 Redis 为准。原因：Redis 性能高，是扣减的执行点；DB 是持久化兜底。
+2. **库存扣减和订单创建怎么保证一致？**——先扣库存再创订单（扣失败不创订单）。或用 TCC（Try 预占库存+创建订单草稿 → Confirm 确认 → Cancel 释放）。详见 018 题分布式事务。
+3. **多仓库存怎么扣？**——每仓独立库存，扣减时按就近原则选仓（用户地址最近的仓）。跨仓调拨是异步流程（A 仓缺货从 B 仓调）。总库存 = 各分仓之和。
+4. **库存预热怎么做？**——秒杀前把库存从 DB 加载到 Redis（避免秒杀开始时 Redis miss 回源 DB 打挂）。预热提前量（如秒杀前 10 分钟），预热后 DB 和 Redis 对账确认一致。

@@ -4,264 +4,309 @@ difficulty: L2
 category: java-architect
 subcategory: Java 并发
 tags:
-- Java 架构师
 - 异步
 - CompletableFuture
 - 治理
 feynman:
-  essence: CompletableFuture 编排与异步链路治理的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: CompletableFuture 的本质是把"回调地狱"变成"可编排的异步数据流"。它不是 Future 的简单升级，而是用 CompletionStage 接口把"任务完成后的动作"建模成链式图——串行、并行、组合、异常处理都变成声明式 API。
+  analogy: 像 Excel 公式链：A1 是原始数据，B1=A1×2，C1=B1+10。CompletableFuture 就是异步版的 Excel——supplyAsync 起 A1，thenApply 是 B1，thenCombine 是把两个 sheet 的结果合到 C1。哪个单元格慢了，下游自动等，不用你写 wait/notify。
+  first_principle: 为什么需要 CompletableFuture？因为 Future.get() 是阻塞的——编排"取 A、取 B、合并"必须手动起线程 + Future.get() 阻塞，代码丑且易错。CompletableFuture 用回调链 + CompletionStage 图，把"等待"变成"事件驱动"，让线程不被阻塞在 get() 上。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 创建：supplyAsync/ runAsync（默认 ForkJoinPool.commonPool）
+  - 转换：thenApply（同步）、thenApplyAsync（异步切线程）
+  - 组合：thenCombine（两 CF 合并）、allOf/anyOf（多 CF 聚合）
+  - 异常：exceptionally（恢复）、handle（恢复+继续）、whenComplete（观察副作用）
+  - 治理三要素：必须显式传线程池、必须设超时、必须有异常兜底
 first_principle:
-  problem: 面对“CompletableFuture 编排与异步链路治理”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 如何在不阻塞线程的前提下，编排"取数据 A、取数据 B、合并、再调下游"这种依赖图？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - Future.get() 阻塞线程，编排 N 个依赖要 N 次阻塞，浪费线程
+  - 回调能避免阻塞，但嵌套回调（回调地狱）不可读、不可维护
+  - 任务的依赖关系可以建模成 DAG（有向无环图）
+  rebuild: CompletableFuture 把每个异步任务建模为图节点，依赖关系为边。任务完成时触发回调，回调内部又创建新节点，形成链/树/DAG。线程不被 get() 阻塞，由内部线程池驱动回调执行。API（thenApply/thenCombine/allOf）是 DAG 构造器，程序员声明式描述依赖，运行时调度执行。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - 为什么默认 ForkJoinPool.commonPool 不能用？——它是全局共享，所有未指定线程池的 CompletableFuture 都用它，一个慢任务拖垮全局；线程数 = CPU-1，IO 任务严重不够
+  - thenApply 和 thenApplyAsync 区别？——thenApply 用上游完成时的线程执行回调（可能调用方线程）；thenApplyAsync 强制切到指定线程池
+  - orTimeout/d completeTimeout 怎么用？——JDK 9+ 提供，CF 超时自动异常结束，避免下游永久等待
+  - allOf 返回的 CF 怎么拿结果？——allOf 只返回 CompletableFuture<Void>，要自己收集；或用 Stream + Stream.toList
+  - 异步链路怎么 traceId 透传？——默认不透传（线程切换丢 MDC），要自定义线程池 wrap Runnable 复制 MDC
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - CompletableFuture 是异步 DAG 构造器，不是 Future 升级版
+  - 三大治理：显式线程池（禁用 commonPool）、必须设超时、必须异常兜底
+  - thenApply 同步 / thenApplyAsync 异步 / thenCompose 扁平化
+  - allOf 全成功 / anyOf 任一成功（容错用 anyOf + 超时）
+  - traceId 透传要 wrap 线程池复制 MDC，否则链路追踪断
 ---
 
-# 【Java 后端架构师】CompletableFuture 编排与异步链路治理？
+# 【Java 后端架构师】CompletableFuture 编排与异步链路治理
 
-> 适用场景：JD 核心技术。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。商品详情页要并发取商品、价格、库存、评价、推荐——串行 500ms，并发 100ms。CompletableFuture 是编排这种扇出扇入依赖图的标准工具，但治理不到位就是线上链路追踪断裂、超时雪崩的源头。
 
-## 一、先明确问题边界
+## 一、概念层：CompletableFuture 的 API 分类
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**四大类 API**（面试要能报全）：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+| 类别 | 代表方法 | 语义 |
+|------|---------|------|
+| **创建** | `supplyAsync`/`runAsync` | 异步起任务，supply 有返回值 |
+| **转换** | `thenApply`/`thenCompose` | 拿上游结果转换，compose 扁平化（避免 CF<CF<T>>） |
+| **组合** | `thenCombine`/`allOf`/`anyOf` | 多 CF 合并/聚合 |
+| **消费/异常** | `thenAccept`/`whenComplete`/`exceptionally`/`handle` | 消费结果、观察副作用、异常恢复 |
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 异步 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**同步 vs 异步变体**（关键区分）：
 
-## 二、推荐架构思路
+| 方法 | 执行线程 |
+|------|---------|
+| `thenApply(fn)` | 用上游完成时的线程（可能是调用方线程，可能阻塞调用方） |
+| `thenApplyAsync(fn)` | 强制切到 ForkJoinPool.commonPool |
+| `thenApplyAsync(fn, executor)` | 切到指定线程池（**生产推荐**） |
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+**完整商品详情页编排示例**：
 
-## 三、技术落地点
+```java
+// 4 个独立数据源并发取，最后合并
+CompletableFuture<Product> productFuture =
+    CompletableFuture.supplyAsync(() -> productService.get(id), ioPool);
+CompletableFuture<Price> priceFuture =
+    CompletableFuture.supplyAsync(() -> priceService.get(id), ioPool);
+CompletableFuture<Stock> stockFuture =
+    CompletableFuture.supplyAsync(() -> stockService.get(id), ioPool);
+CompletableFuture<List<Review>> reviewFuture =
+    CompletableFuture.supplyAsync(() -> reviewService.list(id), ioPool)
+                     .orTimeout(200, MILLISECONDS);   // 单链路超时
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+CompletableFuture<PageVO> all = CompletableFuture.allOf(
+        productFuture, priceFuture, stockFuture, reviewFuture)
+    .thenApplyAsync(v -> {
+        // allOf 完成后合并（4 个都成功才到这里）
+        return new PageVO(productFuture.join(), priceFuture.join(),
+                stockFuture.join(), reviewFuture.join());
+    }, computePool)
+    .orTimeout(300, MILLISECONDS)              // 总超时
+    .exceptionally(ex -> PageVO.degraded());   // 兜底降级
 
-## 四、常见坑
+PageVO page = all.join();   // 入口处阻塞（业务接口必须返回）
+```
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+关键点：4 个数据源并发，总耗时 ≈ max(各链路) 而非 sum；任一超时或异常，整条链降级。
 
-## 五、面试回答模板
+## 二、机制层：CompletionStage 图与线程切换
 
-可以按下面结构作答：
+**CompletableFuture 的内部结构**（简化）：
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“CompletableFuture 编排与异步链路治理”，核心是 异步 与 CompletableFuture 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+```
+CompletableFuture
+├── result          // 结果或异常（未完成时为 null）
+└── stack           // 依赖此 CF 的回调链（Completion 链表）
+       │
+       ▼
+   当 complete() 被调用时
+   遍历 stack，依次触发回调
+```
 
-## 六、加分点
+**线程切换规则**（面试常考）：
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+1. `complete()` 由谁调用，回调默认就由谁触发（除非 `xxAsync`）。
+2. `supplyAsync` 任务由 commonPool（默认）或指定 executor 执行，完成后触发下游回调。
+3. `thenApply(fn)` 的 fn 用上游完成线程执行——可能是异步线程，也可能是调用方线程（如果上游已提前完成）。
 
-## 七、企业级面试定位：从“会用”到“能负责”
+**陷阱**：
 
-企业级面试不会只问“异步 是什么”，而是看你能不能对一条真实生产链路负责。回答“CompletableFuture 编排与异步链路治理”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+```java
+CompletableFuture.supplyAsync(() -> 1, ioPool)
+    .thenApply(x -> x + heavyCompute())   // 在 ioPool 线程做重计算！
+// 正确：thenApplyAsync(x -> heavyCompute(), computePool)
+```
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 JD 核心技术 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 异步、CompletableFuture、治理 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 pool_active_ratio、queue_wait_ms_p99、rejected_tasks、lock_blocked_threads 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+**thenApply vs thenCompose（必答）**：
 
-### 企业级回答骨架
+```java
+// thenApply：返回值被包装
+CompletableFuture<CompletableFuture<Integer>> wrong =
+    cf.thenApply(x -> asyncCall(x));      // 嵌套 CF<CF<Integer>>
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 异步 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+// thenCompose：扁平化
+CompletableFuture<Integer> right =
+    cf.thenCompose(x -> asyncCall(x));    // 直接 CF<Integer>
+```
 
-### 面试中要主动补的生产细节
+类似 Stream.flatMap 的语义。
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+## 三、实战层：异步链路治理三要素
 
-## 八、苏格拉底式面试追问
+**治理 1：必须显式传线程池（禁用 commonPool）**
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+```java
+// 反面：用默认 commonPool
+CompletableFuture.supplyAsync(() -> dbCall(id));   // 全局共享，慢任务拖垮
+// commonPool 线程数 = CPU-1，IO 任务不够用
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“CompletableFuture 编排与异步链路治理”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 pool_active_ratio、queue_wait_ms_p99、rejected_tasks、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 异步 负责的范围，以及必须依赖 CompletableFuture、治理 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 队列无界导致内存被打满，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+// 正面：按业务指定独立线程池
+private static final Executor IO_POOL = new ThreadPoolExecutor(
+    50, 100, 60, SECONDS, new ArrayBlockingQueue<>(500),
+    new ThreadFactoryBuilder().setNameFormat("io-async-%d").build(),
+    new ThreadPoolExecutor.CallerRunsPolicy());
 
-### 现场对话示例
+CompletableFuture.supplyAsync(() -> dbCall(id), IO_POOL);
+```
 
-**面试官**：你说要做“CompletableFuture 编排与异步链路治理”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 pool_active_ratio、queue_wait_ms_p99、业务失败率和事故记录。
+**治理 2：必须设超时（JDK 9+）**
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 pool_active_ratio 没有改善，或者 queue_wait_ms_p99 反而变差，就停止扩大范围，回到假设层重新复盘。
+```java
+CompletableFuture.supplyAsync(this::call, IO_POOL)
+    .orTimeout(200, MILLISECONDS)              // 总超时 200ms
+    .completeOnTimeout(defaultValue, 200, MILLISECONDS)  // 或超时给默认值
+    .exceptionally(ex -> {
+        if (ex instanceof TimeoutException) {
+            metrics.counter("async.timeout").increment();
+            return fallback();
+        }
+        throw new RuntimeException(ex);
+    });
+```
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 pool_active_ratio、queue_wait_ms_p99、rejected_tasks。这样它不是个人经验，而是团队机制。
+JDK 8 没 orTimeout，要用 `allOf(...).get(timeout, unit)` 在入口阻塞拿结果（抛 TimeoutException）。
 
-## 九、专项架构深挖：对象、链路、失败模式
+**治理 3：必须有异常兜底**
 
-这一题不要停在“知道 异步”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+```java
+.exceptionally(ex -> {
+    log.error("链路失败", ex);
+    metrics.counter("async.fail").increment();
+    return PageVO.degraded();   // 降级返回，不让异常向上抛
+});
+// 或用 handle（拿到结果和异常，更灵活）
+.handle((result, ex) -> ex != null ? fallback() : result);
+```
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 业务线程池、队列、Future 链、锁竞争点；CPU 密集型与 IO 密集型任务；上下文、超时和取消信号 |
-| 设计主线 | 线程池按业务域隔离，拒绝策略要可解释；异步链路必须有超时、取消、降级和上下文透传；共享状态优先不可变或分片，减少大锁 |
-| 失败模式 | 队列无界导致内存被打满；异步任务丢失 trace 和安全上下文；锁竞争把 CPU 消耗在阻塞和唤醒上 |
-| 验证指标 | pool_active_ratio、queue_wait_ms_p99、rejected_tasks、lock_blocked_threads |
+**traceId 透传（高阶，生产必做）**：
 
-**架构拆解**：
+CompletableFuture 线程切换会丢失 MDC，链路追踪断。要 wrap 线程池：
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 CompletableFuture 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 CompletableFuture 编排与异步链路治理 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 治理 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+```java
+public static Executor wrap(Executor delegate) {
+    return r -> {
+        Map<String, String> context = MDC.getCopyOfContextMap();
+        delegate.execute(() -> {
+            Map<String, String> prev = MDC.getCopyOfContextMap();
+            if (context != null) MDC.setContextMap(context);
+            try { r.run(); }
+            finally {
+                if (prev != null) MDC.setContextMap(prev);
+                else MDC.clear();
+            }
+        });
+    };
+}
+// 用 wrap(IO_POOL) 替代原线程池，traceId 自动透传
+```
 
-**高分回答细节**：
+## 四、实战层：常见编排模式
 
-- 不要只说“可以用 异步”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+| 模式 | 代码 | 场景 |
+|------|------|------|
+| **扇出扇入** | `allOf(f1, f2, f3).thenApply(merge)` | 多数据源合并（商品页） |
+| **竞速容错** | `anyOf(primary, secondary).orTimeout(100ms)` | 主备双读，谁快用谁 |
+| **串行链** | `cf.thenCompose(a -> step2(a)).thenCompose(b -> step3(b))` | 流程编排 |
+| **重试** | `cf.exceptionally(ex -> retry())` 或 Resilience4j | 失败重试 |
+| **降级** | `cf.exceptionally(ex -> fallback())` | 异常兜底 |
 
-## 十、二轮场景追问与项目表达
+**竞速容错示例**（读主从 DB）：
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+```java
+CompletableFuture<Data> primary = supplyAsync(() -> dbPrimary.get(id), IO_POOL);
+CompletableFuture<Data> secondary = supplyAsync(() -> dbSecondary.get(id), IO_POOL);
+CompletableFuture<Data> result = CompletableFuture.anyOf(primary, secondary)
+    .orTimeout(100, MILLISECONDS)
+    .thenApply(o -> (Data) o)
+    .exceptionally(ex -> Data.empty());
+// 谁先成功用谁，100ms 都没成功就降级
+```
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+## 五、底层本质：为什么是 DAG 而不是回调
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“CompletableFuture 编排与异步链路治理”，重点看 pool_active_ratio、queue_wait_ms_p99、rejected_tasks，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+回到第一性：**为什么 CompletableFuture 比手写回调 + Future 好？**
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+因为依赖关系是 DAG（有向无环图），用图建模天然适合：
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 异步 和 CompletableFuture 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+- 手写回调：每个依赖要嵌套 lambda，3 层就成回调地狱，难以阅读、难以加超时、难以异常处理。
+- Future.get() 阻塞：编排 N 个依赖要起 N 个线程 + N 次 get() 阻塞，浪费线程。
+- CompletableFuture：每个任务是节点，thenXxx 构造边，运行时按拓扑序触发回调。线程不阻塞在 get()，由线程池驱动回调。声明式描述依赖，运行时调度执行。
 
-### 追问 3：你如何判断这个方案值得做？
+本质上 CompletableFuture 是个**轻量级异步任务编排框架**，介于"手写 Future"和"完整响应式框架（Reactor/RxJava）"之间。它不解决背压（流量过载保护），不解决数据流变换（map/filter），只解决"任务依赖图"——这恰好是后端业务编排最常见的场景。
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 治理 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+它的边界：不适合流式数据处理（用 Reactor），不适合需要背压的场景（生产者消费者速率不匹配），不适合复杂的错误传播策略。这些场景上 Reactor/RxJava。
 
-### STAR 项目表达
+## 六、AI 架构师加问：5 个 AI 相关问题
 
-- **S（背景）**：原系统在 异步 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 CompletableFuture 编排与异步链路治理 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 pool_active_ratio、queue_wait_ms_p99 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+1. **AI Agent 多步骤编排用 CompletableFuture 还是 Reactor？**
+   步骤确定、无中间流用 CompletableFuture（简单）；步骤动态、需要中间数据流（如 RAG 检索→重排→生成）用 Reactor。AI Agent 一般用 LangChain4j 这类框架，内部已抽象编排。
 
-### 二轮复盘清单
+2. **AI 推理流式输出怎么和 CompletableFuture 配合？**
+   流式（LLM token 流）不适合 CompletableFuture（它是单值完成），要用 Reactor Flux 或 JDK 21 Flow.Publisher；CompletableFuture 只适合"推理完成返回最终结果"。
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+3. **AI 并发调多个工具（function calling），怎么编排？**
+   用 `allOf` 扇出并发调工具，thenApply 合并结果给 LLM 决策。每个工具独立线程池 + 超时 + 异常兜底，避免一个工具卡死整个 Agent。
 
-## 十一、面试官 5 个企业级追问
+4. **AI 链路怎么追踪 traceId？**
+   线程切换丢 MDC，要 wrap 线程池复制上下文（前述代码）；或用 OpenTelemetry 的 ContextStorage 自动透传。AI 调用记录 tool_call_id + traceId，便于回放和归因。
 
-1. **你在真实项目里怎么判断“CompletableFuture 编排与异步链路治理”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 pool_active_ratio、queue_wait_ms_p99、rejected_tasks。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+5. **怎么防 AI 编排的 CompletableFuture 链雪崩？**
+   每个异步任务必须有超时（orTimeout）、异常兜底（exceptionally）、独立线程池（隔离）、熔断（Resilience4j）。AI 调用本身慢且不稳定，不治理就是故障源。监控每链路 P99 和失败率。
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，异步 是否真是瓶颈，CompletableFuture 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
-
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 队列无界导致内存被打满。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 pool_active_ratio 和 queue_wait_ms_p99 做分钟级观察，一旦越过阈值立即止损。
-
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 治理，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
-
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“CompletableFuture 编排与异步链路治理”，至少要沉淀 业务线程池、队列、Future 链、锁竞争点 的建模规范，以及 pool_active_ratio、queue_wait_ms_p99 的验收标准。
-
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“CompletableFuture 编排与异步链路治理”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 异步 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“CompletableFuture 编排与异步链路治理”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 pool_active_ratio、queue_wait_ms_p99 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 队列无界导致内存被打满，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 七、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：交通调度员拿着信号灯、匝道和应急车道，在处理“早高峰车辆突然涌入”。
+抓 **"四类 API、同步异步区别、治理三要素、编排五模式、traceId 透传"**。
 
-- **场景**：先说明“CompletableFuture 编排与异步链路治理”服务于什么业务目标，不要上来就堆 异步。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 队列无界导致内存被打满、异步任务丢失 trace 和安全上下文。
-- **验证**：最后落到 pool_active_ratio、queue_wait_ms_p99、rejected_tasks，让面试官感觉你真的上线过。
+- **四类 API**：创建/转换/组合/异常
+- **同步异步**：thenApply 用上游线程，thenApplyAsync 切线程池
+- **治理三要素**：显式线程池（禁 commonPool）、必须超时、异常兜底
+- **五模式**：扇出扇入、竞速容错、串行链、重试、降级
+- **traceId**：wrap 线程池复制 MDC
 
 ### 拟人化理解
 
-可以把“CompletableFuture 编排与异步链路治理”想成一个交通调度员：异步 是他的信号灯、匝道和应急车道，CompletableFuture 是他面对的现场信号，治理 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先分流，再限速，最后处理事故点。这样记，比死背组件名更稳。
+把 CompletableFuture 想成**异步版 Excel**。A1 是 supplyAsync 的原始数据，B1=thenApply(A1) 是公式引用 A1，C1=thenCombine(B1,D1) 合并两个单元格。哪个单元格慢了下游自动等，你不用写 wait/notify。治理三要素就是"指定谁来算（线程池）、多久算不完报警（超时）、算错了给默认值（兜底）"。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“CompletableFuture 编排与异步链路治理”，我会这样答：我会先区分 CPU 密集、IO 密集和等待型任务，再决定线程模型、隔离策略和取消传播。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 队列无界导致内存被打满，所以我会提前设计灰度、监控和止损阈值，重点看 pool_active_ratio、queue_wait_ms_p99。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 pool_active_ratio 或 queue_wait_ms_p99 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> CompletableFuture 是异步 DAG 编排工具，API 分创建、转换、组合、异常四类。thenApply 同步用上游线程，thenApplyAsync 切指定线程池。生产治理三要素：必须显式传线程池禁用 commonPool（全局共享、CPU-1 线程数不够）、必须设 orTimeout（JDK 9+）避免下游永久等待、必须有 exceptionally 兜底降级。编排模式有 allOf 扇出扇入、anyOf 竞速容错、thenCompose 串行链。线程切换会丢 MDC，要 wrap 线程池复制 traceId 上下文保持链路追踪完整。它的边界是不支持背压和流式数据，那些场景上 Reactor。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司业务是同步接口异步编排（如商品详情页扇出取数），还是需要流式处理（如实时数据流）？前者我用 CompletableFuture 足够，后者我会评估 Reactor 或 JDK 21 虚拟线程。
 
+## 八、苏格拉底式面试追问
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么不用 Future.get + 多线程，要 CompletableFuture？ | 用成本说话：Future.get 阻塞线程，编排 4 个依赖要 4 次阻塞、4 个线程；CompletableFuture 回调驱动不阻塞，1 个请求线程能编排无数依赖 |
+| 证据追问 | 你怎么证明异步化真的快了？ | 压测对比串行 vs 并发的 P99（应从 sum 降到 max）；trace 看各链路耗时分布；监控线程池活跃度（应 60-80% 不打满）；失败率不应上升（治理到位的话） |
+| 边界追问 | CompletableFuture 能解决所有异步问题吗？ | 不能：流式数据用 Reactor Flux、背压用响应式、CPU 密集用 ForkJoinPool、需要顺序保证用队列。它是单值任务编排，不是万能异步框架 |
+| 反例追问 | 什么时候不该用 CompletableFuture？ | 单一同步任务（直接调用更简单）、需要复杂错误传播策略（Reactor 更强）、流式输出（用 Flow/Flux）、CPU 密集计算（直接用线程池） |
+| 风险追问 | 异步化上线后最大风险？ | 主动点出：默认 commonPool 拖垮全局、未设超时导致下游卡死雪崩、异常未兜底向上抛 500、traceId 断裂排查困难、线程池用错（IO 用 CPU 池）。要有治理三要素 + 监控 |
+| 验证追问 | 怎么证明异步编排没问题？ | 单测覆盖正常/超时/异常三条路径；压测看 P99 和失败率；线上看 trace 各链路耗时 + 链路完整（traceId 不应断）；观察 1 周异常率不应高于同步版本 |
+| 沉淀追问 | 团队异步规范，沉淀什么？ | 禁用 commonPool（必须传 executor）、必须 orTimeout、必须 exceptionally、线程池 wrap 透传 MDC、监控大盘（每链路 P99/失败率/超时数）、降级策略 SOP |
+
+### 现场对话示例
+
+**面试官**：你说 commonPool 不能用，为什么？
+
+**候选人**：因为它是 ForkJoinPool 全局共享实例，所有未指定线程池的 CompletableFuture 都用它。三个问题：第一，线程数 = CPU-1，IO 密集任务严重不够用，任务排队；第二，全局共享，一个业务的慢任务拖垮所有其他业务的异步调用；第三，ForkJoinPool 设计目标是 CPU 密集（work-stealing），不适合 IO 密集的阻塞任务。生产必须自定义独立线程池，按业务隔离，IO 用大池、CPU 用小池。
+
+**面试官**：那线程切换丢失 traceId 怎么解决？
+
+**候选人**：CompletableFuture 线程切换默认不复制 MDC，导致链路追踪断裂。解法是 wrap 线程池——在提交 Runnable 时捕获当前 MDC，执行前恢复、执行后清理。我会写一个 `ContextAwareExecutor` 包装类，所有异步线程池都过它一层。或者用 OpenTelemetry 的 ContextStorage 机制自动透传，但框架支持要确认。
+
+**面试官**：超时怎么实现？JDK 8 没有 orTimeout。
+
+**候选人**：JDK 9+ 有 `orTimeout(duration, unit)` 和 `completeOnTimeout(value, duration, unit)`，底层用 DelayedExecutor。JDK 8 要手动：用 `cf.get(timeout, unit)` 在入口阻塞，抛 TimeoutException 后 cancel；或者起一个 ScheduledExecutorService 定时检查 cf 是否完成，超时就 cf.completeExceptionally(new TimeoutException())。生产建议升 JDK 17 用原生 API，或封装一个超时工具类。
+
+## 常见考点
+
+1. **thenApply 和 thenCompose 区别？**——thenApply 的函数返回普通值，结果被包成 CF（嵌套）；thenCompose 的函数返回 CF，结果扁平化（不嵌套）。类似 map vs flatMap。
+2. **allOf 和 anyOf 区别？**——allOf 等所有 CF 完成（全成功或任一异常），返回 `CompletableFuture<Void>`；anyOf 等任一 CF 完成，返回 `CompletableFuture<Object>`。allOf 用于扇入聚合，anyOf 用于竞速容错。
+3. **CompletableFuture 怎么取消？**——`cf.cancel(true)` 标记完成（异常完成 CancellationException），但**不会中断正在执行的任务**（因为是回调驱动，没有线程可中断）。要真正取消底层任务，要在 Runnable 内部响应中断标志。
+4. **为什么 thenApply 可能阻塞调用方线程？**——如果上游 CF 已提前完成，thenApply 的函数会在调用方线程（调用 thenApply 的那个线程）同步执行。要避免用 thenApplyAsync 强制切线程。

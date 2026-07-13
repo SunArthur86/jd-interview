@@ -9,259 +9,332 @@ tags:
 - 限流
 - 降级
 feynman:
-  essence: AI 应用的成本预算、限流与降级的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: AI 应用的成本治理本质是"按价值分配 token 预算"——高价值用户/场景用强模型，低价值用弱模型或缓存。限流防"一个用户烧光预算"，降级保证"模型挂了业务不停"。核心杠杆：模型路由（贵贱分级）、语义缓存（相似 query 复用）、token 预算（租户/用户级配额）、降级链（LLM → 规则 → 兜底文案）。
+  analogy: 像旅行社的成本控制——VIP 客户用专属顾问（强模型），普通客户用 AI 客服（弱模型），常见问题查 FAQ（缓存），系统挂了给个模板回复（降级），每个客户有预算上限不能无限咨询。
+  first_principle: LLM 调用是按 token 计费的（GPT-4 约 $0.03/1K token），一个恶意用户构造超长 prompt 能在一分钟烧掉数千美元。成本失控是 AI 应用的头号风险，必须用预算、限流、缓存、路由四道闸兜住。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 模型路由：简单 query → cheap 模型（GPT-3.5），复杂推理 → expensive（GPT-4）
+  - 语义缓存：embedding query 相似度 > 0.95 命中缓存，复用历史回答
+  - token 预算：租户/用户级日预算，超额拒绝或降级
+  - 限流：QPS 限流 + token/min 限流，防单用户烧钱
+  - 降级链：LLM 挂 → 规则引擎 → 缓存 → 兜底文案，保证业务可用
 first_principle:
-  problem: 面对“AI 应用的成本预算、限流与降级”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 如何让 AI 应用在成本可控的前提下保证服务可用性，不让恶意用户或模型故障拖垮系统？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - LLM 调用按 token 计费，成本和输入/输出长度正相关
+  - 强模型（GPT-4）比弱模型（GPT-3.5）贵 10-15 倍，但不是所有 query 都需要强模型
+  - 模型服务可能挂（OpenAI 也有故障），业务不能 100% 依赖单一模型
+  - 恶意用户可能构造超长 prompt 或高频调用攻击
+  rebuild: 四道闸——(1) 模型路由按 query 复杂度选模型；(2) 语义缓存复用相似 query 的回答；(3) token 预算按租户/用户限额；(4) 降级链保证模型挂了走规则或缓存。监控 cost_per_query、cache_hit_rate、model_distribution、fallback_rate。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - 怎么判断 query 要用强模型还是弱模型？——规则 + 分类器。规则：字数/关键词（"紧急"/"投诉"用强模型）。分类器：用小模型（或 embedding + 阈值）判断意图复杂度，复杂的走强模型。
+  - 语义缓存怎么避免缓存污染？——key 用 query 的 embedding，相似度 > 0.95 才命中。但要做权限校验（A 用户的私有数据回答不能给 B）。缓存 TTL 短（1 小时），避免过期信息。
+  - token 预算超了怎么办？——分档：超额 10% 告警，超额 20% 降级到弱模型，超额 50% 拒绝服务。预算按业务价值分配（付费用户 > 免费用户）。
+  - 降级到规则引擎体验差怎么办？——降级不是常态，是兜底。平时优化模型可用性（多供应商：OpenAI + Claude + 自建），降级只在极端故障时触发。监控 fallback_rate < 1%。
+  - 怎么量化单个 query 的成本？——记录每次调用的 input_tokens + output_tokens，按模型单价算 cost。cost_per_query = 总成本 / 总 query 数。按用户/租户/场景维度聚合。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 模型路由：简单→cheap 模型，复杂→expensive 模型，省 60%+ 成本
+  - 语义缓存：embedding 相似度 > 0.95 命中，省重复调用
+  - token 预算：租户/用户级日预算，超额降级或拒绝
+  - 限流：QPS + token/min 双限，防单用户烧钱
+  - 降级链：LLM → 规则 → 缓存 → 兜底文案，业务不断
 ---
 
-# 【Java 后端架构师】AI 应用的成本预算、限流与降级？
+# 【Java 后端架构师】AI 应用的成本预算、限流与降级
 
-> 适用场景：AI Agent/Infra。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。智能客服上线后日均百万次 LLM 调用，月成本 200 万。发现有 1% 的用户贡献了 30% 的调用量（疑似刷接口），有 40% 的 query 是重复问题（"怎么退货"问了 10 万次）。架构师要从成本、限流、降级三个维度把 AI 应用做成可持续的服务。
 
-## 一、先明确问题边界
+## 一、概念层：AI 应用的四道成本闸
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+| 闸门 | 作用 | 杠杆 | 效果 |
+|------|------|------|------|
+| **模型路由** | 按复杂度选模型 | 简单用 GPT-3.5，复杂用 GPT-4 | 省 60%+ 成本 |
+| **语义缓存** | 复用相似 query 回答 | embedding 相似度 > 0.95 命中 | 命中率 30-50% |
+| **token 预算** | 按租户/用户限额 | 日预算超额降级 | 防成本失控 |
+| **降级链** | 模型挂了业务不停 | LLM → 规则 → 缓存 → 兜底 | 保可用性 |
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+## 二、机制层：模型路由
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 AI成本 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+```java
+@Service
+public class ModelRouter {
 
-## 二、推荐架构思路
+    private final ChatClient strongModel;    // GPT-4 / Claude-3-Opus
+    private final ChatClient weakModel;      // GPT-3.5 / Claude-3-Haiku
+    private final IntentClassifier classifier;
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+    /**
+     * 按 query 复杂度路由到不同模型
+     */
+    public ChatClient route(String query, UserContext user) {
+        // VIP 用户强制走强模型
+        if (user.isVip()) {
+            metrics.counter("model.route", "model", "strong", "reason", "vip").increment();
+            return strongModel;
+        }
 
-## 三、技术落地点
+        // 分类器判断复杂度
+        IntentType intent = classifier.classify(query);
+        switch (intent) {
+            case SIMPLE_FAQ:                       // 简单 FAQ
+            case ORDER_QUERY:                      // 订单查询
+            case CHITCHAT:                         // 闲聊
+                metrics.counter("model.route", "model", "weak").increment();
+                return weakModel;                  // 70% query 走弱模型
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+            case COMPLAINT:                        // 投诉（需同理心）
+            case REFUND_DISPUTE:                   // 退款争议（需推理）
+            case MULTI_INTENT:                     // 多意图
+                metrics.counter("model.route", "model", "strong").increment();
+                return strongModel;
 
-## 四、常见坑
+            default:
+                return weakModel;                  // 默认弱模型省成本
+        }
+    }
+}
+```
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+## 三、机制层：语义缓存
 
-## 五、面试回答模板
+```java
+@Service
+public class SemanticCache {
 
-可以按下面结构作答：
+    private final MilvusClient vectorStore;
+    private final RedisTemplate<String, String> redis;
+    private final EmbeddingModel embeddingModel;
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“AI 应用的成本预算、限流与降级”，核心是 AI成本 与 限流 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+    private static final double SIMILARITY_THRESHOLD = 0.95;
 
-## 六、加分点
+    /**
+     * 先查语义缓存，命中直接返回（不调 LLM）
+     */
+    public Optional<String> get(String query, UserContext user) {
+        // 1. 精确匹配（Redis，高频 query）
+        String exactKey = "cache:exact:" + user.getTenantId() + ":" + hash(query);
+        String exact = redis.opsForValue().get(exactKey);
+        if (exact != null) {
+            metrics.counter("cache.hit", "type", "exact").increment();
+            return Optional.of(exact);
+        }
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+        // 2. 语义匹配（向量检索，找相似 query）
+        float[] queryVec = embeddingModel.embed(query);
+        List<CacheEntry> candidates = vectorStore.search(
+            SearchParam.builder()
+                .collectionName("query_cache")
+                .vector(queryVec).topK(1)
+                .expr("tenant_id == '" + user.getTenantId() + "'")  // 租户隔离
+                .build());
 
-## 七、企业级面试定位：从“会用”到“能负责”
+        if (!candidates.isEmpty() && candidates.get(0).getScore() > SIMILARITY_THRESHOLD) {
+            metrics.counter("cache.hit", "type", "semantic").increment();
+            // 刷新 TTL
+            redis.opsForValue().set(exactKey, candidates.get(0).getAnswer(),
+                Duration.ofHours(1));
+            return Optional.of(candidates.get(0).getAnswer());
+        }
 
-企业级面试不会只问“AI成本 是什么”，而是看你能不能对一条真实生产链路负责。回答“AI 应用的成本预算、限流与降级”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+        metrics.counter("cache.miss").increment();
+        return Optional.empty();
+    }
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 AI Agent/Infra 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 AI成本、限流、降级 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 model_latency_p95、model_error_rate、cost_per_request、fallback_rate 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+    /**
+     * 写缓存：LLM 回答后存入
+     */
+    public void put(String query, String answer, UserContext user) {
+        // 只缓存高质量回答（用户没点踩）
+        float[] vec = embeddingModel.embed(query);
+        vectorStore.upsert("query_cache", new CacheEntry(query, answer, vec, user.getTenantId()));
+        redis.opsForValue().set(
+            "cache:exact:" + user.getTenantId() + ":" + hash(query),
+            answer, Duration.ofHours(1));
+    }
+}
+```
 
-### 企业级回答骨架
+## 四、机制层：token 预算与限流
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 AI成本 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+### 4.1 多维限流（QPS + token/min）
 
-### 面试中要主动补的生产细节
+```java
+@Service
+public class AiRateLimiter {
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+    private final RedisTemplate<String, String> redis;
 
-## 八、苏格拉底式面试追问
+    private static final int USER_QPS = 5;              // 单用户每秒 5 次
+    private static final int USER_TOKEN_PER_MIN = 5000; // 单用户每分钟 5000 token
+    private static final int TENANT_QPS = 500;          // 单租户每秒 500 次
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+    /**
+     * 双限流：QPS 防高频调用，token/min 防超长 prompt
+     */
+    public void checkLimit(String userId, String tenantId, int estimatedTokens) {
+        // 1. QPS 限流（滑动窗口）
+        String qpsKey = "rate:qps:" + userId;
+        Long count = redis.opsForValue().increment(qpsKey);
+        if (count == 1) redis.expire(qpsKey, Duration.ofSeconds(1));
+        if (count > USER_QPS) {
+            throw new RateLimitException("请求过于频繁，请稍后再试");
+        }
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“AI 应用的成本预算、限流与降级”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 model_latency_p95、model_error_rate、cost_per_request、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 AI成本 负责的范围，以及必须依赖 限流、降级 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 模型延迟拖垮主链路，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+        // 2. token/min 限流（防超长 prompt 烧钱）
+        String tokenKey = "rate:token:" + userId;
+        Long tokenUsed = redis.opsForValue().increment(tokenKey, estimatedTokens);
+        if (tokenUsed == estimatedTokens) redis.expire(tokenKey, Duration.ofMinutes(1));
+        if (tokenUsed > USER_TOKEN_PER_MIN) {
+            throw new TokenBudgetException("Token 预算超限");
+        }
 
-### 现场对话示例
+        // 3. 租户级限流
+        String tenantKey = "rate:tenant:" + tenantId;
+        Long tenantCount = redis.opsForValue().increment(tenantKey);
+        if (tenantCount == 1) redis.expire(tenantKey, Duration.ofSeconds(1));
+        if (tenantCount > TENANT_QPS) {
+            throw new RateLimitException("租户流量超限");
+        }
+    }
+}
+```
 
-**面试官**：你说要做“AI 应用的成本预算、限流与降级”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 model_latency_p95、model_error_rate、业务失败率和事故记录。
+### 4.2 日预算控制
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 model_latency_p95 没有改善，或者 model_error_rate 反而变差，就停止扩大范围，回到假设层重新复盘。
+```java
+@Service
+public class BudgetGuard {
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 model_latency_p95、model_error_rate、cost_per_request。这样它不是个人经验，而是团队机制。
+    private final RedisTemplate<String, String> redis;
 
-## 九、专项架构深挖：对象、链路、失败模式
+    /**
+     * 租户/用户级日预算
+     * 超额分档降级
+     */
+    public BudgetCheck checkBudget(String userId, String tenantId) {
+        // 查当日已用成本
+        double userUsed = getDailyCost("cost:user:" + today() + ":" + userId);
+        double tenantUsed = getDailyCost("cost:tenant:" + today() + ":" + tenantId);
 
-这一题不要停在“知道 AI成本”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+        double userBudget = getUserBudget(userId);       // 普通用户 $1/天，VIP $10
+        double tenantBudget = getTenantBudget(tenantId);
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 模型网关、推理实例、限流队列、缓存、计费记录；Prompt 模板、模型版本、降级模型；调用日志和质量反馈 |
-| 设计主线 | 模型网关统一鉴权、限流、路由、熔断和成本统计；按任务重要性选择模型和超时预算；降级路径包括小模型、缓存答案和人工处理 |
-| 失败模式 | 模型延迟拖垮主链路；成本不受控；模型版本切换导致质量回退 |
-| 验证指标 | model_latency_p95、model_error_rate、cost_per_request、fallback_rate |
+        if (userUsed > userBudget * 0.5 || tenantUsed > tenantBudget * 0.5) {
+            metrics.counter("budget.warn").increment();
+            // 50% 告警
+        }
+        if (userUsed > userBudget * 0.8) {
+            return BudgetCheck.degradeToWeakModel();     // 80% 降级弱模型
+        }
+        if (userUsed > userBudget) {
+            return BudgetCheck.reject("今日额度已用完"); // 100% 拒绝
+        }
+        return BudgetCheck.ok();
+    }
 
-**架构拆解**：
+    public void recordCost(String userId, String tenantId, double cost) {
+        redis.opsForValue().increment("cost:user:" + today() + ":" + userId, cost);
+        redis.opsForValue().increment("cost:tenant:" + today() + ":" + tenantId, cost);
+    }
+}
+```
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 限流 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 AI 应用的成本预算、限流与降级 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 降级 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+## 五、机制层：降级链
 
-**高分回答细节**：
+```java
+@Service
+@Slf4j
+public class ResilientLlmService {
 
-- 不要只说“可以用 AI成本”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+    private final ChatClient primaryModel;      // GPT-4
+    private final ChatClient fallbackModel;     // GPT-3.5
+    private final RuleEngine ruleEngine;        // 规则引擎
+    private final SemanticCache cache;
+    private final FallbackTextProvider textProvider;
 
-## 十、二轮场景追问与项目表达
+    /**
+     * 降级链：强模型 → 弱模型 → 规则 → 缓存 → 兜底文案
+     */
+    public String chat(String query, UserContext user) {
+        // 0. 先查缓存
+        Optional<String> cached = cache.get(query, user);
+        if (cached.isPresent()) return cached.get();
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+        try {
+            // 1. 主模型（带超时和重试）
+            String answer = primaryModel.prompt()
+                .user(query).timeout(Duration.ofSeconds(10)).call().content();
+            cache.put(query, answer, user);
+            return answer;
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+        } catch (TimeoutException | ModelUnavailableException e) {
+            log.warn("主模型不可用，降级弱模型");
+            metrics.counter("llm.fallback", "to", "weak").increment();
+            try {
+                // 2. 弱模型
+                return fallbackModel.prompt().user(query)
+                    .timeout(Duration.ofSeconds(5)).call().content();
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“AI 应用的成本预算、限流与降级”，重点看 model_latency_p95、model_error_rate、cost_per_request，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+            } catch (Exception e2) {
+                log.warn("弱模型也不可用，降级规则引擎");
+                metrics.counter("llm.fallback", "to", "rule").increment();
+                // 3. 规则引擎（FAQ 匹配）
+                Optional<String> ruleAnswer = ruleEngine.match(query);
+                if (ruleAnswer.isPresent()) return ruleAnswer.get();
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+                // 4. 兜底文案
+                metrics.counter("llm.fallback", "to", "text").increment();
+                return textProvider.getDefault(user.getScenario());
+            }
+        }
+    }
+}
+```
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 AI成本 和 限流 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+## 六、底层本质：AI 成本是"按 token 计费的云服务"
 
-### 追问 3：你如何判断这个方案值得做？
+传统云服务按"实例/时长"计费（固定成本），LLM 按"token 次数"计费（变动成本）。这意味着：
+- 用户越多成本越高（不像传统服务边际成本趋零）
+- 单次 query 的 prompt 越长成本越高（攻击面）
+- 强模型和弱模型价差 10-15 倍（选型直接影响成本）
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 降级 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+**成本治理的第一性原理**：把 token 当作"稀缺资源"管理，按价值分配。高价值场景（付费用户、核心业务）给强模型 + 高预算，低价值场景（免费用户、闲聊）给弱模型 + 低预算 + 缓存。这和云计算早期的"按量计费成本治理"同构，只是单位从"CPU 小时"变成"token 数"。
 
-### STAR 项目表达
+## 七、AI 工程化深挖
 
-- **S（背景）**：原系统在 AI成本 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 AI 应用的成本预算、限流与降级 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 model_latency_p95、model_error_rate 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+1. **怎么评估模型路由的准确性？**
+   建标注集：每个 query 标注"应该用强还是弱模型"。分类器的准确率要 > 90%。监控 misroute_rate（路由错误率），强模型被误分到弱模型会降质量，弱模型被误分到强模型会浪费成本。
 
-### 二轮复盘清单
+2. **语义缓存怎么处理时效性？**
+   缓存要带 TTL（一般 1 小时）和版本（知识库更新后失效）。对时效敏感的 query（"我的订单状态"）不缓存或短 TTL（5 分钟）。缓存命中后可选刷新（异步调 LLM 更新缓存）。
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+3. **怎么做多供应商成本优化？**
+   不同供应商价格不同（OpenAI 贵但好，开源模型便宜但弱）。建"模型市场"——按 query 类型路由到性价比最优的供应商。监控 each_provider_cost 和 quality_score，动态调整路由策略。
 
-## 十一、面试官 5 个企业级追问
+4. **prompt 工程怎么省 token？**
+   system prompt 精简（去掉冗余示例）、用 few-shot 而非 zero-shot（减少输出长度）、要求输出结构化（JSON 比散文短）。监控 avg_input_tokens 和 avg_output_tokens，优化 prompt 能省 20-30%。
 
-1. **你在真实项目里怎么判断“AI 应用的成本预算、限流与降级”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 model_latency_p95、model_error_rate、cost_per_request。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+5. **怎么向 CFO 汇报 AI 成本？**
+   按维度拆解：按场景（客服/搜索/推荐）、按用户（VIP/普通）、按模型（强/弱）。给 ROI = 业务收益 / 成本。例如"客服 LLM 月成本 50 万，替代了 20 个人工客服（月薪 30 万），净省 10 万/月"。
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，AI成本 是否真是瓶颈，限流 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
-
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 模型延迟拖垮主链路。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 model_latency_p95 和 model_error_rate 做分钟级观察，一旦越过阈值立即止损。
-
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 降级，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
-
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“AI 应用的成本预算、限流与降级”，至少要沉淀 模型网关、推理实例、限流队列、缓存、计费记录 的建模规范，以及 model_latency_p95、model_error_rate 的验收标准。
-
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“AI 应用的成本预算、限流与降级”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 AI成本 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“AI 应用的成本预算、限流与降级”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 model_latency_p95、model_error_rate 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 模型延迟拖垮主链路，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 八、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：云上调度经理拿着模型路由、预算表、缓存和降级通道，在处理“不同请求需要不同成本和时延”。
+抓 **"路由、缓存、预算、降级"** 四个词。
 
-- **场景**：先说明“AI 应用的成本预算、限流与降级”服务于什么业务目标，不要上来就堆 AI成本。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 模型延迟拖垮主链路、成本不受控。
-- **验证**：最后落到 model_latency_p95、model_error_rate、cost_per_request，让面试官感觉你真的上线过。
-
-### 拟人化理解
-
-可以把“AI 应用的成本预算、限流与降级”想成一个云上调度经理：AI成本 是他的模型路由、预算表、缓存和降级通道，限流 是他面对的现场信号，降级 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先分级，再路由，最后控成本。这样记，比死背组件名更稳。
+- **路由**：简单 query → cheap 模型，复杂 → expensive，省 60%
+- **缓存**：语义缓存（embedding 相似度 > 0.95），命中率 30-50%
+- **预算**：租户/用户日预算，超额降级或拒绝
+- **降级**：强模型 → 弱模型 → 规则 → 缓存 → 兜底，业务不断
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“AI 应用的成本预算、限流与降级”，我会这样答：我会先把模型调用当成高成本外部依赖治理，重点看延迟、错误率、预算和降级。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 模型延迟拖垮主链路，所以我会提前设计灰度、监控和止损阈值，重点看 model_latency_p95、model_error_rate。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
+> AI 应用成本治理我用四道闸。第一道模型路由——分类器判断 query 复杂度，简单 FAQ/闲聊走弱模型（GPT-3.5），投诉/争议走强模型（GPT-4），VIP 用户强制强模型，省 60%+ 成本。第二道语义缓存——query embedding 后查向量库，相似度 > 0.95 命中历史回答，命中率 30-50%，带租户隔离防泄露，TTL 1 小时防过期。第三道预算控制——用户级日预算（普通 $1、VIP $10），50% 告警、80% 降级弱模型、100% 拒绝。限流双维度：QPS（单用户 5/s）+ token/min（5000），防超长 prompt 和高频攻击。第四道降级链——主模型超时降弱模型，弱模型挂降规则引擎，规则没匹配降兜底文案，保证业务可用。监控 cost_per_query、cache_hit_rate、fallback_rate，成本看板按场景/用户/模型维度拆解。
 
-### 被追问时的转场话术
+## 常见考点
 
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 model_latency_p95 或 model_error_rate 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
-
-### 反问面试官
-
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
-
+1. **模型路由怎么实现？**——规则（关键词/字数）+ 分类器（小模型或 embedding 判断意图复杂度）。VIP 强制强模型。监控 misroute_rate < 10%。
+2. **语义缓存和普通缓存区别？**——普通缓存精确 key 匹配（命中率低），语义缓存用 embedding 相似度匹配（"怎么退货"和"如何退货"命中同一缓存）。但要做权限校验和时效控制。
+3. **token 预算怎么分配？**——按用户价值（VIP > 普通）、按场景（核心业务 > 边缘）。预算动态调整（根据历史用量预测）。超额分档降级。
+4. **降级链怎么设计不伤体验？**——降级是兜底不是常态。监控 fallback_rate < 1%。平时靠多供应商（OpenAI + Claude + 自建）保证主模型可用性，降级只在极端故障触发。

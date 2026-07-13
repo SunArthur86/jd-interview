@@ -2,266 +2,348 @@
 id: java-architect-184
 difficulty: L2
 category: java-architect
-subcategory: 数据隔离
+subcategory: 灰度发布
 tags:
 - Java 架构师
-- 租户灰度
+- 租户
+- 灰度
 - 配置隔离
-- SaaS
+- Feature Flag
 feynman:
-  essence: 租户级灰度发布与配置隔离的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: 租户级灰度发布的核心是"Feature Flag + 租户路由 + 配置隔离"。功能开关（Feature Flag）控制新功能对哪些租户可见。灰度路由按租户 ID 白名单/百分比分流——部分租户走新版本，其余走老版本。配置隔离让每租户有独立配置（如不同租户不同阈值）。
+  analogy: 像商场试营业——新店铺先邀请 VIP 客户体验（白名单灰度），没问题再开放给 10% 顾客（百分比灰度），最后全量开业。每个 VIP 有专属优惠配置（配置隔离）。
+  first_principle: 新功能全量上线风险高（bug 影响所有租户）。灰度发布——小范围先上，验证没问题再扩量。租户级灰度比用户级更适合 SaaS（整租户体验一致，不串户）。配置隔离让租户个性化（不同租户不同规则）。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - Feature Flag：功能开关，控制新功能可见性
+  - 灰度路由：白名单（指定租户）+ 百分比（hash(tenantId) % 100 < ratio）
+  - 配置隔离：每租户独立配置（Apollo/Nacos namespace per tenant）
+  - 灰度策略：白名单 → 5% → 25% → 100%，逐步扩量
+  - 快速回滚：关闭 Feature Flag 秒级回滚（不用重新发版）
 first_principle:
-  problem: 面对“租户级灰度发布与配置隔离”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: SaaS 新功能如何安全上线——小范围验证、整租户体验一致、出问题快速回滚、还要支持租户个性化配置？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 新功能全量上线风险高（bug 影响所有租户，事故级别高）
+  - 租户级灰度比用户级好（整租户体验一致，不串户）
+  - 出问题要快速回滚（重新发版慢，Feature Flag 秒级）
+  - 不同租户可能需要不同配置（个性化）
+  rebuild: Feature Flag（Apollo/Nacos 配置中心）控制功能开关。灰度策略：白名单（指定租户先试）→ 5%（hash(tenantId) % 100 < 5）→ 25% → 100%，逐步扩量。路由层判断当前租户是否命中灰度（查 flag + 租户白名单 + 百分比）。配置隔离——每租户独立 namespace 或配置 key 带 tenantId 前缀。出问题关闭 flag 秒级回滚（老版本代码还在，只是 flag 关闭走老逻辑）。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - Feature Flag 怎么实现？——Apollo/Nacos 配置中心。key=feature.xxx.enabled，value=true/false 或租户白名单。应用监听配置变化实时生效。
+  - 灰度百分比怎么算？——hash(tenantId) % 100 < ratio。hash 要稳定（同一租户要么一直在灰度要么一直不在）。用 MurmurHash。
+  - 配置怎么隔离？——每租户独立 namespace（Apollo）或配置 key 带 tenantId 前缀（config.{tenantId}.threshold）。应用启动时加载本租户配置。
+  - 灰度和 AB 测试区别？——灰度是为安全上线（逐步扩量），AB 测试是为数据决策（分流比较指标）。灰度可复用 AB 测试的分流通用能力。
+  - 出问题怎么回滚？——关闭 Feature Flag（秒级，配置中心推送）。应用监听到 flag 变化走老逻辑。不用重新发版（老代码保留）。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - Feature Flag：Apollo/Nacos，key=feature.xxx.enabled
+  - 灰度路由：白名单 + hash(tenantId) % 100 < ratio
+  - 配置隔离：每租户 namespace 或 config.{tenantId}.xxx
+  - 灰度策略：白名单 → 5% → 25% → 100%
+  - 回滚：关闭 flag 秒级（老代码保留，flag 关走老逻辑）
 ---
 
-# 【Java 后端架构师】租户级灰度发布与配置隔离？
+# 【Java 后端架构师】租户级灰度发布与配置隔离
 
-> 适用场景：高并发高可用。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD SaaS 产品新功能上线（如新版报表/新 API）。不能全量上线（风险高），要小范围租户先验证。架构师要设计的是"Feature Flag + 灰度路由 + 配置隔离"的租户级灰度系统。
 
-## 一、先明确问题边界
+## 一、概念层：灰度发布架构
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+```
+新功能开发完 → Feature Flag 控制（默认关闭）
+                    ↓
+灰度策略：白名单（内部租户）→ 5% → 25% → 100%
+                    ↓
+路由层判断：查 flag + 租户白名单 + hash(tenantId) % 100 < ratio
+                    ↓
+        命中灰度 → 走新逻辑 / 未命中 → 走老逻辑
+                    ↓
+配置隔离：每租户独立配置（namespace 或 key 带前缀）
+                    ↓
+出问题：关闭 flag 秒级回滚（老代码保留）
+```
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+## 二、机制层：Feature Flag 配置
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 租户灰度 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+```java
+/**
+ * Feature Flag 配置（Apollo/Nacos 配置中心）
+ */
+@Configuration
+@RefreshScope
+public class FeatureFlags {
 
-## 二、推荐架构思路
+    // 简单开关
+    @Value("${feature.newReport.enabled:false}")
+    private boolean newReportEnabled;
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+    // 灰度百分比（0-100）
+    @Value("${feature.newReport.rolloutPercent:0}")
+    private int newReportRolloutPercent;
 
-## 三、技术落地点
+    // 白名单租户
+    @Value("${feature.newReport.whitelistTenantIds:}")
+    private String whitelistTenantIds;
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+    // 是否启用配置（true 才判断灰度）
+    public boolean isNewReportEnabledFor(Long tenantId) {
+        if (!newReportEnabled) return false;
 
-## 四、常见坑
+        // 1. 白名单租户直接放行
+        if (isWhitelisted(tenantId)) return true;
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+        // 2. 百分比灰度（hash 稳定）
+        int hash = Math.abs(tenantId.hashCode()) % 100;
+        return hash < newReportRolloutPercent;
+    }
 
-## 五、面试回答模板
+    private boolean isWhitelisted(Long tenantId) {
+        Set<Long> whitelist = parseLongSet(whitelistTenantIds);
+        return whitelist.contains(tenantId);
+    }
+}
+```
 
-可以按下面结构作答：
+Apollo 配置示例：
+```yaml
+# application.yml（Apollo namespace）
+feature:
+  newReport:
+    enabled: true
+    rolloutPercent: 5          # 5% 租户灰度
+    whitelistTenantIds: 1001,1002,1003   # 内部测试租户
+```
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“租户级灰度发布与配置隔离”，核心是 租户灰度 与 配置隔离 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+## 三、机制层：灰度路由
 
-## 六、加分点
+```java
+/**
+ * 灰度路由：判断租户是否命中灰度
+ */
+@Service
+public class GrayRouter {
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+    private final FeatureFlags flags;
 
-## 七、企业级面试定位：从“会用”到“能负责”
+    public boolean isGray(Long tenantId, String featureKey) {
+        // 统一入口：查各 feature 的灰度状态
+        switch (featureKey) {
+            case "newReport":
+                return flags.isNewReportEnabledFor(tenantId);
+            case "newApi":
+                return flags.isNewApiEnabledFor(tenantId);
+            default:
+                return false;
+        }
+    }
+}
 
-企业级面试不会只问“租户灰度 是什么”，而是看你能不能对一条真实生产链路负责。回答“租户级灰度发布与配置隔离”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+/**
+ * 业务层：根据灰度走不同逻辑
+ */
+@Service
+public class ReportService {
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 高并发高可用 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 租户灰度、配置隔离、SaaS 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 tenant_context_miss、authz_deny_count、cross_tenant_alarm、audit_log_coverage 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+    private final GrayRouter grayRouter;
+    private final OldReportService oldService;
+    private final NewReportService newService;
 
-### 企业级回答骨架
+    public Report generate(Long tenantId, ReportRequest req) {
+        if (grayRouter.isGray(tenantId, "newReport")) {
+            // 命中灰度：走新逻辑
+            return newService.generate(tenantId, req);
+        } else {
+            // 未命中：走老逻辑
+            return oldService.generate(tenantId, req);
+        }
+    }
+}
+```
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 租户灰度 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+## 四、机制层：网关层灰度（路由到不同服务）
 
-### 面试中要主动补的生产细节
+```java
+/**
+ * 网关层灰度：租户命中灰度路由到新版本服务
+ */
+@Component
+public class GrayGatewayFilter implements GlobalFilter {
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+    private final GrayRouter grayRouter;
 
-## 八、苏格拉底式面试追问
+    @Override
+    public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
+        Long tenantId = extractTenantId(exchange.getRequest());
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+        if (grayRouter.isGray(tenantId, "newReport")) {
+            // 命中灰度：加 header 路由到新版本服务
+            ServerHttpRequest req = exchange.getRequest().mutate()
+                .header("X-Gray-Version", "v2")
+                .build();
+            return chain.filter(exchange.mutate().request(req).build());
+        }
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“租户级灰度发布与配置隔离”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 tenant_context_miss、authz_deny_count、cross_tenant_alarm、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 租户灰度 负责的范围，以及必须依赖 配置隔离、SaaS 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 缓存 Key 缺少租户维度造成串数据，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+        return chain.filter(exchange);
+    }
+}
+```
 
-### 现场对话示例
+```yaml
+# 网关路由配置（按 header 路由到不同服务）
+spring:
+  cloud:
+    gateway:
+      routes:
+        - id: report-service-v1
+          uri: lb://report-service-v1
+          predicates:
+            - Path=/api/report/**
+            - Header=!X-Gray-Version, v2    # 没有 v2 header 走老版本
+        - id: report-service-v2
+          uri: lb://report-service-v2
+          predicates:
+            - Path=/api/report/**
+            - Header=X-Gray-Version, v2     # 有 v2 header 走新版本
+```
 
-**面试官**：你说要做“租户级灰度发布与配置隔离”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 tenant_context_miss、authz_deny_count、业务失败率和事故记录。
+## 五、机制层：配置隔离（每租户独立配置）
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 tenant_context_miss 没有改善，或者 authz_deny_count 反而变差，就停止扩大范围，回到假设层重新复盘。
+```java
+/**
+ * 配置隔离：每租户独立配置
+ * 方案1：Apollo namespace per tenant（重）
+ * 方案2：配置 key 带 tenantId 前缀（轻）
+ */
+@Service
+public class TenantConfigService {
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 tenant_context_miss、authz_deny_count、cross_tenant_alarm。这样它不是个人经验，而是团队机制。
+    private final ConfigService apolloConfig;
 
-## 九、专项架构深挖：对象、链路、失败模式
+    /**
+     * 获取租户配置：先查租户级配置，没有则用默认
+     */
+    public String getConfig(Long tenantId, String configKey) {
+        // 1. 查租户级配置（config.{tenantId}.threshold）
+        String tenantKey = "config." + tenantId + "." + configKey;
+        String value = apolloConfig.getProperty(tenantKey, null);
 
-这一题不要停在“知道 租户灰度”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+        if (value != null) return value;
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 租户、账号、角色、资源、数据范围；tenant_id、数据权限表达式、行列级权限；审计日志、越权拦截和脱敏策略 |
-| 设计主线 | 租户上下文从网关透传到应用、缓存和数据库；强隔离优先独立库表，弱隔离用租户字段和权限过滤；权限校验前置到查询构造和领域服务边界 |
-| 失败模式 | 缓存 Key 缺少租户维度造成串数据；后台任务绕过权限过滤；SQL 拼接遗漏 tenant_id 导致越权查询 |
-| 验证指标 | tenant_context_miss、authz_deny_count、cross_tenant_alarm、audit_log_coverage |
+        // 2. 没有租户级配置，用默认值
+        return apolloConfig.getProperty("config.default." + configKey,
+            getDefault(configKey));
+    }
 
-**架构拆解**：
+    /**
+     * 示例：不同租户不同订单超时时间
+     * 租户 1001：config.1001.orderTimeout = 7200（2 小时）
+     * 租户 1002：config.1002.orderTimeout = 1800（30 分钟）
+     * 默认：config.default.orderTimeout = 3600（1 小时）
+     */
+    public int getOrderTimeout(Long tenantId) {
+        return Integer.parseInt(getConfig(tenantId, "orderTimeout"));
+    }
+}
+```
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 配置隔离 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 租户级灰度发布与配置隔离 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 SaaS 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+## 六、机制层：灰度扩量流程
 
-**高分回答细节**：
+```java
+/**
+ * 灰度扩量：白名单 → 5% → 25% → 100%
+ */
+@Service
+@Slf4j
+public class RolloutService {
 
-- 不要只说“可以用 租户灰度”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+    private final ApolloClient apolloClient;
 
-## 十、二轮场景追问与项目表达
+    /**
+     * 扩量灰度百分比
+     */
+    public void expand(String featureKey, int newPercent) {
+        log.info("灰度扩量: feature={} percent={}",
+            featureKey, newPercent);
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+        // 更新 Apollo 配置
+        apolloClient.setProperty("feature." + featureKey
+            + ".rolloutPercent", String.valueOf(newPercent));
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+        // 监控灰度租户的错误率
+        scheduleRolloutMonitor(featureKey, newPercent);
+    }
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“租户级灰度发布与配置隔离”，重点看 tenant_context_miss、authz_deny_count、cross_tenant_alarm，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+    /**
+     * 监控：错误率超阈值自动回滚
+     */
+    @Scheduled(fixedDelay = 60_000)
+    public void monitor() {
+        for (String feature : getRollingFeatures()) {
+            double errorRate = getErrorRate(feature);
+            if (errorRate > 0.05) {        // 错误率 > 5% 自动回滚
+                log.error("灰度错误率超阈值，自动回滚: feature={} rate={}",
+                    feature, errorRate);
+                rollback(feature);
+            }
+        }
+    }
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+    public void rollback(String featureKey) {
+        apolloClient.setProperty("feature." + featureKey
+            + ".rolloutPercent", "0");
+        apolloClient.setProperty("feature." + featureKey
+            + ".enabled", "false");
+        metrics.counter("rollout.rollback", "feature", featureKey)
+            .increment();
+    }
+}
+```
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 租户灰度 和 配置隔离 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+## 七、底层本质：灰度与配置隔离的本质
 
-### 追问 3：你如何判断这个方案值得做？
+**Feature Flag 的本质**：解耦"代码部署"和"功能上线"。代码部署到生产环境（多次发布），但功能是否对用户可见由 flag 控制。这是**开闭原则**在运维层面的体现——代码部署是"开"（新增），flag 控制是"闭"（关闭）。好处：1) 出问题秒级回滚（关 flag，不用重新发版）；2) 新功能开发完先部署不开（等业务时机）。
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 SaaS 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+**灰度路由的本质**：按租户 ID 的稳定 hash 分流。hash 要稳定（同一租户要么一直在灰度要么一直不在，不能时在时不在导致体验混乱）。MurmurHash 比 hashCode 分布更均匀。白名单（指定租户先试）+ 百分比（hash % 100 < ratio）是经典灰度策略。
 
-### STAR 项目表达
+**配置隔离的本质**：每租户独立配置。两种方案——namespace per tenant（Apollo 原生支持，但 namespace 多管理重）或 key 带 tenantId 前缀（config.{tenantId}.xxx，轻量但 key 散乱）。通常用后者 + 默认值兜底（查租户级，没有用默认）。
 
-- **S（背景）**：原系统在 租户灰度 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 租户级灰度发布与配置隔离 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 tenant_context_miss、authz_deny_count 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+**灰度 vs AB 测试的区别**：
+- **灰度**：为安全上线。逐步扩量（5% → 25% → 100%），发现问题回滚。目标是风险控制。
+- **AB 测试**：为数据决策。固定分流（50% A vs 50% B），比较指标（CTR/转化率）。目标是验证假设。
 
-### 二轮复盘清单
+技术上都用分流通用能力（hash 路由），但目的不同。灰度出错要回滚，AB 测试不能随意回滚（破坏实验有效性）。
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+**回滚的本质**：关 flag 秒级生效（配置中心推送）。老版本代码保留（只是 flag 关闭走老逻辑），不用重新发版。这是 Feature Flag 相比蓝绿部署/金丝雀部署的优势——回滚成本最低。
 
-## 十一、面试官 5 个企业级追问
+## 八、AI 工程化深挖
 
-1. **你在真实项目里怎么判断“租户级灰度发布与配置隔离”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 tenant_context_miss、authz_deny_count、cross_tenant_alarm。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+1. **怎么用 AI 决定灰度扩量？** 分析灰度租户的错误率/性能/业务指标，AI 判断"是否可以扩量"或"需要回滚"。比人工判断更客观及时。
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，租户灰度 是否真是瓶颈，配置隔离 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+2. **怎么用 AI 预测灰度风险？** 新功能上线前，AI 根据代码变更（diff）/依赖/历史 bug 预测风险等级。高风险的灰度更保守（1% 起步）。
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 缓存 Key 缺少租户维度造成串数据。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 tenant_context_miss 和 authz_deny_count 做分钟级观察，一旦越过阈值立即止损。
+3. **怎么用 LLM 生成灰度报告？** 灰度期间 LLM 总结"本次灰度覆盖 100 租户，错误率 0.5%（低于阈值），响应时间 +10ms，建议扩量"。自动化决策。
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 SaaS，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+4. **怎么用 AI 智能配置推荐？** 分析租户历史用量/业务模式，AI 推荐最佳配置（"您是电商租户，建议订单超时 30 分钟"）。降低配置门槛。
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“租户级灰度发布与配置隔离”，至少要沉淀 租户、账号、角色、资源、数据范围 的建模规范，以及 tenant_context_miss、authz_deny_count 的验收标准。
+5. **怎么用 AI 检测配置异常？** 某租户配置偏离正常范围（如超时设 999 秒），AI 检测告警。防配置错误。
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“租户级灰度发布与配置隔离”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 租户灰度 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“租户级灰度发布与配置隔离”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 tenant_context_miss、authz_deny_count 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 缓存 Key 缺少租户维度造成串数据，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 九、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：经验丰富的值班负责人拿着工具箱、调度台和应急预案，在处理“业务流量和系统风险同时出现”。
+抓 **"Flag、灰度、隔离、回滚"** 四个词。
 
-- **场景**：先说明“租户级灰度发布与配置隔离”服务于什么业务目标，不要上来就堆 租户灰度。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 缓存 Key 缺少租户维度造成串数据、后台任务绕过权限过滤。
-- **验证**：最后落到 tenant_context_miss、authz_deny_count、cross_tenant_alarm，让面试官感觉你真的上线过。
-
-### 拟人化理解
-
-可以把“租户级灰度发布与配置隔离”想成一个经验丰富的值班负责人：租户灰度 是他的工具箱、调度台和应急预案，配置隔离 是他面对的现场信号，SaaS 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看指标，再控风险，最后谈优化。这样记，比死背组件名更稳。
+- **Flag**：Feature Flag（Apollo），控制功能可见性，解耦部署和上线
+- **灰度**：白名单 + hash(tenantId) % 100 < ratio，逐步扩量
+- **隔离**：config.{tenantId}.xxx（租户级）+ config.default.xxx（默认兜底）
+- **回滚**：关 flag 秒级（老代码保留），不用重新发版
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“租户级灰度发布与配置隔离”，我会这样答：我会先确认业务目标、规模、SLA 和一致性要求，再选择合适的架构手段。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 缓存 Key 缺少租户维度造成串数据，所以我会提前设计灰度、监控和止损阈值，重点看 tenant_context_miss、authz_deny_count。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
+> 租户级灰度我用 Feature Flag + 灰度路由 + 配置隔离。Feature Flag（Apollo 配置中心）控制功能可见性——key=feature.newReport.enabled + rolloutPercent + whitelistTenantIds，应用 @RefreshScope 监听配置变化实时生效。这解耦了"代码部署"和"功能上线"——代码部署到生产但 flag 关着功能不可见，出问题关 flag 秒级回滚（老代码保留走老逻辑，不用重新发版）。灰度路由——判断租户是否命中灰度：白名单（指定内部租户先试）+ 百分比（hash(tenantId) % 100 < ratio，MurmurHash 稳定，同一租户要么一直在灰度要么一直不在）。业务层 if-else 分流（命中走 NewReportService，未命中走 OldReportService），或网关层加 X-Gray-Version header 路由到不同版本服务。灰度策略：白名单 → 5% → 25% → 100% 逐步扩量，每步监控错误率，超 5% 自动回滚（关 flag）。配置隔离——key 带 tenantId 前缀（config.{tenantId}.orderTimeout），查租户级配置没有则用默认（config.default.orderTimeout），让不同租户不同个性化配置。灰度 vs AB 测试——灰度为安全上线（逐步扩量风险控制），AB 测试为数据决策（固定分流比较指标）。技术都用 hash 分流通用能力，目的不同。监控 rollout_error_rate、gray_tenant_count、rollback_count。
 
-### 被追问时的转场话术
+## 十、常见考点
 
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 tenant_context_miss 或 authz_deny_count 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
-
-### 反问面试官
-
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
-
+1. **Feature Flag 是什么？**——配置中心控制功能开关（enabled + rolloutPercent + whitelist）。解耦部署和上线，出问题关 flag 秒级回滚（不用重新发版，老代码保留）。
+2. **灰度怎么分流？**——白名单（指定租户先试）+ 百分比（hash(tenantId) % 100 < ratio）。hash 要稳定（MurmurHash），同一租户要么在要么不在。
+3. **配置怎么隔离？**——key 带 tenantId 前缀（config.{tenantId}.xxx）+ 默认值兜底（config.default.xxx）。查租户级没有用默认。
+4. **灰度怎么扩量？**——白名单 → 5% → 25% → 100%。每步监控错误率，超阈值（5%）自动回滚（关 flag）。
+5. **灰度和 AB 测试区别？**——灰度为安全上线（逐步扩量风险控制），AB 测试为数据决策（固定分流比较指标）。技术都用 hash 分流，目的不同。

@@ -9,259 +9,360 @@ tags:
 - 规则冲突
 - 预算
 feynman:
-  essence: 营销活动系统的规则冲突与预算控制的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: 营销活动系统的核心是"规则优先级仲裁 + 预算账户原子扣减"。多个优惠（满减/优惠券/折扣/赠品）可能同时命中，必须按优先级和互斥规则决定哪些生效。预算是硬约束——每个活动有预算账户，扣减必须原子（防超发），用 Redis CAS 或数据库乐观锁保证。
+  analogy: 像商场的促销结算——你有满 200 减 30 的券、会员 9 折、店庆额外 95 折。收银员按规则算：折扣能不能叠加？先算哪个？活动预算还有没有？算错了商场亏钱或用户投诉。
+  first_principle: 营销规则的本质是"条件 → 动作"（满 200 → 减 30）。难点是规则间的关系：互斥（不能同享）、叠加（可组合）、优先级（先算谁）。预算的本质是"有限资源的并发分配"，原子扣减防超发。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 规则类型：满减、折扣、优惠券、满赠、包邮，各有条件表达式
+  - 优先级仲裁：规则按 priority 排序，高优先级先生效，互斥规则只生效一个
+  - 叠加策略：可叠加（满减+折扣）、互斥（两张券只能用一张）、排他（活动 exclusivity 独占）
+  - 预算账户：每活动一个 budget_account，原子扣减（Redis DECR 或 DB 乐观锁）
+  - 试算与实算：加购时试算（展示优惠），下单时实算（扣预算）
 first_principle:
-  problem: 面对“营销活动系统的规则冲突与预算控制”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 用户下单时同时命中多个营销规则（满减+优惠券+会员折扣），如何按业务规则仲裁出最终优惠金额，且活动预算不超发？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 规则间有互斥/叠加/优先级关系，不能简单全部生效
+  - 活动预算是有限资源，并发扣减必须原子防超发
+  - 试算（展示）和实算（扣减）可能因并发不一致（试算时有预算，下单时没了）
+  - 规则会频繁变更（运营加活动），必须配置化不发版
+  rebuild: 规则引擎（Drools 或自研）声明规则的条件和动作，配置优先级和互斥关系。仲裁器按优先级排序 + 互斥过滤决定生效规则集。预算账户用 Redis 原子扣减（DECR 防超发）+ 失败回退。试算用快照（不扣预算），实算才扣。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - 规则引擎选 Drools 还是自研？——简单满减/折扣自研表达式引擎（QLExpress/Aviatorator）即可；复杂规则（嵌套条件/时间窗/用户分群）用 Drools。JD 实践自研轻量规则引擎 + 配置化。
+  - 互斥规则怎么配置？——规则带 group 和 exclusivity 字段。同 group 互斥（只生效优先级最高的），exclusivity=EXCLUSIVE 表示独占（生效后其他全不生效）。运营在后台配置。
+  - 预算超发怎么防？——Redis DECR 原子扣减，返回值 < 0 说明扣超了，回滚（INCR 回去）并返回"预算不足"。下单时实算扣预算，支付超时释放预算（INCR 回去）。
+  - 试算和实算不一致怎么办？——试算展示"预计优惠 30 元"，下单时预算没了只优惠 20 元。用户体验差。对策：试算时预扣预算（TTL 5 分钟），下单确认扣，超时释放。
+  - 优惠金额计算顺序？——先算满减（基于原价），再算折扣（基于满减后价格），最后算券（抵扣）。顺序影响最终金额，必须在引擎里固化。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 规则引擎：QLExpress/Aviator/Drools，条件→动作，配置化
+  - 优先级仲裁：priority 排序 + group 互斥 + exclusivity 独占
+  - 预算账户：Redis DECR 原子扣减防超发，失败回滚
+  - 试算 vs 实算：试算快照不扣预算，实算才扣
+  - 计算顺序：满减（原价）→ 折扣（满减后）→ 券（抵扣）
 ---
 
-# 【Java 后端架构师】营销活动系统的规则冲突与预算控制？
+# 【Java 后端架构师】营销活动系统的规则冲突与预算控制
 
-> 适用场景：JD 核心技术。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。双 11 大促同时有满减（满 200 减 30）、优惠券（满 300 减 50）、会员折扣（9 折）、店铺红包（10 元）。用户下了 350 元的单，能叠加几个？按什么顺序算？活动预算超了怎么办？架构师要设计的是一套"规则仲裁 + 预算原子控制"的营销引擎。
 
-## 一、先明确问题边界
+## 一、概念层：规则关系模型
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+| 关系 | 含义 | 示例 |
+|------|------|------|
+| **叠加** | 多规则同时生效 | 满减 + 会员折扣 |
+| **互斥** | 同组只生效一个 | 两张满减券只能用一张 |
+| **排他** | 生效后其他全不生效 | 某特价活动独占，其他优惠失效 |
+| **依赖** | A 生效才能用 B | 满减后才能用券 |
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+```
+规则仲裁示例（用户下单 350 元）：
+  规则A: 满 200 减 30    priority=10, group=FULL_REDUCTION, 叠加
+  规则B: 满 300 减 50    priority=20, group=FULL_REDUCTION, 互斥（与A）
+  规则C: 会员 9 折       priority=15, group=DISCOUNT, 叠加
+  规则D: 红包 10 元      priority=5,  group=COUPON, 叠加
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 营销 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+仲裁过程：
+  1. 按 group 分组：FULL_REDUCTION{A,B}, DISCOUNT{C}, COUPON{D}
+  2. 同组互斥取优先级高：FULL_REDUCTION 选 B（priority=20）
+  3. 生效集：{B, C, D}
+  4. 按计算顺序：满减(B)→折扣(C)→券(D)
+     - 满 300 减 50：350 - 50 = 300
+     - 会员 9 折：300 × 0.9 = 270
+     - 红包 10：270 - 10 = 260
+  5. 最终优惠：350 - 260 = 90 元
+```
 
-## 二、推荐架构思路
+## 二、机制层：规则引擎实现
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+### 2.1 规则模型
 
-## 三、技术落地点
+```sql
+CREATE TABLE t_marketing_rule (
+    id BIGINT PRIMARY KEY,
+    rule_name VARCHAR(100),
+    rule_type VARCHAR(20),         -- FULL_REDUCTION/DISCOUNT/COUPON/GIFT
+    condition_expr VARCHAR(500),   -- 条件表达式（QLExpress）："amount >= 200"
+    action_expr VARCHAR(500),      -- 动作表达式："deduct(30)"
+    priority INT,                  -- 优先级（大的先生效）
+    group_id VARCHAR(30),          -- 互斥组（同组只生效一个）
+    exclusivity VARCHAR(10),       -- SHARED(共享) / EXCLUSIVE(排他)
+    budget_account_id BIGINT,      -- 预算账户
+    status VARCHAR(10),            -- ACTIVE / INACTIVE
+    start_time DATETIME,
+    end_time DATETIME,
+    INDEX idx_status_time (status, start_time, end_time)
+);
+```
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+### 2.2 规则仲裁器
 
-## 四、常见坑
+```java
+@Service
+public class RuleArbitrator {
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+    private final RuleRepo ruleRepo;
+    private final QLExpressEngine expressEngine;   // 表达式引擎
 
-## 五、面试回答模板
+    /**
+     * 仲裁：从所有命中规则中选出最终生效集
+     */
+    public List<Rule> arbitrate(MarketingContext ctx) {
+        // 1. 加载所有 ACTIVE 且在有效期内的规则
+        List<Rule> candidates = ruleRepo.findActive(ctx.getUserId(), ctx.getNow());
 
-可以按下面结构作答：
+        // 2. 条件过滤：哪些规则的条件命中
+        List<Rule> matched = candidates.stream()
+            .filter(r -> matchCondition(r, ctx))
+            .collect(toList());
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“营销活动系统的规则冲突与预算控制”，核心是 营销 与 规则冲突 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+        // 3. 按 group 互斥：同 group 取优先级最高
+        Map<String, Rule> byGroup = new HashMap<>();
+        for (Rule r : matched) {
+            if (r.getGroupId() == null) continue;       // 无 group 不互斥
+            Rule existing = byGroup.get(r.getGroupId());
+            if (existing == null || r.getPriority() > existing.getPriority()) {
+                byGroup.put(r.getGroupId(), r);
+            }
+        }
+        // 互斥组里被淘汰的规则移除
+        matched = matched.stream()
+            .filter(r -> r.getGroupId() == null
+                      || byGroup.get(r.getGroupId()) == r)
+            .collect(toList());
 
-## 六、加分点
+        // 4. 排他检查：EXCLUSIVE 规则生效则其他全失效
+        Optional<Rule> exclusive = matched.stream()
+            .filter(r -> r.isExclusive())
+            .max(Comparator.comparing(Rule::getPriority));
+        if (exclusive.isPresent()) {
+            matched = List.of(exclusive.get());
+        }
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+        // 5. 按计算顺序排序（满减→折扣→券）
+        matched.sort(Comparator.comparingInt(Rule::calcOrder));
 
-## 七、企业级面试定位：从“会用”到“能负责”
+        return matched;
+    }
 
-企业级面试不会只问“营销 是什么”，而是看你能不能对一条真实生产链路负责。回答“营销活动系统的规则冲突与预算控制”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+    private boolean matchCondition(Rule rule, MarketingContext ctx) {
+        try {
+            return expressEngine.eval(rule.getConditionExpr(), ctx.getVars());
+        } catch (Exception e) {
+            log.error("规则条件求值失败 rule={}", rule.getId(), e);
+            return false;
+        }
+    }
+}
+```
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 JD 核心技术 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 营销、规则冲突、预算 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 rule_hit_rate、rule_conflict_count、budget_overspend_count、rule_rollback_count 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+### 2.3 优惠计算器
 
-### 企业级回答骨架
+```java
+@Service
+public class DiscountCalculator {
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 营销 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+    /**
+     * 按固定顺序计算优惠
+     */
+    public DiscountResult calculate(MarketingContext ctx, List<Rule> rules) {
+        BigDecimal originalAmount = ctx.getAmount();      // 350
+        BigDecimal currentAmount = originalAmount;
 
-### 面试中要主动补的生产细节
+        List<AppliedDiscount> applied = new ArrayList<>();
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+        for (Rule rule : rules) {
+            BigDecimal before = currentAmount;
+            currentAmount = applyRule(rule, currentAmount, ctx);
 
-## 八、苏格拉底式面试追问
+            applied.add(new AppliedDiscount(
+                rule.getId(), rule.getRuleName(),
+                before.subtract(currentAmount),  // 本规则优惠金额
+                before, currentAmount));
+        }
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+        return DiscountResult.builder()
+            .originalAmount(originalAmount)       // 350
+            .finalAmount(currentAmount)           // 260
+            .totalDiscount(originalAmount.subtract(currentAmount))  // 90
+            .appliedRules(applied)
+            .build();
+    }
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“营销活动系统的规则冲突与预算控制”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 rule_hit_rate、rule_conflict_count、budget_overspend_count、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 营销 负责的范围，以及必须依赖 规则冲突、预算 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 规则冲突导致重复优惠或误杀，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+    private BigDecimal applyRule(Rule rule, BigDecimal amount, MarketingContext ctx) {
+        switch (rule.getRuleType()) {
+            case FULL_REDUCTION:
+                // 满 300 减 50
+                return amount.subtract(rule.getDeductAmount());
+            case DISCOUNT:
+                // 会员 9 折
+                return amount.multiply(rule.getDiscountRate()).setScale(2, HALF_UP);
+            case COUPON:
+                // 红包 10 元
+                BigDecimal after = amount.subtract(rule.getDeductAmount());
+                return after.compareTo(BigDecimal.ZERO) > 0 ? after : BigDecimal.ZERO;
+            default:
+                return amount;
+        }
+    }
+}
+```
 
-### 现场对话示例
+## 三、机制层：预算账户原子扣减
 
-**面试官**：你说要做“营销活动系统的规则冲突与预算控制”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 rule_hit_rate、rule_conflict_count、业务失败率和事故记录。
+```java
+@Service
+@Slf4j
+public class BudgetAccount {
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 rule_hit_rate 没有改善，或者 rule_conflict_count 反而变差，就停止扩大范围，回到假设层重新复盘。
+    private final RedisTemplate<String, String> redis;
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 rule_hit_rate、rule_conflict_count、budget_overspend_count。这样它不是个人经验，而是团队机制。
+    /**
+     * 预算扣减：Redis 原子 DECR 防超发
+     * 返回 false 说明预算不足
+     */
+    public boolean deduct(Long accountId, BigDecimal amount) {
+        String key = "budget:" + accountId;
+        // Lua 脚本保证"检查余额 + 扣减"原子性
+        String luaScript = """
+            local remaining = tonumber(redis.call('GET', KEYS[1]) or '0')
+            local deduct = tonumber(ARGV[1])
+            if remaining >= deduct then
+                redis.call('DECRBY', KEYS[1], deduct)
+                return 1
+            else
+                return 0
+            end
+            """;
+        Long result = redis.execute(new DefaultRedisScript<>(luaScript, Long.class),
+            List.of(key), amount.toPlainString());
 
-## 九、专项架构深挖：对象、链路、失败模式
+        if (result == null || result == 0) {
+            metrics.counter("budget.insufficient", "account", String.valueOf(accountId)).increment();
+            return false;       // 预算不足
+        }
+        return true;
+    }
 
-这一题不要停在“知道 营销”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+    /**
+     * 释放预算（订单取消/超时）
+     */
+    public void release(Long accountId, BigDecimal amount) {
+        String key = "budget:" + accountId;
+        redis.opsForValue().increment(key, amount.doubleValue());
+    }
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 规则、规则集、版本、优先级、冲突关系；灰度发布、命中明细、预算账户；回滚记录和审计日志 |
-| 设计主线 | 规则表达和执行解耦，业务对象先标准化；规则发布要有模拟运行、灰度和回滚；预算、频控、互斥用统一上下文决策 |
-| 失败模式 | 规则冲突导致重复优惠或误杀；规则热更新无审计；预算扣减与规则命中不一致 |
-| 验证指标 | rule_hit_rate、rule_conflict_count、budget_overspend_count、rule_rollback_count |
+    /**
+     * 预扣（试算时占位，TTL 5 分钟）
+     */
+    public boolean preDeduct(Long accountId, BigDecimal amount, Duration ttl) {
+        if (deduct(accountId, amount)) {
+            // 预扣记录，超时自动释放
+            String preKey = "budget:pre:" + accountId + ":" + ThreadLocalRandom.current().nextInt();
+            redis.opsForValue().set(preKey, amount.toPlainString(), ttl);
+            return true;
+        }
+        return false;
+    }
+}
+```
 
-**架构拆解**：
+## 四、机制层：试算与实算
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 规则冲突 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 营销活动系统的规则冲突与预算控制 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 预算 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+```java
+@Service
+public class MarketingService {
 
-**高分回答细节**：
+    /**
+     * 试算：加购/结算页展示优惠（不扣预算）
+     */
+    public DiscountResult trialCalc(MarketingContext ctx) {
+        List<Rule> rules = ruleArbitrator.arbitrate(ctx);
+        return discountCalculator.calculate(ctx, rules);
+    }
 
-- 不要只说“可以用 营销”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+    /**
+     * 实算：下单时扣预算
+     */
+    @Transactional
+    public DiscountResult actualCalc(MarketingContext ctx, String orderId) {
+        List<Rule> rules = ruleArbitrator.arbitrate(ctx);
+        DiscountResult result = discountCalculator.calculate(ctx, rules);
 
-## 十、二轮场景追问与项目表达
+        // 扣预算（幂等：同 orderId 不重复扣）
+        for (Rule rule : rules) {
+            if (rule.getBudgetAccountId() == null) continue;
+            BigDecimal deductAmount = result.getDiscountByRule(rule.getId());
+            String idempotentKey = "budget:used:" + orderId + ":" + rule.getId();
+            if (redis.opsForValue().setIfAbsent(idempotentKey, "1", Duration.ofDays(7))) {
+                if (!budgetAccount.deduct(rule.getBudgetAccountId(), deductAmount)) {
+                    // 预算不足，回滚已扣的
+                    rollbackBudget(rules, result, rule.getId());
+                    throw new BudgetExhaustedException("活动 " + rule.getRuleName() + " 预算不足");
+                }
+            }
+        }
+        return result;
+    }
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+    /**
+     * 订单取消：释放预算
+     */
+    public void onOrderCancelled(String orderId) {
+        List<BudgetUsage> usages = budgetUsageRepo.findByOrderId(orderId);
+        for (BudgetUsage u : usages) {
+            budgetAccount.release(u.getAccountId(), u.getAmount());
+        }
+    }
+}
+```
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+## 五、底层本质：规则仲裁是约束满足问题
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“营销活动系统的规则冲突与预算控制”，重点看 rule_hit_rate、rule_conflict_count、budget_overspend_count，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+营销规则的本质是"带约束的规则匹配"：
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+1. **条件匹配**（哪些规则命中）：`amount >= 200 && user.isVip()`
+2. **互斥约束**（同组取一）：满减券 A 和 B 只能用一张
+3. **优先级约束**（先算谁）：满减基于原价，折扣基于满减后
+4. **预算约束**（够不够扣）：活动预算剩余 >= 优惠金额
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 营销 和 规则冲突 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+**预算超发的根因**：传统数据库 `UPDATE budget SET remaining = remaining - 30 WHERE id = 1 AND remaining >= 30` 虽然原子，但高并发下性能差（行锁）。Redis Lua 脚本（check + decr 原子）性能好但需要和数据库对账兜底（Redis 可能丢数据）。生产实践：Redis 实时扣减 + 定时同步到 DB + T+1 对账。
 
-### 追问 3：你如何判断这个方案值得做？
+**试算和实算 gap 的本质**：试算时不扣预算（只是展示），实算时才扣。并发下多个用户试算时都看到"有预算"，实算时第一个扣成功、后续失败。体验差但正确（宁可实算失败也不能超发）。优化：试算时预扣（TTL 5 分钟），下单确认扣，超时释放。代价是预扣未下单的用户占了预算 5 分钟。
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 预算 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+## 六、AI 工程化深挖
 
-### STAR 项目表达
+1. **用 AI 优化营销规则配置怎么做？**
+   分析历史订单数据，发现"满 200 减 30 + 会员 9 折"组合的转化率最高。AI 推荐规则组合和预算分配给运营。但最终配置由运营确认，AI 只做建议。监控 rule_conversion_rate（规则带来的转化提升）。
 
-- **S（背景）**：原系统在 营销 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 营销活动系统的规则冲突与预算控制 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 rule_hit_rate、rule_conflict_count 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+2. **怎么用 AI 检测薅羊毛？**
+   营销活动常被羊毛党攻击（批量注册账号领券）。AI 分析行为特征（注册时间、下单频率、收货地址聚集度），高风险账号限制领券或要求验证。监控 fraud_account_rate。
 
-### 二轮复盘清单
+3. **LLM 辅助运营创建营销规则怎么做？**
+   运营用自然语言描述"我想做一个满 300 减 50 的活动，限新用户，预算 10 万"。LLM 翻译成规则配置（条件表达式 + 动作 + 预算）。但规则要人工 review 后才生效（防 LLM 配错）。
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+4. **个性化优惠怎么用 AI？**
+   传统规则对所有用户一样。AI 增强：按用户画像（购买力/价格敏感度/复购概率）动态调整优惠力度——高价值用户给更大优惠（优惠券面额更大），低价值用户少给。但要有预算控制防 AI 发太多。
 
-## 十一、面试官 5 个企业级追问
+5. **营销规则怎么 A/B 测试？**
+   实验平台分流：A 组用规则集 v1，B 组用 v2，对比转化率/客单价/ROI。规则版本化，灰度发布。监控每个规则集的业务指标，优胜劣汰。
 
-1. **你在真实项目里怎么判断“营销活动系统的规则冲突与预算控制”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 rule_hit_rate、rule_conflict_count、budget_overspend_count。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
-
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，营销 是否真是瓶颈，规则冲突 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
-
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 规则冲突导致重复优惠或误杀。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 rule_hit_rate 和 rule_conflict_count 做分钟级观察，一旦越过阈值立即止损。
-
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 预算，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
-
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“营销活动系统的规则冲突与预算控制”，至少要沉淀 规则、规则集、版本、优先级、冲突关系 的建模规范，以及 rule_hit_rate、rule_conflict_count 的验收标准。
-
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“营销活动系统的规则冲突与预算控制”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 营销 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“营销活动系统的规则冲突与预算控制”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 rule_hit_rate、rule_conflict_count 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 规则冲突导致重复优惠或误杀，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 七、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：经验丰富的值班负责人拿着工具箱、调度台和应急预案，在处理“业务流量和系统风险同时出现”。
+抓 **"规则仲裁、优先级排序、预算原子、试算实算"** 四个词。
 
-- **场景**：先说明“营销活动系统的规则冲突与预算控制”服务于什么业务目标，不要上来就堆 营销。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 规则冲突导致重复优惠或误杀、规则热更新无审计。
-- **验证**：最后落到 rule_hit_rate、rule_conflict_count、budget_overspend_count，让面试官感觉你真的上线过。
-
-### 拟人化理解
-
-可以把“营销活动系统的规则冲突与预算控制”想成一个经验丰富的值班负责人：营销 是他的工具箱、调度台和应急预案，规则冲突 是他面对的现场信号，预算 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看指标，再控风险，最后谈优化。这样记，比死背组件名更稳。
+- **规则仲裁**：条件匹配 → group 互斥（同组取优先级高）→ exclusivity 排他 → 计算顺序排序
+- **优先级**：满减（基于原价）→ 折扣（满减后）→ 券（抵扣），顺序影响金额
+- **预算原子**：Redis Lua 脚本（check + decr 原子）防超发，幂等键防重复扣
+- **试算实算**：试算展示不扣预算，实算才扣，gap 用预扣（TTL）缓解
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“营销活动系统的规则冲突与预算控制”，我会这样答：我会先确认业务目标、规模、SLA 和一致性要求，再选择合适的架构手段。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 规则冲突导致重复优惠或误杀，所以我会提前设计灰度、监控和止损阈值，重点看 rule_hit_rate、rule_conflict_count。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
+> 营销系统核心是规则仲裁 + 预算控制。规则用 QLExpress 表达式引擎声明条件和动作（"amount>=200 → deduct(30)"），配置化不发版。仲裁四步：条件匹配筛命中规则、同 group 互斥取优先级最高、EXCLUSIVE 排他规则独占、按计算顺序排序（满减基于原价 → 折扣基于满减后 → 券抵扣）。预算控制用 Redis Lua 脚本原子扣减（check remaining >= deduct + DECRBY 在一个脚本里），防高并发超发。幂等键（orderId + ruleId）防重复扣。试算（加购展示）不扣预算，实算（下单）才扣，gap 用预扣（TTL 5 分钟占位）缓解——试算时预扣，下单确认扣，超时释放。订单取消释放预算（INCR 回去）。规则变更运营在后台配置，状态 ACTIVE/INACTIVE 切换，支持时间窗（start_time/end_time）。双 11 大促前做容量压测，预算账户分片（按活动 ID hash 到不同 Redis 实例）防热点。
 
-### 被追问时的转场话术
+## 八、常见考点
 
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 rule_hit_rate 或 rule_conflict_count 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
-
-### 反问面试官
-
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
-
+1. **规则引擎选型？**——简单满减/折扣用 QLExpress/Aviator（轻量表达式引擎）；复杂嵌套条件用 Drools（功能全但重）。JD 自研轻量引擎 + 配置化。
+2. **预算超发怎么防？**——Redis Lua 脚本原子（check + decr），不用数据库行锁（性能差）。Redis 可能丢数据，T+1 和 DB 对账兜底。
+3. **互斥和排他区别？**——互斥是同 group 只生效一个（两张满减券选一张）；排他是生效后其他全不生效（某特价活动独占）。
+4. **试算实算不一致怎么办？**——试算展示"预计优惠"，实算预算没了优惠变小。预扣缓解（试算占位 5 分钟）。极端情况实算失败提示"活动已结束"。

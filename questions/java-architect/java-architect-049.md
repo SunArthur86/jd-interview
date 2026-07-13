@@ -9,259 +9,386 @@ tags:
 - RBAC
 - ABAC
 feynman:
-  essence: 权限模型 RBAC、ABAC 与数据权限的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: RBAC 解决"功能权限"（谁能调什么接口），ABAC 解决"数据权限"（谁能看哪条数据）。RBAC 是"用户-角色-权限"三元组，简单稳定；ABAC 是"属性+策略"动态决策，能表达"销售只能看自己负责区域的订单"。企业级系统两者叠加：RBAC 控制能否访问订单菜单，ABAC 控制访问后能看到哪些订单行。
+  analogy: 像写字楼的门禁系统。RBAC 是门卡——你有主管卡能进 10 楼（功能权限），没卡连电梯都上不了。ABAC 是楼层内的文件柜锁——同样是 10 楼的主管，张三只能开自己部门的柜子（数据权限），不能开李四部门的。门卡（RBAC）决定你能不能进，柜锁（ABAC）决定你进来后能看什么。
+  first_principle: 为什么 RBAC 不够用？因为"功能权限"是粗粒度的（能/不能调订单查询接口），但"数据权限"是细粒度的（同样是订单查询接口，不同人看到不同的订单集合）。如果把数据权限塞进 RBAC，角色会爆炸——每个销售负责的区域不同，就要建 N 个角色。ABAC 用"属性+规则"动态计算，避免角色爆炸。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - RBAC0：User-Role-Permission 三元组；RBAC1 加角色继承；RBAC2 加职责分离（SoD）
+  - ABAC：Subject（主体属性）+ Resource（资源属性）+ Environment（环境属性）+ Policy（策略）
+  - 数据权限三要素：行级（WHERE org_id=?）、列级（字段脱敏）、操作级（能查不能改）
+  - 数据权限落地：SQL 拦截器自动追加 WHERE 条件（MyBatis Interceptor）
+  - 权限缓存：角色权限变化要主动失效，不能用纯 TTL
 first_principle:
-  problem: 面对“权限模型 RBAC、ABAC 与数据权限”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 如何在不角色爆炸的前提下，实现"功能权限 + 细粒度数据权限"的统一管控？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 功能权限是静态的（菜单/按钮/API），适合用角色固化
+  - 数据权限是动态的（每个人看到的数据范围不同），用属性规则计算
+  - 数据权限必须落在 SQL 层（WHERE 条件），不能靠业务代码手动 if-else（容易漏）
+  rebuild: 功能层用 RBAC——User 绑定 Role，Role 绑定 Permission（API/菜单），启动时加载到内存。数据层用 ABAC——定义策略（如"销售只能看自己负责区域的订单"），运行时 MyBatis 拦截器解析策略，自动在 SQL 追加 WHERE org_id = currentUser.orgId。两层独立但叠加：RBAC 决定能否访问接口，ABAC 决定访问后的数据范围。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - 角色爆炸怎么办？——避免把"数据维度"塞进角色。角色只管功能（订单管理员/财务管理员），数据维度（负责区域）用 ABAC 动态算。一个用户一个角色 + N 个数据属性，比 N 个角色简单。
+  - 数据权限的 SQL 注入怎么做？——MyBatis Interceptor 拦截 SQL，解析表名，根据当前用户的属性追加 WHERE 条件。京东用自研的 DataPermissionInterceptor，配合 @DataScope 注解声明数据范围。
+  - 字段级权限怎么实现？——DTO 字段标注 @Sensitive，序列化时根据权限脱敏（手机号显示 138****8888）。用 Jackson 的 JsonSerializer 实现。
+  - 权限缓存怎么失效？——用户角色变化时，发事件主动失效该用户的权限缓存。角色权限变化时，失效所有持有该角色的用户缓存。不能纯靠 TTL，否则权限收回有延迟。
+  - Spring Security 怎么集成 RBAC？——@PreAuthorize("hasRole('ORDER_ADMIN')") 注解做方法级鉴权，自定义 UserDetailsService 加载用户角色。数据权限用自定义 PermissionEvaluator 或拦截器。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - RBAC = 功能权限（User-Role-Permission），ABAC = 数据权限（属性+策略）
+  - 数据权限三维度：行级（WHERE）、列级（脱敏）、操作级（查/改/删）
+  - SQL 拦截器自动追加 WHERE，不靠业务代码 if-else
+  - 权限缓存变更主动失效，不能纯 TTL
+  - 角色爆炸解法：功能用 RBAC，数据维度用 ABAC
 ---
 
-# 【Java 后端架构师】权限模型 RBAC、ABAC 与数据权限？
+# 【Java 后端架构师】权限模型 RBAC、ABAC 与数据权限
 
-> 适用场景：高并发高可用。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。京东商家后台，张三（服饰类目销售）登录后能看到订单菜单，但只能看自己负责的服饰商家订单，看不到电子类目的订单。这是两层权限：RBAC 决定张三能进订单菜单，ABAC 决定他看到哪些订单行。
 
-## 一、先明确问题边界
+## 一、概念层：RBAC 与 ABAC 的分工
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**两层权限矩阵**（面试必画）：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+```
+┌─────────────────────────────────────────────────────────┐
+│  功能权限（RBAC）                                         │
+│  User → Role → Permission                                │
+│  张三 → 销售 → [订单查询, 订单导出, 客户管理]              │
+│  李四 → 财务 → [对账查询, 退款审批, 报表导出]              │
+├─────────────────────────────────────────────────────────┤
+│  数据权限（ABAC）                                         │
+│  Subject: {userId, role, orgId, region}                  │
+│  Resource: {table: order, columns: [amount, phone]}      │
+│  Environment: {time: work_hour, ip: 内网}                │
+│  Policy:                                                  │
+│    - 销售只能看自己区域的订单（行级）                      │
+│    - 销售看不到订单的客户手机号（列级脱敏）                 │
+│    - 非工作时间禁止导出（操作级）                          │
+└─────────────────────────────────────────────────────────┘
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 权限 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+张三调用"订单查询"接口：
+  RBAC 判断：张三有"订单查询"权限？✓ 通过
+  ABAC 判断：自动在 SQL 追加 WHERE region = '服饰'
+  结果：张三只看到服饰类目的订单，且手机号脱敏
+```
 
-## 二、推荐架构思路
+**RBAC 的四个层级**：
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+| 层级 | 名称 | 能力 | 典型场景 |
+|------|------|------|---------|
+| RBAC0 | 基础 | User-Role-Permission 三元组 | 小系统 |
+| RBAC1 | 层级 | 角色继承（销售经理继承销售） | 组织架构 |
+| RBAC2 | 约束 | 职责分离（制单人和审批人不能同一人） | 财务/审计 |
+| RBAC3 | 完整 | RBAC1 + RBAC2 | 大型企业 |
 
-## 三、技术落地点
+## 二、机制层：RBAC 的表结构与代码
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+**RBAC 数据库表设计**（经典五表）：
 
-## 四、常见坑
+```sql
+-- 用户表
+CREATE TABLE sys_user (
+    user_id BIGINT PRIMARY KEY,
+    username VARCHAR(50),
+    org_id BIGINT,           -- 所属组织（数据权限用）
+    region VARCHAR(50)       -- 负责区域（数据权限用）
+);
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+-- 角色表
+CREATE TABLE sys_role (
+    role_id BIGINT PRIMARY KEY,
+    role_code VARCHAR(50),    -- 如 ORDER_ADMIN
+    role_name VARCHAR(50),
+    parent_id BIGINT          -- 父角色（RBAC1 继承）
+);
 
-## 五、面试回答模板
+-- 权限表（功能权限：菜单/按钮/API）
+CREATE TABLE sys_permission (
+    perm_id BIGINT PRIMARY KEY,
+    perm_code VARCHAR(100),   -- 如 order:query
+    perm_type VARCHAR(20),    -- MENU / BUTTON / API
+    resource VARCHAR(100)     -- 资源标识（URL/方法路径）
+);
 
-可以按下面结构作答：
+-- 用户-角色关联
+CREATE TABLE sys_user_role (
+    user_id BIGINT,
+    role_id BIGINT,
+    PRIMARY KEY (user_id, role_id)
+);
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“权限模型 RBAC、ABAC 与数据权限”，核心是 权限 与 RBAC 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+-- 角色-权限关联
+CREATE TABLE sys_role_permission (
+    role_id BIGINT,
+    perm_id BIGINT,
+    PRIMARY KEY (role_id, perm_id)
+);
+```
 
-## 六、加分点
+**RBAC 鉴权代码**（Spring Security）：
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+```java
+@Service
+public class AuthService {
 
-## 七、企业级面试定位：从“会用”到“能负责”
+    @Cacheable(value = "userPerms", key = "#userId")
+    public Set<String> getUserPermissions(Long userId) {
+        // 查询用户的角色（含继承的角色）
+        Set<Long> roleIds = roleRepo.findRoleIdsByUserId(userId);
+        // 递归加载父角色（RBAC1）
+        Set<Long> allRoleIds = loadParentRoles(roleIds);
+        // 查询角色的权限
+        return permRepo.findPermCodesByRoleIds(allRoleIds);
+    }
 
-企业级面试不会只问“权限 是什么”，而是看你能不能对一条真实生产链路负责。回答“权限模型 RBAC、ABAC 与数据权限”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+    public boolean hasPermission(Long userId, String permCode) {
+        return getUserPermissions(userId).contains(permCode);
+    }
+}
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 高并发高可用 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 权限、RBAC、ABAC 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 tenant_context_miss、authz_deny_count、cross_tenant_alarm、audit_log_coverage 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+// Controller 鉴权
+@RestController
+public class OrderController {
 
-### 企业级回答骨架
+    @Autowired private AuthService authService;
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 权限 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+    @GetMapping("/orders")
+    @PreAuthorize("@authService.hasPermission(#userId, 'order:query')")
+    public List<Order> listOrders(@RequestAttribute Long userId) {
+        return orderService.list();
+    }
+}
 
-### 面试中要主动补的生产细节
+// 权限变化时主动失效缓存
+@EventListener
+public void onRoleChanged(RoleChangedEvent event) {
+    // 失效所有持有该角色的用户权限缓存
+    List<Long> userIds = userRoleRepo.findUserIdsByRoleId(event.getRoleId());
+    userIds.forEach(uid -> cacheManager.getCache("userPerms").evict(uid));
+}
+```
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+## 三、机制层：ABAC 数据权限落地
 
-## 八、苏格拉底式面试追问
+**MyBatis 拦截器自动追加 WHERE**（核心机制）：
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+```java
+@Intercepts(@Signature(type = StatementHandler.class,
+    method = "prepare", args = {Connection.class, Integer.class}))
+public class DataPermissionInterceptor implements Interceptor {
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“权限模型 RBAC、ABAC 与数据权限”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 tenant_context_miss、authz_deny_count、cross_tenant_alarm、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 权限 负责的范围，以及必须依赖 RBAC、ABAC 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 缓存 Key 缺少租户维度造成串数据，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+    @Override
+    public Object intercept(Invocation invocation) throws Throwable {
+        // 1. 获取当前登录用户
+        UserContext user = UserContextHolder.get();
+        if (user == null) return invocation.proceed();  // 未登录不过滤
 
-### 现场对话示例
+        // 2. 获取当前 SQL
+        StatementHandler handler = (StatementHandler) invocation.getTarget();
+        BoundSql boundSql = handler.getBoundSql();
+        String sql = boundSql.getSql();
 
-**面试官**：你说要做“权限模型 RBAC、ABAC 与数据权限”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 tenant_context_miss、authz_deny_count、业务失败率和事故记录。
+        // 3. 获取 Mapper 方法上的 @DataScope 注解
+        Method method = getMapperMethod(handler);
+        DataScope scope = method.getAnnotation(DataScope.class);
+        if (scope == null) return invocation.proceed();  // 无注解不过滤
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 tenant_context_miss 没有改善，或者 authz_deny_count 反而变差，就停止扩大范围，回到假设层重新复盘。
+        // 4. 根据注解和数据权限规则，追加 WHERE 条件
+        String dataFilter = buildDataFilter(user, scope);
+        String newSql = injectWhere(sql, dataFilter);
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 tenant_context_miss、authz_deny_count、cross_tenant_alarm。这样它不是个人经验，而是团队机制。
+        // 5. 替换 SQL
+        MetaObject metaObject = SystemMetaObject.forObject(boundSql);
+        metaObject.setValue("sql", newSql);
+        return invocation.proceed();
+    }
 
-## 九、专项架构深挖：对象、链路、失败模式
+    private String buildDataFilter(UserContext user, DataScope scope) {
+        // 策略：销售只能看自己区域的订单
+        if (user.hasRole("SALES")) {
+            return scope.table() + ".region = '" + user.getRegion() + "'";
+        }
+        // 策略：销售经理看自己管理的所有销售区域
+        if (user.hasRole("SALES_MANAGER")) {
+            List<String> regions = manageRegionRepo.findByManagerId(user.getUserId());
+            return scope.table() + ".region IN ('" +
+                String.join("','", regions) + "')";
+        }
+        // 策略：管理员看全部
+        return "1=1";
+    }
+}
 
-这一题不要停在“知道 权限”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+// Mapper 方法标注数据范围
+@Mapper
+public interface OrderMapper {
+    @DataScope(table = "o")   // 表别名 o
+    @Select("SELECT * FROM t_order o WHERE o.status = #{status}")
+    List<Order> findByStatus(@Param("status") String status);
+}
+// 原始 SQL: SELECT * FROM t_order o WHERE o.status = 'PAID'
+// 拦截后:   SELECT * FROM t_order o WHERE o.status = 'PAID' AND o.region = '服饰'
+// 张三（销售-服饰）只能看服饰区域的已支付订单
+```
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 租户、账号、角色、资源、数据范围；tenant_id、数据权限表达式、行列级权限；审计日志、越权拦截和脱敏策略 |
-| 设计主线 | 租户上下文从网关透传到应用、缓存和数据库；强隔离优先独立库表，弱隔离用租户字段和权限过滤；权限校验前置到查询构造和领域服务边界 |
-| 失败模式 | 缓存 Key 缺少租户维度造成串数据；后台任务绕过权限过滤；SQL 拼接遗漏 tenant_id 导致越权查询 |
-| 验证指标 | tenant_context_miss、authz_deny_count、cross_tenant_alarm、audit_log_coverage |
+**列级权限（字段脱敏）**：
 
-**架构拆解**：
+```java
+// 敏感字段标注
+public class OrderVO {
+    private String orderId;
+    private String customerName;
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 RBAC 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 权限模型 RBAC、ABAC 与数据权限 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 ABAC 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+    @Sensitive(type = SensitiveType.PHONE)
+    private String customerPhone;   // 13812345678 → 138****5678
 
-**高分回答细节**：
+    @Sensitive(type = SensitiveType.AMOUNT, permCode = "order:amount:view")
+    private BigDecimal amount;      // 无权限时返回 null
+}
 
-- 不要只说“可以用 权限”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+// Jackson 序列化器，序列化时脱敏
+public class SensitiveSerializer extends JsonSerializer<String>
+        implements ContextualSerializer {
+    private SensitiveType type;
+    private String permCode;
 
-## 十、二轮场景追问与项目表达
+    @Override
+    public void serialize(String value, JsonGenerator gen, SerializerProvider sp) {
+        UserContext user = UserContextHolder.get();
+        if (permCode != null && !authService.hasPermission(user.getUserId(), permCode)) {
+            gen.writeNull();   // 无权限返回 null
+            return;
+        }
+        gen.writeString(desensitize(value, type));   // 脱敏
+    }
+}
+```
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+## 四、实战层：职责分离与权限审计
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+**RBAC2 的职责分离**（SoD, Separation of Duties）：
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“权限模型 RBAC、ABAC 与数据权限”，重点看 tenant_context_miss、authz_deny_count、cross_tenant_alarm，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+```java
+// 制单人和审批人不能是同一人
+public class SoDValidator {
+    public void validate(Long userId, String action, String bizId) {
+        if ("approve".equals(action)) {
+            Long creatorId = bizRepo.findCreatorId(bizId);
+            if (userId.equals(creatorId)) {
+                throw new SoDViolationException("制单人不能审批自己的单据");
+            }
+        }
+    }
+}
+// 防止贪污：张三创建了退款单，不能自己审批通过
+```
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+**权限审计日志**（合规必备）：
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 权限 和 RBAC 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+```java
+@Aspect
+@Component
+public class PermissionAuditAspect {
 
-### 追问 3：你如何判断这个方案值得做？
+    @Autowired private AuditLogRepo auditRepo;
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 ABAC 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+    @AfterReturning("@annotation(auditLog)")
+    public void audit(JoinPoint jp, AuditLog auditLog) {
+        UserContext user = UserContextHolder.get();
+        AuditRecord record = new AuditRecord();
+        record.setUserId(user.getUserId());
+        record.setAction(jp.getSignature().toShortString());
+        record.setResource(auditLog.resource());
+        record.setResult("SUCCESS");
+        record.setIp(user.getIp());
+        record.setTimestamp(Instant.now());
+        auditRepo.save(record);   // 审计日志独立存储，只追加不删除
+    }
+}
 
-### STAR 项目表达
+// 审计日志表
+CREATE TABLE audit_log (
+    id BIGINT PRIMARY KEY,
+    user_id BIGINT,
+    action VARCHAR(100),       -- OrderService.approve
+    resource VARCHAR(100),     -- ORDER:12345
+    result VARCHAR(20),        -- SUCCESS / DENIED
+    ip VARCHAR(50),
+    create_time TIMESTAMP,
+    INDEX idx_user_time (user_id, create_time)   -- 按人查行为
+);
+```
 
-- **S（背景）**：原系统在 权限 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 权限模型 RBAC、ABAC 与数据权限 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 tenant_context_miss、authz_deny_count 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+## 五、底层本质：权限的本质是策略求值
 
-### 二轮复盘清单
+回到第一性：**权限的本质是"给定主体(S)+资源(R)+环境(E)，求值策略(P)返回允许/拒绝"**。
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+- **RBAC 的策略是静态的**：S.role ∈ R.permissions。预编译，查集合，简单高效。
+- **ABAC 的策略是动态的**：P(S.attrs, R.attrs, E.attrs) → bool。每次请求求值，表达力强但有计算成本。
+- **数据权限是 ABAC 的特例**：策略求值结果转换成 SQL 的 WHERE 条件，让数据库做行级过滤。
 
-## 十一、面试官 5 个企业级追问
+**为什么不把数据权限写在业务代码里**？因为人不可靠——开发者忘了加 `if (user.region == order.region)` 就越权了。MyBatis 拦截器在框架层统一处理，开发者只需标注 `@DataScope`，拦截器自动注入条件。这是"把安全下沉到框架层"的实践，类似 Linux 的 SELinux——应用无感知，系统层强制。
 
-1. **你在真实项目里怎么判断“权限模型 RBAC、ABAC 与数据权限”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 tenant_context_miss、authz_deny_count、cross_tenant_alarm。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+## 六、AI 架构师加问：5 个
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，权限 是否真是瓶颈，RBAC 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+1. **用 AI 检测越权漏洞，怎么做？**
+   静态扫描：Mapper 方法是否有 @DataScope 注解（没有的可能漏了数据权限）；动态测试：用不同角色的 token 调同一接口，对比返回数据范围是否符合策略。AI 训练样本：历史越权事故 + 正常权限配置。
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 缓存 Key 缺少租户维度造成串数据。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 tenant_context_miss 和 authz_deny_count 做分钟级观察，一旦越过阈值立即止损。
+2. **AI 辅助生成权限策略，怎么防误授权？**
+   AI 生成的策略必须经过"最小权限"校验——默认拒绝，逐条放行。高危策略（如"允许查看所有用户的手机号"）必须人工审批。AI 不直接落库，输出策略草案，安全管理员 review 后生效。
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 ABAC，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+3. **AI Agent 调用接口，怎么鉴权？**
+   Agent 用 service account（不是真人），绑定专属角色（如 AI_AGENT_ROLE），权限最小化（只能调读接口）。Agent 的每次工具调用继承 service account 的权限，ABAC 同样生效（Agent 只能看它该看的数据）。
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“权限模型 RBAC、ABAC 与数据权限”，至少要沉淀 租户、账号、角色、资源、数据范围 的建模规范，以及 tenant_context_miss、authz_deny_count 的验收标准。
+4. **权限系统接入 RAG，知识库放什么？**
+   角色权限矩阵（谁有什么权限）、数据权限策略文档、历史权限变更工单、越权事故案例。AI 查询"张三能不能查订单"时，RAG 返回角色定义+数据范围策略。
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
+5. **用 AI 做权限异常检测，怎么设计？**
+   监控每个用户的权限使用模式（正常工作时间、正常数据范围、正常调用频率）。偏离基线的行为告警（如凌晨3点批量导出、突然访问其他区域数据）。用孤立森林算法检测异常，输出 risk_score，超阈值冻结账号待人工审核。
 
-1. **如果把“权限模型 RBAC、ABAC 与数据权限”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 权限 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“权限模型 RBAC、ABAC 与数据权限”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 tenant_context_miss、authz_deny_count 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 缓存 Key 缺少租户维度造成串数据，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 七、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：经验丰富的值班负责人拿着工具箱、调度台和应急预案，在处理“业务流量和系统风险同时出现”。
+抓 **"RBAC 管功能、ABAC 管数据、拦截器注 WHERE、缓存变更失效"**。
 
-- **场景**：先说明“权限模型 RBAC、ABAC 与数据权限”服务于什么业务目标，不要上来就堆 权限。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 缓存 Key 缺少租户维度造成串数据、后台任务绕过权限过滤。
-- **验证**：最后落到 tenant_context_miss、authz_deny_count、cross_tenant_alarm，让面试官感觉你真的上线过。
-
-### 拟人化理解
-
-可以把“权限模型 RBAC、ABAC 与数据权限”想成一个经验丰富的值班负责人：权限 是他的工具箱、调度台和应急预案，RBAC 是他面对的现场信号，ABAC 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看指标，再控风险，最后谈优化。这样记，比死背组件名更稳。
+- **RBAC**：User-Role-Permission，功能权限（菜单/按钮/API）
+- **ABAC**：Subject+Resource+Environment+Policy，数据权限
+- **数据权限三维度**：行级（WHERE org_id=?）、列级（脱敏）、操作级（查/改）
+- **SQL 拦截器**：MyBatis Interceptor 自动注 WHERE，@DataScope 注解声明
+- **缓存失效**：角色变化主动失效，不能纯 TTL
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“权限模型 RBAC、ABAC 与数据权限”，我会这样答：我会先确认业务目标、规模、SLA 和一致性要求，再选择合适的架构手段。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 缓存 Key 缺少租户维度造成串数据，所以我会提前设计灰度、监控和止损阈值，重点看 tenant_context_miss、authz_deny_count。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
+> 权限分两层：功能权限用 RBAC，User-Role-Permission 三元组，决定能不能调订单查询接口；数据权限用 ABAC，Subject+Resource+Policy 动态求值，决定调了之后看到哪些订单。数据权限落地在 MyBatis 拦截器——Mapper 方法标注 @DataScope，拦截器自动在 SQL 注入 WHERE region = 用户区域。这样开发者不用手动 if-else，框架层统一兜底。列级权限用 Jackson 序列化器脱敏（@Sensitive 注解，无权限返回 null）。权限缓存不能纯 TTL——用户角色变更要主动失效，否则权限收回有延迟窗口。RBAC2 的职责分离保证制单人不能审批自己的单（防贪污）。角色爆炸的解法：功能用 RBAC 固化角色，数据维度用 ABAC 动态算，避免每个区域建一个角色。
 
-### 被追问时的转场话术
+## 八、苏格拉底式面试追问
 
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 tenant_context_miss 或 authz_deny_count 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么不直接在业务代码里 if-else 判断权限？ | 用越权事故率说话：业务代码判断容易遗漏（开发者忘加），框架层拦截器强制生效。用 unauthorized_access_count（越权访问次数）和 permission_bug_count（权限相关 bug 数）量化，拦截器方案应趋近 0 |
+| 证据追问 | 怎么证明数据权限生效了？ | 自动化测试：用不同角色的 token 调同一接口，断言返回数据范围符合策略；SQL 日志审计：记录拦截器注入的 WHERE 条件，定期扫描是否有遗漏 @DataScope 的 Mapper |
+| 边界追问 | 拦截器能覆盖所有 SQL 吗？ | 不能。原生 JDBC、动态表名、跨库 JOIN 可能绕过拦截器。解法：禁止业务代码原生 JDBC，强制走 MyBatis；跨库查询在应用层做数据范围过滤（先查 ID 再按 ID 查） |
+| 反例追问 | 什么时候 RBAC 够用不需要 ABAC？ | 内部管理系统（无数据范围差异）、个人中心（用户只看自己的数据，user_id 条件硬编码）、功能单一的工具系统。这些场景数据权限简单，RBAC 够用 |
+| 风险追问 | 权限系统最大的风险是什么？ | 主动点出：权限缓存不一致（角色变更后 TTL 内仍用旧权限，要主动失效）、拦截器遗漏（部分 Mapper 没标 @DataScope 导致越权）、超级账号滥用（admin 绕过所有权限，要审计） |
+| 验证追问 | 怎么保证权限变更及时生效？ | 权限变更事件驱动——角色变化时发布事件，监听器失效该角色所有用户的权限缓存，下次请求重新加载。测试：改角色后 1 秒内生效，用 permission_propagation_delay 衡量 |
+| 沉淀追问 | 权限系统沉淀什么？ | 数据权限拦截器框架（@DataScope）、脱敏注解库（@Sensitive）、权限审计大盘（谁访问了什么）、越权检测自动化测试框架、最小权限原则 Code Review checklist |
 
-### 反问面试官
+### 现场对话示例
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+**面试官**：数据权限拦截器怎么知道当前 SQL 查的是哪张表？
 
+**候选人**：两种方式。第一种，注解显式声明——Mapper 方法上加 @DataScope(table = "o")，告诉拦截器要对别名 o 的表追加 WHERE 条件，这是最可靠的方式。第二种，SQL 解析——用 JSqlParser 解析 SQL 的 AST，提取表名和别名，但这种方式对复杂 SQL（子查询、UNION）容易出错，京东内部推荐用注解。拦截器拿到表名后，根据当前用户的属性（region/orgId）和数据权限策略，生成 WHERE 条件，注入到原 SQL。注意要处理原始 SQL 已有 WHERE 和没有 WHERE 两种情况——已有 WHERE 追加 AND，没有 WHERE 加 WHERE。另外 JOIN 场景要小心——如果是 SELECT * FROM order o JOIN customer c，要追加的可能是 o.region 不是 c.region，所以注解里要明确表别名。
+
+**面试官**：用户角色变了，权限缓存怎么失效？
+
+**候选人**：事件驱动失效。用户角色变更时（如管理员把张三从"销售"改成"销售经理"），权限服务发布 RoleChangedEvent，监听器收到事件后，查出所有持有该角色的用户 ID，批量失效他们的权限缓存（userPerms:userId）。下次张三请求时，缓存未命中，重新从 DB 加载新角色的权限。关键是要失效所有相关用户——一个角色可能被 N 个用户持有，改角色影响这 N 个用户。不能用纯 TTL（如 30 分钟自动失效），因为权限收回（撤销敏感权限）必须在秒级生效，TTL 30 分钟意味着张三在 30 分钟内仍有旧权限，这是安全风险。京东的做法是权限变更事件通过 RocketMQ 广播到所有应用实例，各实例本地缓存失效，Redis 缓存删除，确保 1 秒内全网生效。
+
+**面试官**：超级管理员（admin）绕过所有权限，怎么管控？
+
+**候选人**：admin 账号是权限系统的最大风险点——它绕过所有 RBAC/ABAC 检查。管控措施：第一，admin 账号数量最小化（全公司不超过 3 个，且专人专用）。第二，admin 操作全程审计——所有 admin 的操作记录独立存储（audit_log_admin 表），只追加不删除，定期 review。第三，admin 登录多因素认证（密码+动态口令+IP 白名单）。第四，admin 不能直接操作生产数据，必须走"审批工单"流程——admin 提交变更工单，另一个 admin 审批，系统执行。第五，定期轮换 admin 密码（如每 90 天）。京东的做法是 admin 账号由安全管理团队托管，业务团队需要 admin 操作时走工单审批，admin 只在审批通过后临时授权（1 小时有效），过期自动收回。
+
+## 常见考点
+
+1. **RBAC 和 ACL 区别？**——ACL（访问控制列表）是直接给用户分配权限（User-Permission），用户多了难管理；RBAC 加了角色中间层（User-Role-Permission），用户按角色分组，角色变权限变，用户自动继承。
+2. **数据权限怎么做行级过滤？**——MyBatis 拦截器拦截 SQL，根据当前用户属性追加 WHERE 条件。配合 @DataScope 注解声明哪个表需要过滤。不能靠业务代码 if-else（容易遗漏）。
+3. **权限和租户什么关系？**——多租户系统中，租户隔离是第一道权限（A 租户不能看 B 租户数据），权限系统是第二道（同一租户内不同角色看不同数据）。两者叠加。
+4. **OAuth2 的 scope 和 RBAC 的 permission 什么关系？**——scope 是 OAuth2 的授权范围（如 read:order），permission 是应用内的功能权限。scope 控制令牌能访问哪些 API，permission 控制访问后能做什么。两者层级不同。

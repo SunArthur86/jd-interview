@@ -1,6 +1,6 @@
 ---
 id: java-architect-072
-difficulty: L3
+difficulty: L2
 category: java-architect
 subcategory: 网关设计
 tags:
@@ -9,259 +9,397 @@ tags:
 - REST
 - gRPC
 feynman:
-  essence: GraphQL、REST、gRPC 如何选型的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: 三种 API 风格本质是"协议描述能力 vs 传输效率 vs 生态成熟度"的三角取舍。REST 用 HTTP 语义（动词+资源+状态码）换取最大生态和可缓存性；gRPC 用 HTTP/2 + Protobuf 二进制换取低带宽低延迟、强类型契约和双向流；GraphQL 用"客户端声明所需字段"换取"一次往返拿到聚合数据"，代价是服务端解析和 N+1 风险。
+  analogy: REST 像去超市按货架（资源 URL）一件件取货；gRPC 像工厂流水线用标准料箱（Protobuf）高速传送；GraphQL 像点一份定制套餐，告诉后厨"只要这些字段"后厨一次配齐送来。
+  first_principle: API 是消费方和生产方之间的契约。契约的"描述粒度"决定灵活度（GraphQL 字段级 > REST 资源级 > gRPC 方法级），"传输编码"决定效率（Protobuf 二进制 > JSON 文本），"生态广度"决定接入成本（HTTP/REST 最高）。选型本质是回答：调用方是浏览器/移动端/内部服务？数据形态是聚合读还是简单 CRUD？对延迟和带宽有多敏感？
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - REST：HTTP/1.1 + JSON，资源导向，生态最广，可缓存，适合对外 BFF 和开放平台
+  - gRPC：HTTP/2 + Protobuf，强类型 IDL 契约，双向流，适合内部服务间高性能调用
+  - GraphQL：单端点 + 客户端声明字段，聚合查询，适合多端（Web/App/小程序）数据聚合
+  - 三者常共存：对外 REST/GraphQL（BFF 聚合），对内 gRPC（服务间）
+  - gRPC 在网关层做 HTTP→gRPC 协议转换，让前端用 REST 调用，后端用 gRPC 通信
 first_principle:
-  problem: 面对“GraphQL、REST、gRPC 如何选型”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 一个 API 平台要同时服务浏览器、移动 App、内部微服务三类调用方，单一协议无法同时满足"易接入、高性能、灵活聚合"，如何设计协议组合？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 外部调用方要求"易接入、文档友好、跨语言"，内部调用方要求"低延迟、强类型、低带宽"
+  - 数据聚合（一个页面要 N 个资源）用多次 REST 往返效率低
+  - 强类型契约（IDL）能消除客户端/服务端字段拼写错误，降低联调成本
+  rebuild: 分层协议组合——对外暴露 REST/GraphQL 网关（BFF），由 BFF 聚合下游；对内服务间用 gRPC（Protobuf IDL 契约 + HTTP/2 多路复用）。前端多变数据用 GraphQL（按需取字段），简单 CRUD 用 REST。gRPC-Gateway 或 grpc-web 做协议桥接。三种协议都通过同一个网关统一鉴权限流可观测。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - gRPC 为什么比 REST 快？——HTTP/2 多路复用（一个 TCP 多请求）+ Protobuf 二进制（比 JSON 小 30-50%、解析快 5-10 倍）+ 头部压缩 HPACK。但浏览器原生不支持 gRPC，需 grpc-web 或网关转 HTTP
+  - GraphQL 的 N+1 问题怎么解？——一个查询触发 N 个关联查询（如查订单列表再逐个查用户）。解法是 DataLoader：按批次合并查询（收集 N 个 userId 后一次 batch 查 DB）
+  - "REST 怎么做版本兼容？——URI 版本（/v1/）、Header 版本（Accept: application/vnd.api+json;version=1）、或字段级 deprecation。生产用 URI 版本最直观，但 Header 版本更 RESTful"
+  - gRPC 的 .proto 变更怎么保证兼容？——遵循"只加字段不改字段编号、不删字段（用 reserved）、字段类型兼容（int32→int64）"。破坏性变更用新 service 或新包名
+  - GraphQL 怎么限流？——不能按请求次数（一个查询可能查 1 个字段也可能 100 个）。按"查询复杂度"（每个字段算 1 分，嵌套算倍数）限流，超阈值拒绝
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 对外 REST/GraphQL（BFF 聚合），对内 gRPC（高性能服务间调用）
+  - gRPC 三快：HTTP/2 多路复用、Protobuf 二进制、HPACK 头压缩
+  - GraphQL 三坑：N+1（用 DataLoader）、查询复杂度限流、缓存难（POST 单端点）
+  - Protobuf 兼容性：只加字段不改编号、用 reserved 标记删除字段
+  - 浏览器调 gRPC 要 grpc-web 或网关转 HTTP
 ---
 
-# 【Java 后端架构师】GraphQL、REST、gRPC 如何选型？
+# 【Java 后端架构师】GraphQL、REST、gRPC 如何选型
 
-> 适用场景：架构设计。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。商品详情页一个接口要聚合商品、价格、库存、评价、推荐 5 个服务的数据；交易链路服务间调用要求毫秒级延迟；开放平台要给外部商家提供标准化 API。架构师必须能根据调用方、数据形态、性能要求选对协议，并设计协议组合和网关转换。
 
-## 一、先明确问题边界
+## 一、概念层：三种协议的本质差异
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**对比表**（面试必背，逐行能解释）：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+| 维度 | REST | gRPC | GraphQL |
+|------|------|------|---------|
+| **传输** | HTTP/1.1（也可 HTTP/2） | HTTP/2 | HTTP（通常 POST 单端点） |
+| **编码** | JSON（文本） | Protobuf（二进制） | JSON |
+| **契约** | OpenAPI/Swagger（可选） | .proto IDL（强类型，编译期校验） | Schema（强类型） |
+| **调用模型** | 请求-响应 | 一元 + 服务端流 + 客户端流 + 双向流 | 请求-响应（查询/变更）+ 订阅 |
+| **数据粒度** | 服务端定义返回结构 | 服务端定义返回结构 | 客户端声明所需字段（按需取） |
+| **性能** | 中（JSON 解析 + HTTP/1.1 头部） | 高（二进制 + HTTP/2 多路复用） | 中低（解析查询 + 聚合开销） |
+| **缓存** | HTTP 缓存（ETag/Cache-Control）原生支持 | 难（HTTP/2 + POST） | 难（POST 单端点，需 Apollo Cache） |
+| **浏览器** | 原生支持 | 需 grpc-web | 原生支持 |
+| **生态** | 最广（所有语言/框架） | 中（Google 主推） | 中（Apollo/GraphQL Java） |
+| **典型场景** | 对外 API、BFF、开放平台 | 内部服务间、低延迟链路 | 多端数据聚合、灵活查询 |
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 GraphQL 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**选型决策树**：
 
-## 二、推荐架构思路
+```
+调用方是谁？
+├── 外部（浏览器/移动端/第三方）→ REST 或 GraphQL
+│   ├── 数据聚合强（一个页面 N 个资源）→ GraphQL
+│   └── 简单 CRUD、要可缓存 → REST
+└── 内部（服务间调用）→ gRPC
+    ├── 低延迟、高吞吐、强类型 → gRPC
+    └── 需要流式（日志/监控推送）→ gRPC 双向流
+```
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+**JD 风格的协议组合**（真实架构）：
 
-## 三、技术落地点
+```
+浏览器/App/小程序
+      │  REST（/api/v1/product/123）或 GraphQL（/graphql 单端点）
+      ▼
+┌─────────────┐
+│  BFF 网关    │  聚合下游、协议转换、鉴权限流
+└──────┬──────┘
+       │  gRPC（HTTP/2 + Protobuf）
+       ▼
+商品服务 / 价格服务 / 库存服务 / 评价服务 / 推荐服务
+       │  gRPC
+       ▼
+   MySQL / Redis
+```
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+## 二、机制层：gRPC 的性能优势从哪来
 
-## 四、常见坑
+**gRPC 四大性能支柱**（面试官会追问"为什么快"）：
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+```
+1. HTTP/2 多路复用
+   一个 TCP 连接并发 N 个请求（HTTP/1.1 要排队或开多连接）
+   ↓ 减少 TCP 握手和队头阻塞
 
-## 五、面试回答模板
+2. Protobuf 二进制编码
+   字段用编号（tag）而非名字，类型固定长度
+   ↓ 体积比 JSON 小 30-50%，解析快 5-10 倍
 
-可以按下面结构作答：
+3. HPACK 头部压缩
+   静态表 + 动态表，重复头部（如 Content-Type）只传索引
+   ↓ 头部从 KB 降到几十字节
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“GraphQL、REST、gRPC 如何选型”，核心是 GraphQL 与 REST 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+4. 强类型 IDL（.proto）
+   编译期生成客户端/服务端 stub，字段拼写错误编译就报错
+   ↓ 联调成本降低，运行期少反射
+```
 
-## 六、加分点
+**Protobuf vs JSON 编码对比**（真实字节）：
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+```protobuf
+// .proto 定义
+message Product {
+  int64 id = 1;          // 字段编号 1
+  string name = 2;       // 字段编号 2
+  int32 price = 3;       // 字段编号 3
+}
+// 实例：id=123, name="手机", price=9999
+// Protobuf 编码（二进制）：
+//   08 7B 12 06 E6 89 8B E6 9C BA 18 8F 4E
+//   （约 13 字节）
+// JSON 编码（文本）：
+//   {"id":123,"name":"手机","price":9999}
+//   （约 35 字节，字段名占大头）
+```
 
-## 七、企业级面试定位：从“会用”到“能负责”
+**Protobuf 字段兼容性规则**（生产必背）：
 
-企业级面试不会只问“GraphQL 是什么”，而是看你能不能对一条真实生产链路负责。回答“GraphQL、REST、gRPC 如何选型”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+```
+向后兼容（旧客户端能读新服务）：
+  ✓ 新增字段（旧客户端忽略未知字段）
+  ✓ 字段类型扩展（int32 → int64）
+  ✗ 删除字段（改用 reserved 占位，不能复用编号）
+  ✗ 修改字段编号（破坏二进制布局）
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 架构设计 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 GraphQL、REST、gRPC 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 gateway_p99、auth_fail_rate、rate_limited_count、route_error_rate 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+破坏性变更：用新 service 或新包名（package v2）
+```
 
-### 企业级回答骨架
+**gRPC 流式调用四种模式**：
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 GraphQL 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+```java
+// 1. 一元调用（Unary）——最常用，类似 REST
+Product product = stub.getProduct(GetProductRequest.newBuilder().setId(123L).build());
 
-### 面试中要主动补的生产细节
+// 2. 服务端流（Server Streaming）——推送、大结果集分批
+Iterator<Order> orders = stub.streamOrders(request);  // 服务端分批发
+while (orders.hasNext()) { process(orders.next()); }
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+// 3. 客户端流（Client Streaming）——批量上传
+StreamObserver<UploadChunk> requestObserver = stub.uploadChunks(responseObserver);
+requestObserver.onNext(chunk1);
+requestObserver.onNext(chunk2);
+requestObserver.onCompleted();
 
-## 八、苏格拉底式面试追问
+// 4. 双向流（Bidirectional Streaming）——聊天、实时同步
+StreamObserver<ChatMessage> chat = stub.chat(new StreamObserver<>() {
+    @Override public void onNext(ChatMessage msg) { display(msg); }
+    // ...
+});
+chat.onNext(myMessage);
+```
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+## 三、机制层：GraphQL 的按需取字段与 N+1
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“GraphQL、REST、gRPC 如何选型”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 gateway_p99、auth_fail_rate、rate_limited_count、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 GraphQL 负责的范围，以及必须依赖 REST、gRPC 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 网关过度聚合变成业务单体，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+**GraphQL 查询示例**（前端声明所需字段）：
 
-### 现场对话示例
+```graphql
+# 前端只要这些字段，后端必须返回这些字段（不多不少）
+query ProductDetail($id: ID!) {
+  product(id: $id) {
+    id
+    name
+    price
+    inventory {
+      available     # 只取库存可用量，不取仓库地址
+    }
+    reviews(first: 3) {
+      content
+      rating
+      user { name }   # 嵌套查询用户名
+    }
+  }
+}
+```
 
-**面试官**：你说要做“GraphQL、REST、gRPC 如何选型”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 gateway_p99、auth_fail_rate、业务失败率和事故记录。
+**N+1 问题与 DataLoader 解法**（GraphQL 最大坑）：
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 gateway_p99 没有改善，或者 auth_fail_rate 反而变差，就停止扩大范围，回到假设层重新复盘。
+```java
+// 问题：查询 10 个订单，每个订单要查用户名
+// 坏实现：触发 1（订单）+ 10（用户）= 11 次 DB 查询
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 gateway_p99、auth_fail_rate、rate_limited_count。这样它不是个人经验，而是团队机制。
+// 用 DataLoader 批量合并
+@Bean
+public BatchLoader<Long, User> userBatchLoader() {
+    return userIds -> {
+        // 收集所有 userId 后一次 batch 查询
+        return CompletableFuture.supplyAsync(() ->
+            userService.findByIds(userIds));  // 1 次 IN 查询
+    };
+}
 
-## 九、专项架构深挖：对象、链路、失败模式
+// 在 DataFetcher 中使用 DataLoader
+@DataFetcher
+public CompletableFuture<User> user(Order order, DataLoaderRegistry registry) {
+    DataLoader<Long, User> loader = registry.getDataLoader("userLoader");
+    return loader.load(order.getUserId());  // 异步，自动 batch
+}
+// 结果：1（订单）+ 1（用户 batch）= 2 次查询
+```
 
-这一题不要停在“知道 GraphQL”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+**GraphQL 查询复杂度限流**（不能按请求次数限流）：
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 路由、鉴权、签名、限流、灰度标签；BFF/API 聚合、协议转换、统一错误码；审计日志和访问控制 |
-| 设计主线 | 网关负责横切治理，业务语义下沉到服务；鉴权和限流在入口前置，避免无效流量进入核心系统；协议转换要保留 trace 和错误语义 |
-| 失败模式 | 网关过度聚合变成业务单体；鉴权缓存不一致导致越权；统一重试放大下游故障 |
-| 验证指标 | gateway_p99、auth_fail_rate、rate_limited_count、route_error_rate |
+```java
+// 每个字段算复杂度分，超阈值拒绝
+@Component
+public class ComplexityCalculator {
+    public int calculate(Document query) {
+        // 基础字段 1 分，嵌套 ×2，列表 ×first 参数
+        // reviews(first: 3) { user { name } } = 3 × 2 = 6 分
+        int complexity = analyze(query);
+        if (complexity > MAX_COMPLEXITY) {  // 如 1000 分
+            throw new GraphQLException("query too complex: " + complexity);
+        }
+    }
+}
+```
 
-**架构拆解**：
+## 四、实战层：协议组合与网关转换
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 REST 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 GraphQL、REST、gRPC 如何选型 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 gRPC 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+**生产架构：gRPC 内部 + REST 对外**（gRPC-Gateway 方案）：
 
-**高分回答细节**：
+```protobuf
+// product.proto 同时定义 gRPC 和 REST 映射
+syntax = "proto3";
+package product.v1;
 
-- 不要只说“可以用 GraphQL”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+import "google/api/annotations.proto";
 
-## 十、二轮场景追问与项目表达
+service ProductService {
+  rpc GetProduct(GetProductRequest) returns (Product) {
+    option (google.api.http) = {
+      get: "/api/v1/products/{id}"   // REST 路径映射
+    };
+  }
+  rpc CreateProduct(CreateProductRequest) returns (Product) {
+    option (google.api.http) = {
+      post: "/api/v1/products"
+      body: "*"
+    };
+  }
+}
+// protoc 生成 gRPC stub + HTTP handler（gRPC-Gateway）
+// 网关层：前端发 HTTP，Gateway 转 gRPC 调后端
+```
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+**Spring Boot 集成 gRPC**（服务端）：
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+```java
+@GrpcService                    // grpc-spring-boot-starter
+public class ProductGrpcService extends ProductServiceGrpc.ProductServiceImplBase {
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“GraphQL、REST、gRPC 如何选型”，重点看 gateway_p99、auth_fail_rate、rate_limited_count，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+    @Autowired private ProductRepository repo;
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+    @Override
+    public void getProduct(GetProductRequest req, StreamObserver<Product> responseObserver) {
+        Product product = repo.findById(req.getId())
+            .orElseThrow(() -> Status.NOT_FOUND.withDescription("product not found").asRuntimeException());
+        responseObserver.onNext(product);
+        responseObserver.onCompleted();
+    }
+}
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 GraphQL 和 REST 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+// application.yml
+grpc:
+  server:
+    port: 9090
+  client:
+    GLOBAL:
+      negotiation-type: plaintext
+      max-inbound-message-size: 4MB
+```
 
-### 追问 3：你如何判断这个方案值得做？
+**gRPC 客户端调用 + 拦截器**（鉴权、trace、超时）：
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 gRPC 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+```java
+ManagedChannel channel = ManagedChannelBuilder.forAddress("product-svc", 9090)
+    .usePlaintext()
+    .keepAliveTime(30, TimeUnit.SECONDS)
+    .build();
 
-### STAR 项目表达
+ProductServiceGrpc.ProductServiceBlockingStub stub = ProductServiceGrpc.newBlockingStub(channel)
+    .withCallCredentials(JwtCallCredentials.from(token))     // 鉴权拦截器
+    .withDeadlineAfter(500, TimeUnit.MILLISECONDS)           // 超时
+    .withInterceptor(new TraceClientInterceptor());          // trace 注入
 
-- **S（背景）**：原系统在 GraphQL 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 GraphQL、REST、gRPC 如何选型 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 gateway_p99、auth_fail_rate 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+Product product = stub.getProduct(GetProductRequest.newBuilder().setId(123L).build());
+```
 
-### 二轮复盘清单
+**性能实测对比**（同环境，单实例）：
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+```
+接口：查询商品（id, name, price）
+数据量：100 字节
+并发：1000 QPS
 
-## 十一、面试官 5 个企业级追问
+REST (HTTP/1.1 + JSON):
+  平均延迟：8ms，P99：25ms，带宽：120 KB/s
 
-1. **你在真实项目里怎么判断“GraphQL、REST、gRPC 如何选型”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 gateway_p99、auth_fail_rate、rate_limited_count。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+gRPC (HTTP/2 + Protobuf):
+  平均延迟：3ms，P99：10ms，带宽：45 KB/s
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，GraphQL 是否真是瓶颈，REST 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+结论：gRPC 延迟低 60%，带宽省 60%（JD 内部服务间首选）
+```
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 网关过度聚合变成业务单体。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 gateway_p99 和 auth_fail_rate 做分钟级观察，一旦越过阈值立即止损。
+## 五、底层本质：契约描述力 vs 传输效率的权衡
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 gRPC，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+回到第一性：**API 是契约，契约的核心矛盾是"描述灵活度"和"传输效率"**。
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“GraphQL、REST、gRPC 如何选型”，至少要沉淀 路由、鉴权、签名、限流、灰度标签 的建模规范，以及 gateway_p99、auth_fail_rate 的验收标准。
+- **REST 选择 HTTP 语义最大化生态**：用标准动词（GET/POST/PUT/DELETE）和状态码，任何 HTTP 客户端都能调。代价是 JSON 文本编码效率低、HTTP/1.1 队头阻塞、契约弱（OpenAPI 是后补的，编译期不校验）。REST 的本质是"用效率换生态"。
+- **gRPC 选择二进制 + HTTP/2 最大化效率**：Protobuf 字段用编号编码（比 JSON 字段名短），HTTP/2 多路复用（一个 TCP 并发多请求），强类型 IDL 编译期校验。代价是浏览器不支持（需 grpc-web 或网关转换）、调试不直观（抓包看二进制）、生态不如 REST。gRPC 的本质是"用生态换效率"。
+- **GraphQL 选择客户端声明字段最大化灵活度**：前端按需取字段（一个接口拿聚合数据），解决移动端多次往返浪费流量问题。代价是服务端解析查询开销、N+1 问题、缓存难（POST 单端点无法用 HTTP 缓存）。GraphQL 的本质是"把数据组装权交给前端，代价是服务端复杂度上升"。
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
+**为什么内部用 gRPC 而对外用 REST**：内部调用方是可控的服务（语言一致、可强制用 stub、网络稳定），适合用 gRPC 榨干性能。对外调用方是浏览器/第三方（语言多样、网络不可控、要可缓存），必须用 REST/HTTP。BFF 网关做协议转换，让前端调 REST，后端调 gRPC。
 
-1. **如果把“GraphQL、REST、gRPC 如何选型”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 GraphQL 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
+**GraphQL 适合的场景**：多端（Web/App/小程序）数据需求差异大（App 只要核心字段省流量，Web 要全字段）。一个商品详情页 REST 要调 5 个接口，GraphQL 一次查询搞定。代价是后端要建 DataLoader 防 N+1、做复杂度限流防恶意查询。
 
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“GraphQL、REST、gRPC 如何选型”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 gateway_p99、auth_fail_rate 对业务链路的影响。
+## 六、AI 架构师加问：5 个
 
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 网关过度聚合变成业务单体，要能通过 trace、tool_call_id 和业务流水快速回放。
+1. **AI 推理服务对外暴露用哪种协议？**
+   内部推理用 gRPC（Triton/vLLM 原生支持 gRPC，低延迟）；对外用 REST（兼容 OpenAI API 格式）；流式输出用 SSE（Server-Sent Events，HTTP 长连接）或 gRPC 服务端流。LangChain/OpenAI SDK 都基于 REST + SSE。
 
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
+2. **GraphQL 怎么配合 AI Agent 的工具调用？**
+   AI Agent 的工具用 REST 或 gRPC 暴露（强类型 schema 便于 AI 理解参数），GraphQL 不适合工具调用（查询语言太灵活，AI 难以稳定生成）。Function Calling 用 JSON Schema 描述工具参数，与 OpenAPI/Protobuf 可互转。
 
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
+3. **gRPC 的 Protobuf 能不能直接喂给 AI 做契约校验？**
+   能。把 .proto 或生成的 JSON Schema 作为 AI 的上下文，让 AI 检查代码是否符合契约、生成符合契约的调用代码。但 AI 生成 Protobuf 要做编译期校验（protoc），不能只信 AI 输出。
 
-## 十三、记忆口诀与面试现场表达
+4. **让 AI 自动生成 GraphQL 查询，风险在哪？**
+   AI 可能生成超复杂查询（嵌套太深）打爆 DB。必须做查询复杂度分析 + 深度限制 + 字段级权限校验。AI 生成的查询要走和用户查询一样的限流和权限链路。
+
+5. **AI 微服务之间用 gRPC 还是 REST？**
+   推理、embedding、向量检索等高频内部调用用 gRPC（低延迟、Protobuf 传 tensor 高效）；模型管理、配置等低频管理用 REST。大模型流式输出用 gRPC 双向流或 HTTP SSE。
+
+## 七、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：经验丰富的值班负责人拿着工具箱、调度台和应急预案，在处理“业务流量和系统风险同时出现”。
+抓 **"对外 REST/GraphQL，对内 gRPC，三协议同一网关"**。
 
-- **场景**：先说明“GraphQL、REST、gRPC 如何选型”服务于什么业务目标，不要上来就堆 GraphQL。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 网关过度聚合变成业务单体、鉴权缓存不一致导致越权。
-- **验证**：最后落到 gateway_p99、auth_fail_rate、rate_limited_count，让面试官感觉你真的上线过。
+- **REST**：HTTP+JSON，生态最广，对外 BFF、开放平台，可缓存
+- **gRPC**：HTTP/2+Protobuf，内部高性能，强类型契约，四快（多路复用/二进制/HPACK/IDL）
+- **GraphQL**：单端点按需取字段，多端聚合，坑是 N+1（DataLoader 解）+ 复杂度限流
+- **组合**：gRPC-Gateway 做 HTTP→gRPC 转换，前端调 REST，后端调 gRPC
+- **Protobuf 兼容**：只加字段不改编号，删除用 reserved
 
 ### 拟人化理解
 
-可以把“GraphQL、REST、gRPC 如何选型”想成一个经验丰富的值班负责人：GraphQL 是他的工具箱、调度台和应急预案，REST 是他面对的现场信号，gRPC 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看指标，再控风险，最后谈优化。这样记，比死背组件名更稳。
+把 API 协议想成**快递服务**。REST 是普通快递（谁都能寄，包装标准化，但慢且占地方）；gRPC 是工业物流（标准料箱 Protobuf，流水线传送带 HTTP/2，快但只给签约客户）；GraphQL 是按需点餐（你说要什么字段，后厨一次配齐，但后厨要忙不过来时用 DataLoader 批量做）。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“GraphQL、REST、gRPC 如何选型”，我会这样答：我会先确认业务目标、规模、SLA 和一致性要求，再选择合适的架构手段。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 网关过度聚合变成业务单体，所以我会提前设计灰度、监控和止损阈值，重点看 gateway_p99、auth_fail_rate。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 gateway_p99 或 auth_fail_rate 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> 选型核心是看调用方和数据形态。对外（浏览器/移动端/第三方）用 REST 或 GraphQL——REST 适合简单 CRUD 和可缓存场景，GraphQL 适合多端数据聚合（一个页面要 N 个资源，前端按需取字段）。对内服务间用 gRPC——HTTP/2 多路复用 + Protobuf 二进制 + HPACK 头压缩，延迟比 REST 低 60%，还有强类型 IDL 契约编译期校验。生产架构是分层组合：BFF 网关对外暴露 REST/GraphQL，对内用 gRPC 调下游服务，gRPC-Gateway 做协议转换。GraphQL 最大的坑是 N+1 问题，用 DataLoader 批量合并查询解决；还要做查询复杂度限流防恶意查询。Protobuf 变更遵循只加字段不改编号保证向后兼容。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司内部服务间是 REST 还是 gRPC？前端和后端的协议怎么对接（BFF 聚合还是直连）？有没有用 GraphQL？这决定我聊协议转换和聚合层的深度。
 
+## 八、苏格拉底式面试追问
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么不全部用 REST，要引入 gRPC？ | 用延迟和带宽数据说话：内部调用 REST 平均 8ms，gRPC 3ms，P99 差 2.5 倍；带宽省 60%。高 QPS 链路（交易核心调用 50+ 服务）累计延迟差几百毫秒，影响 SLA |
+| 证据追问 | 你怎么证明 gRPC 真的比 REST 快？ | 同等环境压测对比：wrk/ghz 压 REST 和 gRPC，对比 QPS、P99、CPU、带宽。线上灰度：一个服务切 gRPC，对比调用耗时分布（rpc_client_duration_seconds） |
+| 边界追问 | gRPC 能完全替代 REST 吗？ | 不能。浏览器原生不支持（需 grpc-web）、调试不直观（抓包是二进制）、第三方系统对接（开放平台）必须 REST、需要 HTTP 缓存的场景 REST 更合适 |
+| 反例追问 | 什么场景不该用 GraphQL？ | 简单 CRUD（REST 更直观）、强缓存场景（GraphQL POST 无法 HTTP 缓存）、团队无 GraphQL 运维能力（DataFetcher/复杂度治理复杂）、超低延迟（查询解析有开销） |
+| 风险追问 | gRPC 上线最大风险？ | 主动点出：.proto 不兼容变更导致线上调用失败（改了字段编号）、HTTP/2 连接耗尽（keep-alive 配置不当）、浏览器不支持（前端用 grpc-web 但兼容性有限）、gRPC 拦截器漏配导致鉴权失效 |
+| 验证追问 | 协议迁移怎么验证？ | 灰度切流：先影子流量（复制请求到 gRPC 不返回），对比结果 diff；再 1% 灰度看 rpc_error_rate、rpc_p99；全量后看 rpc_throughput 是否提升。指标：grpc_server_handled_total、grpc_server_msg_received_total |
+| 沉淀追问 | 团队协议规范沉淀什么？ | .proto 命名规范（包名 v1/v2、字段命名）、API 设计规范（RESTful 或 RPC 风格）、gRPC 拦截器模板（鉴权/trace/超时/重试）、gRPC-Gateway 配置模板、契约测试（Pact/grpcurl） |
+
+### 现场对话示例
+
+**面试官**：你说 gRPC 比 REST 快，具体快在哪？
+
+**候选人**：三个层面。第一，传输层 gRPC 用 HTTP/2 多路复用，一个 TCP 连接并发多个请求，REST 在 HTTP/1.1 要开多个连接或排队。第二，编码层 Protobuf 是二进制，字段用编号不用名字（JSON 的 "productId":123 在 Protobuf 是 tag+value 几个字节），体积小 30-50%，解析不用字符串匹配快 5-10 倍。第三，头压缩 HPACK，重复的 Content-Type 等头部只传索引。实测同接口 gRPC 延迟低 60%、带宽省 60%。但代价是浏览器不支持、调试要抓包看二进制、生态不如 REST。所以内部用 gRPC，对外用 REST。
+
+**面试官**：GraphQL 的 N+1 怎么彻底解决？
+
+**候选人**：N+1 的根因是 DataFetcher 逐条查询。比如查 10 个订单的用户名，默认触发 1+10 次 DB 查询。解法是 DataLoader——它收集同一 tick 内所有 load 调用，批量合并成一次 IN 查询。`loader.load(userId)` 返回 CompletableFuture，DataFetcher 不阻塞，等 batch 完成后统一返回。关键是 DataLoader 的 dispatchTiming，要在请求结束时触发。还能加缓存（同一 userId 同请求内只查一次）。生产上还要监控 batch_size 分布，太小（接近 1）说明 batch 没生效，太大可能压 DB。
+
+**面试官**：gRPC 的 .proto 变更怎么保证不挂线上？
+
+**候选人**：遵循 Protobuf 兼容性规则。第一，只加字段不改编号——新增字段用新编号，旧客户端收到未知字段忽略（向后兼容）。第二，不删字段——要"删"用 reserved 标记编号，防止后续复用。第三，类型兼容——int32 能安全扩成 int64，但 string 不能改成 int。破坏性变更（改字段编号、改字段类型到不兼容类型）必须用新包名（package v2）或新 service，灰度迁移。上线前用 buf breaking 做兼容性检查（对比当前 .proto 和上一个版本的兼容性），CI 里强制跑。
+
+## 常见考点
+
+1. **gRPC 和 REST 区别？**——gRPC 用 HTTP/2 + Protobuf（二进制、多路复用、头压缩、强类型 IDL），延迟低、带宽省、契约强；REST 用 HTTP/1.1 + JSON，生态广、可缓存、易调试。内部用 gRPC，对外用 REST。
+2. **GraphQL 解决什么问题？**——多端数据聚合（前端按需取字段，一个接口拿 N 个资源数据，避免多次往返）。代价是 N+1（DataLoader 解）、查询复杂度限流、缓存难。
+3. **Protobuf 怎么保证兼容？**——只加字段不改编号、删除用 reserved、类型兼容扩展（int32→int64）。破坏性变更新包名。用 buf breaking 做 CI 兼容性检查。
+4. **gRPC 浏览器怎么调？**——用 grpc-web（代理模式或 envoy 转发），或网关层用 gRPC-Gateway 转 HTTP。grpc-web 不支持所有流式模式。
+5. **三种协议怎么共存？**——分层：BFF 网关对外 REST/GraphQL，对内 gRPC。网关做协议转换（gRPC-Gateway 的 google.api.http 注解）。三种协议共享同一套鉴权/限流/可观测基础设施。

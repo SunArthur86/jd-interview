@@ -9,259 +9,342 @@ tags:
 - 并发编排
 - 取消传播
 feynman:
-  essence: Structured Concurrency 如何简化异步编排的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: Structured Concurrency（JEP 505，JDK 24 正式）把"并发任务的生命周期"绑到代码块的词法作用域——StructuredTaskScope 内 fork 的子任务，必须在 scope 关闭前完成（或被取消）。它解决了 CompletableFuture 的"孤儿任务、取消不传播、错误处理散落"三大痛点，让并发编排回到 try-with-resources 的直觉。
+  analogy: 像公司项目管理：传统 CompletableFuture 是"开放式工单"（任务发出去就忘了，出错不知道，超时不取消）；StructuredTaskScope 是"项目里程碑"——所有子任务必须在里程碑关闭前完成或被显式取消，没有"游离任务"。
+  first_principle: 并发编程的复杂性来自"失控的任务"——子任务超时、异常、孤儿运行，让父任务无法干净退出。StructuredTaskScope 用词法作用域强制"父等子、子随父"，把分散的 Future 链收敛成结构化树。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - StructuredTaskScope（JDK 21 预览、JDK 24 GA）：fork 子任务 + shutdown 策略
+  - ShutdownOnSuccess：第一个成功就取消其他（适用"任何可用"模式）
+  - ShutdownOnFailure：任何一个失败就取消其他（适用"全部成功"模式）
+  - 取消传播：scope.shutdown() 自动取消所有未完成子任务
+  - 与虚拟线程配合：scope 内 fork 默认创建虚拟线程
 first_principle:
-  problem: 面对“Structured Concurrency 如何简化异步编排”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: CompletableFuture 编排 N 个异步任务时，怎么避免"孤儿任务、取消不传播、错误处理散落"？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 任务生命周期应该和代码块（词法作用域）绑定，不能游离
+  - 一个任务失败/超时，应该能干净地取消整组兄弟任务
+  - 父任务等待子任务是天经地义（结构化并发），不是性能损失
+  rebuild: 引入 StructuredTaskScope，把 N 个并发子任务包在 try-with-resources 块里。scope 内 fork 子任务（默认虚拟线程），通过 shutdown 策略（ShutdownOnSuccess / ShutdownOnFailure / 自定义）决定何时取消未完成子任务。scope 关闭时所有子任务必须结束（完成或被取消），保证没有孤儿任务。父任务在 scope.join() 等所有子任务，子任务异常通过 scope 抛给父。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - StructuredTaskScope 和 ExecutorService 区别？——前者是结构化（scope 关闭前子任务必须结束），后者是开放（submit 后任务游离，Future.cancel 不可靠）。前者强制父子绑定，后者是任务队列
+  - ShutdownOnSuccess 和 ShutdownOnFailure 怎么选？——"任何可用"（多机房读）用 Success（最快一个赢，取消其他）；"全部成功"（订单+库存+营销都要成）用 Failure（一个失败全取消）
+  - 怎么实现超时？——scope.joinUntil(deadline) 或 scope.orTimeout(duration)，到点 shutdown 取消所有子任务
+  - 子任务的异常怎么处理？——ShutdownOnFailure 把异常收集到 scope.throwIfFailed()，父任务统一处理；不会丢失任何一个子任务的异常
+  - 能跨线程透传 scope 吗？——不能。scope 是词法作用域绑定，不能像 ThreadLocal 那样透传。子任务继承父的 scope 是 StructuredTaskScope 的核心机制
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - StructuredTaskScope = 词法作用域绑定的并发编排（JEP 505）
+  - ShutdownOnSuccess：第一个成功就取消其他（"任何可用"）
+  - ShutdownOnFailure：任一失败就取消其他（"全部成功"）
+  - 取消传播：scope.shutdown() 自动取消所有未完成子任务
+  - 与虚拟线程天生搭配：fork 默认创建虚拟线程
+  - 解决 CompletableFuture 三痛点：孤儿任务、取消不传播、错误散落
 ---
 
-# 【Java 后端架构师】Structured Concurrency 如何简化异步编排？
+# 【Java 后端架构师】Structured Concurrency 如何简化异步编排
 
-> 适用场景：JD 核心技术。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。下单链路要并行调用户、库存、营销、风控 4 个服务，用 CompletableFuture 编排：一个超时其他还在跑、一个失败其他异常、错误处理散在 thenApply/exceptionally 里。StructuredTaskScope（JDK 24 GA）让这套编排回到 try-catch 直觉。
 
-## 一、先明确问题边界
+## 一、概念层：从开放式并发到结构化并发
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**CompletableFuture 的三大痛点**（架构师必须能列出）：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+| 痛点 | 表现 | 后果 |
+|------|------|------|
+| **孤儿任务** | `future.cancel(true)` 不可靠（不真正中断），任务继续跑 | 资源泄漏、超时后还在调下游 |
+| **取消不传播** | 一个失败，其他兄弟任务不知道 | 已无意义的任务继续占线程 |
+| **错误处理散落** | thenApply/thenCompose/exceptionally 链，异常在多个回调里 | 堆栈丢失、错误处理重复或漏掉 |
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 Structured Concurrency 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**Structured Concurrency 的对照解法**：
 
-## 二、推荐架构思路
+```
+StructuredTaskScope（结构化）              CompletableFuture（开放式）
+─────────────────────────                  ─────────────────────────
+try (var scope =                            CompletableFuture<User> u =
+    new StructuredTaskScope<>()) {              userService.fetch(id);
+    var t1 = scope.fork(...);              CompletableFuture<Stock> s =
+    var t2 = scope.fork(...);                   stockService.fetch(id);
+    scope.join();                           u.thenCombine(s, ...)
+     .exceptionally(...)                    .orTimeout(2, SECONDS)
+     .whenComplete(...)                     .whenComplete(...)
+}                                           // 任务游离，错误散落
+// scope 关闭：所有子任务必须结束
+```
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+**关键概念对比**：
 
-## 三、技术落地点
+| 维度 | ExecutorService / CompletableFuture | StructuredTaskScope |
+|------|-------------------------------------|---------------------|
+| 任务生命周期 | 游离（submit 后任务独立） | 绑定到 try 块（scope 关闭前必须结束） |
+| 取消机制 | Future.cancel（不可靠） | scope.shutdown（强制传播到所有子任务） |
+| 错误聚合 | 散在回调里 | scope.throwIfFailed（统一抛） |
+| 父子关系 | 弱（Future 链是平的） | 强（父等子、子随父） |
+| 默认线程 | 平台线程池 | 虚拟线程（自动） |
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+## 二、机制层：ShutdownOnSuccess 与 ShutdownOnFailure
 
-## 四、常见坑
+**ShutdownOnSuccess：第一个成功就取消其他**（"任何可用"模式）
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+```java
+// 场景：多机房读用户信息，最快返回的赢，其他取消
+public User readFromAnyRegion(Long userId) throws Exception {
+    try (var scope = new StructuredTaskScope.ShutdownOnSuccess<User>()) {
+        scope.fork(() -> userService.fetchFromBJ(userId));   // 北京机房
+        scope.fork(() -> userService.fetchFromSH(userId));   // 上海机房
+        scope.fork(() -> userService.fetchFromGZ(userId));   // 广州机房
+        scope.join();                // 等最快一个成功
+        return scope.result();       // 拿到第一个成功的结果
+        // 其他还在跑的子任务自动被 cancel（取消传播）
+    }
+}
+// 对比 CompletableFuture：要写复杂的 anyOf + 手动 cancel，且 cancel 不可靠
+```
 
-## 五、面试回答模板
+**ShutdownOnFailure：任一失败就取消其他**（"全部成功"模式）
 
-可以按下面结构作答：
+```java
+// 场景：下单要同时扣库存、创建订单、发优惠券，任一失败全取消
+public Order createOrder(OrderDTO dto) throws Exception {
+    try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+        var stockTask  = scope.fork(() -> stockService.deduct(dto));    // Subtask<Stock>
+        var orderTask  = scope.fork(() -> orderRepo.create(dto));       // Subtask<Order>
+        var couponTask = scope.fork(() -> couponService.grant(dto));    // Subtask<Coupon>
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“Structured Concurrency 如何简化异步编排”，核心是 Structured Concurrency 与 并发编排 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+        scope.join();                 // 等所有子任务结束
+        scope.throwIfFailed();        // 任一失败，抛异常并取消其他
 
-## 六、加分点
+        // 全部成功才到这
+        return Order.combine(
+            orderTask.get(),
+            stockTask.get(),
+            couponTask.get()
+        );
+    }
+}
+// 对比 CompletableFuture：要 allOf + 处理每个 future 的异常，错一个其他继续跑
+```
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+**超时控制**（生产必备）：
 
-## 七、企业级面试定位：从“会用”到“能负责”
+```java
+public Order createOrder(OrderDTO dto) throws Exception {
+    try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+        var stockTask  = scope.fork(() -> stockService.deduct(dto));
+        var orderTask  = scope.fork(() -> orderRepo.create(dto));
+        var couponTask = scope.fork(() -> couponService.grant(dto));
 
-企业级面试不会只问“Structured Concurrency 是什么”，而是看你能不能对一条真实生产链路负责。回答“Structured Concurrency 如何简化异步编排”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+        // 方式 1：joinUntil 绝对时间
+        scope.joinUntil(Instant.now().plusSeconds(2));
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 JD 核心技术 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 Structured Concurrency、并发编排、取消传播 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 pool_active_ratio、queue_wait_ms_p99、rejected_tasks、lock_blocked_threads 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+        // 方式 2：自定义 scope 重写 isTimeout
+        // public class TimedScope extends ShutdownOnFailure {
+        //     private final Instant deadline;
+        //     public boolean isTimeout() { return Instant.now().isAfter(deadline); }
+        // }
 
-### 企业级回答骨架
+        scope.throwIfFailed();
+        return Order.combine(orderTask.get(), stockTask.get(), couponTask.get());
+    } catch (TimeoutException e) {
+        // 超时：scope 关闭时自动取消所有未完成子任务
+        throw new BusinessException("下单超时");
+    }
+}
+```
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 Structured Concurrency 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+## 三、实战层：CompletableFuture 重构案例
 
-### 面试中要主动补的生产细节
+**重构前：CompletableFuture 编排（混乱）**
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+```java
+// 反例：错误散落、取消不传播、超时处理复杂
+public OrderResult createOrder_legacy(OrderDTO dto) {
+    CompletableFuture<Stock> stockFuture =
+        CompletableFuture.supplyAsync(() -> stockService.deduct(dto), executor)
+                         .orTimeout(2, TimeUnit.SECONDS);
+    CompletableFuture<Order> orderFuture =
+        CompletableFuture.supplyAsync(() -> orderRepo.create(dto), executor)
+                         .orTimeout(2, TimeUnit.SECONDS);
+    CompletableFuture<Coupon> couponFuture =
+        CompletableFuture.supplyAsync(() -> couponService.grant(dto), executor)
+                         .orTimeout(2, TimeUnit.SECONDS);
 
-## 八、苏格拉底式面试追问
+    try {
+        return CompletableFuture.allOf(stockFuture, orderFuture, couponFuture)
+            .thenApply(v -> new OrderResult(
+                orderFuture.get(),
+                stockFuture.get(),
+                couponFuture.get()
+            ))
+            .exceptionally(ex -> {
+                // 问题 1：异常混在一个回调，不知道是哪个失败
+                // 问题 2：失败时其他 future 可能还在跑（取消不传播）
+                // 问题 3：future.cancel(true) 不可靠，下游还在被调
+                log.error("order failed", ex);
+                throw new RuntimeException(ex);
+            })
+            .get(2, TimeUnit.SECONDS);
+    } catch (Exception e) {
+        // 问题 4：手动 cancel，但很多 IO 不响应 interrupt
+        stockFuture.cancel(true);
+        orderFuture.cancel(true);
+        couponFuture.cancel(true);
+        throw new BusinessException(e);
+    }
+}
+```
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+**重构后：StructuredTaskScope（清晰）**
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“Structured Concurrency 如何简化异步编排”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 pool_active_ratio、queue_wait_ms_p99、rejected_tasks、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 Structured Concurrency 负责的范围，以及必须依赖 并发编排、取消传播 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 队列无界导致内存被打满，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+```java
+public OrderResult createOrder(OrderDTO dto) throws Exception {
+    try (var scope = new StructuredTaskScope.ShutdownOnFailure(
+            "order-create", Thread.ofVirtual().factory())) {
+        var stockTask  = scope.fork(() -> stockService.deduct(dto));
+        var orderTask  = scope.fork(() -> orderRepo.create(dto));
+        var couponTask = scope.fork(() -> couponService.grant(dto));
 
-### 现场对话示例
+        scope.joinUntil(Instant.now().plusSeconds(2));   // 整体超时
+        scope.throwIfFailed(ex -> new BusinessException("下单失败", ex));
 
-**面试官**：你说要做“Structured Concurrency 如何简化异步编排”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 pool_active_ratio、queue_wait_ms_p99、业务失败率和事故记录。
+        return new OrderResult(orderTask.get(), stockTask.get(), couponTask.get());
+    }
+    // scope 关闭时自动取消所有未完成子任务（取消传播）
+}
+```
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 pool_active_ratio 没有改善，或者 queue_wait_ms_p99 反而变差，就停止扩大范围，回到假设层重新复盘。
+**自定义 ShutdownOnSuccess：选最快的 + 失败容忍**
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 pool_active_ratio、queue_wait_ms_p99、rejected_tasks。这样它不是个人经验，而是团队机制。
+```java
+// 场景：3 个机房读用户，只要 1 个成功就返回，但所有失败也要记录
+public class QuorumScope<T> extends StructuredTaskScope.ShutdownOnSuccess<T> {
+    private final List<Throwable> errors = Collections.synchronizedList(new ArrayList<>());
 
-## 九、专项架构深挖：对象、链路、失败模式
+    @Override
+    protected void handleComplete(Subtask<? extends T> subtask) {
+        if (subtask.state() == Subtask.State.FAILED) {
+            errors.add(subtask.exception());   // 收集所有失败
+        }
+        super.handleComplete(subtask);
+        if (subtask.state() == Subtask.State.SUCCESS) {
+            shutdown();   // 任一成功就取消其他
+        }
+    }
 
-这一题不要停在“知道 Structured Concurrency”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+    public List<Throwable> getErrors() { return List.copyOf(errors); }
+}
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 业务线程池、队列、Future 链、锁竞争点；CPU 密集型与 IO 密集型任务；上下文、超时和取消信号 |
-| 设计主线 | 线程池按业务域隔离，拒绝策略要可解释；异步链路必须有超时、取消、降级和上下文透传；共享状态优先不可变或分片，减少大锁 |
-| 失败模式 | 队列无界导致内存被打满；异步任务丢失 trace 和安全上下文；锁竞争把 CPU 消耗在阻塞和唤醒上 |
-| 验证指标 | pool_active_ratio、queue_wait_ms_p99、rejected_tasks、lock_blocked_threads |
+// 使用
+try (var scope = new QuorumScope<User>()) {
+    scope.fork(() -> userService.fetchFromBJ(id));
+    scope.fork(() -> userService.fetchFromSH(id));
+    scope.fork(() -> userService.fetchFromGZ(id));
+    scope.join();
+    if (scope.getErrors().size() == 3) {
+        throw new ServiceException("所有机房都失败: " + scope.getErrors());
+    }
+    return scope.result();
+}
+```
 
-**架构拆解**：
+## 四、底层本质：为什么"词法作用域"是关键
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 并发编排 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 Structured Concurrency 如何简化异步编排 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 取消传播 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+回到第一性：**为什么 StructuredTaskScope 用 try-with-resources 而不是返回 Future？**
 
-**高分回答细节**：
+- **词法作用域 = 可见的生命周期**：当你看到 `try (var scope = ...) { ... }` 时，肉眼就能看到这个 scope 的所有 fork 都在块内，scope 关闭后没有游离任务。CompletableFuture 的链式调用跨多个方法、跨多个回调，肉眼看不到任务边界。
+- **强制父等子**：scope.join() 在 try 块内必须被调用（否则编译器会警告或抛 IllegalState），保证父任务不会在子任务还在跑时退出。这避免了"父方法 return 了但后台还有任务跑"的资源泄漏。
+- **取消传播的根因**：scope 是任务树的根，shutdown 时遍历所有未完成子任务调用 interrupt。子任务内部如果用虚拟线程 + 友好的 IO（NIO/HttpClient），interrupt 会立即生效（不像 CompletableFuture 的 cancel 经常不响应）。
 
-- 不要只说“可以用 Structured Concurrency”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+**与虚拟线程的天生搭配**：
 
-## 十、二轮场景追问与项目表达
+```java
+// StructuredTaskScope 内 fork 默认用虚拟线程
+try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+    // 这 1000 个 fork 是 1000 个虚拟线程，carrier 只有 CPU 核数个
+    for (int i = 0; i < 1000; i++) {
+        scope.fork(() -> fetchItem(i));
+    }
+    scope.join();
+}
+// 没有线程池打满的担忧（虚拟线程轻量），又拿到了结构化编排的清晰
+```
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+**注意：JDK 版本演进**：
+- JDK 21：StructuredTaskScope 预览（JEP 453，需 `--enable-preview`）
+- JDK 22/23：API 微调（JEP 462/480，仍预览）
+- JDK 24：正式 GA（JEP 505，API 稳定，Subtask 替代 Future）
+- JDK 25：进一步完善（JEP 505 增强的 shutdown 策略）
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+## 五、AI 架构师加问：5 个
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“Structured Concurrency 如何简化异步编排”，重点看 pool_active_ratio、queue_wait_ms_p99、rejected_tasks，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+1. **AI Agent 调用多个工具（LLM + RAG + Search + DB），用 StructuredTaskScope 编排怎么设计？**
+   一个 Agent 会话起一个虚拟线程，每个 tool_call 用 scope.fork 起子任务，超时 30s。ShutdownOnFailure：任一工具失败抛给 Agent，Agent 决定降级还是重试。ShutdownOnSuccess：并行查多个数据源（向量库 + 关键词 + 知识图谱），最快返回的赢，其他取消。Agent 拿到结果后用 LLM 合成最终答案。
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+2. **AI 怎么自动把 CompletableFuture 代码重构成 StructuredTaskScope？**
+   AI 解析 CompletableFuture 链：识别 allOf（→ ShutdownOnFailure）、anyOf（→ ShutdownOnSuccess）、thenApply（→ scope.fork + lambda）。难点是异常处理重构（exceptionally → throwIfFailed）和超时合并（每个 future.orTimeout → scope.joinUntil）。建议 AI 出 diff 人工 review，因为语义不完全等价（取消可靠性变了）。
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 Structured Concurrency 和 并发编排 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+3. **AI 推理服务并行调多个 GPU，StructuredTaskScope 适用吗？**
+   适用。每个 GPU 推理是一个 fork（虚拟线程内部包平台线程池跑 CUDA）。ShutdownOnSuccess：3 个 GPU 跑同一模型冗余推理，最快返回的赢（容错）；ShutdownOnFailure：流水线推理（预处理 + 推理 + 后处理），任一阶段失败取消整条流水线。
 
-### 追问 3：你如何判断这个方案值得做？
+4. **StructuredTaskScope 配合 LLM streaming（流式输出）怎么用？**
+   流式输出场景下，scope 的"join 等所有完成"语义需要扩展——流式 token 应该边产生边返回，不是等全部生成完。解法：用 SynchronousQueue 或 Flux 把子任务的中间结果流式传给父，scope 只控制"何时取消整组"，不阻塞流式。或者用自定义 scope 重写 handleComplete 在每个子任务产出 token 时回调。
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 取消传播 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+5. **AI Copilot 帮业务写 StructuredTaskScope 代码，最容易翻车在哪？**
+   三个点：① ShutdownOnFailure 调用 throwIfFailed 前必须 join（否则未完成任务抛 NPE）；② 子任务 lambda 内的 checked exception 必须包装成 RuntimeException 或 throw（Subtask.get 抛）；③ scope 内 fork 的子任务不能再 fork 子 scope（嵌套限制）。AI 生成要 lint 这些规则。
 
-### STAR 项目表达
-
-- **S（背景）**：原系统在 Structured Concurrency 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 Structured Concurrency 如何简化异步编排 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 pool_active_ratio、queue_wait_ms_p99 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
-
-### 二轮复盘清单
-
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
-
-## 十一、面试官 5 个企业级追问
-
-1. **你在真实项目里怎么判断“Structured Concurrency 如何简化异步编排”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 pool_active_ratio、queue_wait_ms_p99、rejected_tasks。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
-
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，Structured Concurrency 是否真是瓶颈，并发编排 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
-
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 队列无界导致内存被打满。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 pool_active_ratio 和 queue_wait_ms_p99 做分钟级观察，一旦越过阈值立即止损。
-
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 取消传播，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
-
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“Structured Concurrency 如何简化异步编排”，至少要沉淀 业务线程池、队列、Future 链、锁竞争点 的建模规范，以及 pool_active_ratio、queue_wait_ms_p99 的验收标准。
-
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“Structured Concurrency 如何简化异步编排”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 Structured Concurrency 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“Structured Concurrency 如何简化异步编排”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 pool_active_ratio、queue_wait_ms_p99 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 队列无界导致内存被打满，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 六、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：交通调度员拿着信号灯、匝道和应急车道，在处理“早高峰车辆突然涌入”。
+抓 **"两个 shutdown 策略、取消传播、虚拟线程搭配、JDK 24 GA"**。
 
-- **场景**：先说明“Structured Concurrency 如何简化异步编排”服务于什么业务目标，不要上来就堆 Structured Concurrency。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 队列无界导致内存被打满、异步任务丢失 trace 和安全上下文。
-- **验证**：最后落到 pool_active_ratio、queue_wait_ms_p99、rejected_tasks，让面试官感觉你真的上线过。
+- **ShutdownOnSuccess**：第一个成功就取消其他（"任何可用"）
+- **ShutdownOnFailure**：任一失败就取消其他（"全部成功"）
+- **取消传播**：scope.shutdown() 自动取消所有未完成子任务
+- **超时**：scope.joinUntil(deadline) 到点 shutdown
+- **虚拟线程**：scope.fork 默认创建虚拟线程（轻量、海量并发）
+- **版本**：JDK 21/22/23 预览，JDK 24（JEP 505）GA
 
 ### 拟人化理解
 
-可以把“Structured Concurrency 如何简化异步编排”想成一个交通调度员：Structured Concurrency 是他的信号灯、匝道和应急车道，并发编排 是他面对的现场信号，取消传播 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先分流，再限速，最后处理事故点。这样记，比死背组件名更稳。
+把 StructuredTaskScope 想成**项目里程碑管理**。传统 ExecutorService 是"开放式工单"——你发出去任务就忘了，任务游离运行，超时也不知道取消。StructuredTaskScope 是"里程碑"——所有子任务必须在里程碑关闭前完成或被取消，没有游离任务。ShutdownOnSuccess 是"第一个交活就收工"（其他兄弟可以下班）；ShutdownOnFailure 是"一个出错全停"（避免无意义的工作）。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“Structured Concurrency 如何简化异步编排”，我会这样答：我会先区分 CPU 密集、IO 密集和等待型任务，再决定线程模型、隔离策略和取消传播。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 队列无界导致内存被打满，所以我会提前设计灰度、监控和止损阈值，重点看 pool_active_ratio、queue_wait_ms_p99。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 pool_active_ratio 或 queue_wait_ms_p99 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> Structured Concurrency（JDK 24 JEP 505 GA）解决了 CompletableFuture 的孤儿任务、取消不传播、错误处理散落三大痛点。核心是 StructuredTaskScope 把并发任务的生命周期绑到 try-with-resources 的词法作用域——scope 关闭前所有 fork 的子任务必须结束。两个内置策略：ShutdownOnSuccess 用于"任何可用"（多机房读最快赢），ShutdownOnFailure 用于"全部成功"（任一失败全取消）。取消传播是核心：scope.shutdown() 自动取消所有未完成子任务，不像 CompletableFuture.cancel 那么不可靠。配合虚拟线程（scope.fork 默认创建 VT）拿海量并发 + 结构化清晰。落地：先把下单链路（扣库存+创建订单+发券）从 CompletableFuture allOf 重构成 ShutdownOnFailure，超时用 joinUntil。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司 JDK 版本是 21 还是 24+？异步编排主要用什么（CompletableFuture / Reactor / 自研）？如果是 JDK 21 没法直接用 GA 版本，我会聊预览特性 + 过渡方案；如果是 JDK 24+ 可以直接聊生产落地。
 
+## 七、苏格拉底式面试追问
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 已经用 CompletableFuture 了，为什么还要 StructuredTaskScope？ | 三痛点：cancel 不可靠导致下游继续被调、错误散在多个回调里、孤儿任务无法干净退出。StructuredTaskScope 用词法作用域强制"父等子"，scope.shutdown 真正取消。证明：重构后下单链路超时后下游调用量降为 0（CompletableFuture 还有 30% 流量） |
+| 证据追问 | 怎么证明 Structured Concurrency 比 CompletableFuture 好？ | 监控对比：超时后的下游 QPS（应降为 0）、错误聚合的完整性（无遗漏）、代码行数（少 40%）和可读性（review 时间降）。压测：取消后资源占用（线程/连接）下降速度 |
+| 边界追问 | StructuredTaskScope 能完全替代 CompletableFuture 吗？ | 不能。流式（stream）处理 CompletableFuture 更擅长（thenApply 链）；纯 CPU 任务用 ExecutorService 直接 submit 更简单；跨系统异步消息（Kafka）不能用 scope（生命周期跨进程）。Structured 适合"一次同步调用的并发编排" |
+| 反例追问 | 什么场景不要用 Structured Concurrency？ | 长生命周期任务（如后台 worker，不在请求 scope 内）、跨进程异步（消息队列解耦）、流式处理（Reactor/Flux 更擅长）、JDK 21 预览期生产不敢用 |
+| 风险追问 | 用 StructuredTaskScope 最大风险？ | ① JDK 版本（21 是预览，生产要 --enable-preview 有兼容风险）；② 子任务 lambda 内的 checked exception 处理（要 throw 或包装）；③ 嵌套 scope 限制（子任务不能再 fork scope）。治法：评估 JDK 24 GA、Code Review 模板、单元测试覆盖 |
+| 验证追问 | 怎么证明重构后没引入新问题？ | 单元测试：成功 / 部分失败 / 全部失败 / 超时 四种场景对比 CompletableFuture；压测：吞吐不退化（虚拟线程应该更好）；线上灰度：10% 流量看 P99、错误率、超时率 |
+| 沉淀追问 | 团队推广 Structured Concurrency 沉淀什么？ | ShutdownOnSuccess/Failure 使用 SOP（场景对应）、scope 模板代码（超时、错误聚合、日志）、CompletableFuture → StructuredTaskScope 重构 checklist、JDK 版本升级路线（21 预览 → 24 GA） |
+
+### 现场对话示例
+
+**面试官**：CompletableFuture 用得好好的，为什么搞 StructuredTaskScope？
+
+**候选人**：CompletableFuture 有三个痛点。第一，cancel 不可靠——超时后 future.cancel(true) 调用了，但下游 HTTP 请求不响应 interrupt，还在继续打下游。第二，错误散落——一个 allOf 链路里 3 个子任务，异常在 exceptionally 里混在一起，不知道是哪个失败的。第三，孤儿任务——主方法 return 了，后台还有 task 在跑，资源泄漏。StructuredTaskScope 用 try-with-resources 绑定生命周期：scope 关闭前所有 fork 必须结束（完成或被取消），shutdown 自动取消传播，throwIfFailed 统一抛异常。重构后下单链路超时后下游 QPS 真的降为 0，错误聚合完整。
+
+**面试官**：取消传播怎么保证可靠？
+
+**候选人**：两个条件。第一，子任务用虚拟线程（scope.fork 默认创建 VT），虚拟线程对 interrupt 友好。第二，子任务内部的 IO 用虚拟线程友好的 API（NIO、java.net.http.HttpClient、JDBC 8.0.33+），这些 API 响应 interrupt。如果子任务里有 synchronized 阻塞或 native IO，取消不可靠（pinning 也影响取消）。所以 StructuredTaskScope + 虚拟线程 + 友好 IO 是组合拳，缺一不可。
+
+**面试官**：ShutdownOnSuccess 和 ShutdownOnFailure 同时要怎么办？比如"全部成功，但如果 1 个超过 500ms 就用最快的"？
+
+**候选人**：用自定义 scope。继承 ShutdownOnFailure，重写 handleComplete：① 子任务成功就记录；② 失败就 shutdown（取消其他）；③ 超过 500ms 阈值就 shutdown（用 joinUntil 控制）。或者拆两层 scope：外层 ShutdownOnFailure 保证全部成功，内层 ShutdownOnSuccess 在 500ms 后选最快。复杂场景下自定义 scope 是正解，StructuredTaskScope 设计就是鼓励子类化。
+
+## 常见考点
+
+1. **StructuredTaskScope 是什么？**——JDK 24（JEP 505）GA 的结构化并发 API，把并发任务生命周期绑到 try-with-resources 词法作用域。子任务必须 scope 关闭前结束。
+2. **ShutdownOnSuccess 和 ShutdownOnFailure 区别？**——前者第一个成功就取消其他（"任何可用"，多机房读）；后者任一失败就取消其他（"全部成功"，下单链路）。
+3. **取消传播怎么实现？**——scope.shutdown() 遍历所有未完成子任务调用 interrupt，配合虚拟线程 + 友好 IO（NIO/HttpClient）才能真正取消。
+4. **怎么实现超时？**——scope.joinUntil(Instant deadline) 或自定义 scope 重写 isTimeout，到点 shutdown 取消所有子任务。
+5. **JDK 版本要求？**——21/22/23 预览（需 --enable-preview），24（JEP 505）GA。生产建议 JDK 24+ 直接用 GA 版本。

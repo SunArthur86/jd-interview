@@ -9,259 +9,339 @@ tags:
 - ThreadLocal
 - 上下文传递
 feynman:
-  essence: Scoped Values 与 ThreadLocal 的取舍的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: ScopedValue（JEP 506，JDK 24 GA）是 ThreadLocal 在虚拟线程时代的替代品——不可变、自动清理、bounded lifetime。ThreadLocal 的"可变 + 永不清理 + 继承混乱"在百万虚拟线程下变成内存炸弹和上下文错乱，ScopedValue 用"作用域绑定 + 单次写入"重新设计上下文传递。
+  analogy: ThreadLocal 是"每个工位的抽屉"——员工（线程）随手塞东西进去，离职（线程结束）时抽屉才清空，复用工位（线程池）时上一个员工的垃圾还在。ScopedValue 是"任务工牌"——开工时发，下班时收，不可改，发给谁就只有谁能看。
+  first_principle: ThreadLocal 设计于平台线程时代（线程数少、生命周期长），虚拟线程时代变成百万线程 × ThreadLocal = 内存爆炸。ScopedValue 把"上下文"从"线程属性"改成"作用域属性"，让上下文随调用栈进出而自动生灭。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - ScopedValue（JDK 24 GA）：不可变、bounded to scope、自动清理
+  - ThreadLocal 的坑：百万虚拟线程下内存爆炸、继承在 carrier 切换时错乱、永不清理泄漏
+  - ScopedValue.where(K, V).run(...) 设置 + ScopedValue.get() 读取
+  - 与 StructuredTaskScope 天生搭配：子任务自动继承父的 ScopedValue
+  - 不能完全替代 ThreadLocal：可变状态（如事务连接）还要用 ThreadLocal
 first_principle:
-  problem: 面对“Scoped Values 与 ThreadLocal 的取舍”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 百万虚拟线程时代，怎么传递请求上下文（用户 ID、traceId、租户），既不让内存爆炸又不让上下文错乱？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - ThreadLocal 是"每个线程一份"，百万 VT × 多个 TL = 内存 N 倍
+  - InheritableThreadLocal 在虚拟线程 carrier 切换时透传不可靠（VT 不绑定 carrier）
+  - 上下文应该是"调用栈属性"，不是"线程属性"
+  rebuild: 引入 ScopedValue，把上下文绑定到调用栈的词法作用域（ScopedValue.where(K, V).run(...) 块）。run 块内可读不可改，run 结束自动清理。配合 StructuredTaskScope，子任务 fork 时自动继承父作用域的所有 ScopedValue（无需 InheritableThreadLocal 的复杂机制）。可变状态（如事务、Buffer）仍用 ThreadLocal，但要 try-finally remove。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - ScopedValue 真的能替代所有 ThreadLocal 吗？——不能。可变状态（数据库连接、事务、Buffer）要 ThreadLocal。ScopedValue 是"不可变、bounded"的，适合请求上下文（userId、traceId、tenantId）
+  - ScopedValue 跨虚拟线程怎么传递？——scope.fork 的子任务自动继承父的 ScopedValue（这是 StructuredTaskScope 的核心机制）。跨普通线程池要用 TransmittableThreadLocal（TTL）
+  - ScopedValue 内存开销多大？——固定开销 + 按调用栈深度（不按线程数）。100 万 VT 共享同一作用域，ScopedValue 只存一份
+  - ScopedValue 和 MDC（日志 traceId）怎么结合？——MDC 内部用 ThreadLocal，要改造成 ScopedValue 或者用 SLF4J 2.x 的 MDCAdapter 桥接
+  - 什么时候还该用 ThreadLocal？——可变状态（事务、Buffer、连接）、第三方库强制 ThreadLocal（如 Spring 的 RequestContextHolder）、不涉及海量虚拟线程的纯计算场景
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - ScopedValue（JEP 506，JDK 24 GA）：不可变、bounded、自动清理
+  - ThreadLocal 在百万 VT 下：内存爆炸、继承错乱、永不清理泄漏
+  - ScopedValue.where(K, V).run(...) 设置 + ScopedValue.get() 读
+  - 与 StructuredTaskScope 天生搭配：子任务自动继承
+  - 不能完全替代 ThreadLocal：可变状态还要 ThreadLocal
+  - MDC 兼容：用 SLF4J 2.x MDCAdapter 或手动桥接
 ---
 
-# 【Java 后端架构师】Scoped Values 与 ThreadLocal 的取舍？
+# 【Java 后端架构师】Scoped Values 与 ThreadLocal 的取舍
 
-> 适用场景：JD 核心技术。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。订单网关迁移到虚拟线程后，单实例 50 万 VT × 8 个 ThreadLocal（userId/traceId/tenantId/locale/...）= 内存涨到 4G，且偶发"用户 A 看到用户 B 的订单"（InheritableThreadLocal 在 carrier 切换时透传错乱）。ScopedValue 是 JDK 24 的根治方案。
 
-## 一、先明确问题边界
+## 一、概念层：ThreadLocal 在虚拟线程时代的三大坑
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**ThreadLocal 设计前提**（平台线程时代）：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+```
+平台线程数 = 几百到几千
+每个线程生命周期 = 几分钟到几小时
+ThreadLocal 数量 × 线程数 = 内存可控（万级）
+```
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 Scoped Values 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**虚拟线程时代被打破**：
 
-## 二、推荐架构思路
+```
+虚拟线程数 = 百万级
+每个 VT 生命周期 = 几毫秒（一次请求）
+ThreadLocal 数量 × VT 数 = 内存爆炸（百万 × N）
+```
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+**三大坑详解**（这张表面试必问）：
 
-## 三、技术落地点
+| 坑 | 表现 | 后果 |
+|----|------|------|
+| **内存爆炸** | 每个 VT 都有一份 ThreadLocal，100 万 VT × 8 TL × 1KB = 8GB | OOMKilled |
+| **继承错乱** | InheritableThreadLocal 在 carrier 切换时透传父 carrier 的值 | 用户 A 看到用户 B 的数据 |
+| **永不清理泄漏** | 线程池复用 + ThreadLocal 没 remove → 上一请求残留 | 数据错乱、内存泄漏 |
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+**InheritableThreadLocal 在虚拟线程下的灾难**：
 
-## 四、常见坑
+```java
+// 反例：carrier 持有的 InheritableThreadLocal 会被错误透传
+private static InheritableThreadLocal<UserContext> CTX = new InheritableThreadLocal<>();
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+// 线程 A（carrier-1）设置 CTX = userA
+CTX.set(new UserContext("userA"));
 
-## 五、面试回答模板
+// 创建虚拟线程 VT-X，VT-X mount 到 carrier-1，继承 userA（正确）
+// VT-X unmount，VT-Y mount 到 carrier-1，VT-Y 也"继承"了 userA（错误！）
+// 实际 VT-Y 应该是另一个用户的请求，但拿到了 userA 的上下文
+```
 
-可以按下面结构作答：
+## 二、机制层：ScopedValue 的核心 API
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“Scoped Values 与 ThreadLocal 的取舍”，核心是 Scoped Values 与 ThreadLocal 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+**ScopedValue 基本用法**：
 
-## 六、加分点
+```java
+// 1. 定义 ScopedValue（全局常量）
+private static final ScopedValue<UserContext> USER_CTX = ScopedValue.newInstance();
+private static final ScopedValue<String> TRACE_ID = ScopedValue.newInstance();
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+// 2. 设置 + 使用（where + run）
+public Order handleRequest(Request req) {
+    String traceId = generateTraceId();
+    UserContext userCtx = authenticate(req);
 
-## 七、企业级面试定位：从“会用”到“能负责”
+    return ScopedValue.where(USER_CTX, userCtx)
+                      .where(TRACE_ID, traceId)
+                      .run(() -> {
+                          // run 块内：可读不可改
+                          business();
+                          return createOrder();
+                      });
+    // run 结束：USER_CTX 和 TRACE_ID 自动清理（无需 remove）
+}
 
-企业级面试不会只问“Scoped Values 是什么”，而是看你能不能对一条真实生产链路负责。回答“Scoped Values 与 ThreadLocal 的取舍”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+// 3. 在子调用里读取
+public void business() {
+    UserContext ctx = USER_CTX.get();     // 读
+    String tid = TRACE_ID.get();          // 读
+    // USER_CTX.set(...) 编译错误：不可变
+    log.info("traceId={} userId={}", tid, ctx.getUserId());
+}
+```
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 JD 核心技术 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 Scoped Values、ThreadLocal、上下文传递 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 pool_active_ratio、queue_wait_ms_p99、rejected_tasks、lock_blocked_threads 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+**与 StructuredTaskScope 配合（自动继承）**：
 
-### 企业级回答骨架
+```java
+public Order createOrder(OrderDTO dto) throws Exception {
+    return ScopedValue.where(USER_CTX, ctx).call(() -> {
+        try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
+            // 子任务自动继承 USER_CTX（无需 InheritableThreadLocal）
+            var stockTask  = scope.fork(() -> {
+                // 这里 USER_CTX.get() 拿到的是父作用域的值
+                UserContext c = USER_CTX.get();
+                return stockService.deduct(dto, c.getUserId());
+            });
+            var orderTask  = scope.fork(() -> orderRepo.create(dto));
+            scope.join();
+            scope.throwIfFailed();
+            return Order.combine(stockTask.get(), orderTask.get());
+        }
+    });
+}
+```
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 Scoped Values 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+**对比 ThreadLocal 的 4 个优势**：
 
-### 面试中要主动补的生产细节
+| 维度 | ThreadLocal | ScopedValue |
+|------|-------------|-------------|
+| 可变性 | 可任意 set/remove | 一次 where 写入，不可改 |
+| 生命周期 | 跟线程（需手动 remove） | 跟 run 块（自动清理） |
+| 继承 | InheritableThreadLocal（carrier 错乱） | StructuredTaskScope.fork 自动继承（正确） |
+| 内存开销 | 线程数 × TL 数（百万 VT 爆炸） | 作用域数 × TL 数（一请求一份） |
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+## 三、实战层：从 ThreadLocal 迁移到 ScopedValue
 
-## 八、苏格拉底式面试追问
+**典型场景 1：请求上下文（userId / traceId / tenantId）**
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+```java
+// 重构前：ThreadLocal
+public class RequestContext {
+    private static final ThreadLocal<UserContext> CTX = new ThreadLocal<>();
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“Scoped Values 与 ThreadLocal 的取舍”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 pool_active_ratio、queue_wait_ms_p99、rejected_tasks、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 Scoped Values 负责的范围，以及必须依赖 ThreadLocal、上下文传递 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 队列无界导致内存被打满，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+    public static void set(UserContext ctx) { CTX.set(ctx); }
+    public static UserContext get() { return CTX.get(); }
+    public static void clear() { CTX.remove(); }   // 必须显式调
+}
 
-### 现场对话示例
+// 使用（容易忘 clear）
+public Order handle(Request req) {
+    try {
+        RequestContext.set(authenticate(req));
+        return createOrder();
+    } finally {
+        RequestContext.clear();   // 忘了就泄漏
+    }
+}
 
-**面试官**：你说要做“Scoped Values 与 ThreadLocal 的取舍”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 pool_active_ratio、queue_wait_ms_p99、业务失败率和事故记录。
+// 重构后：ScopedValue
+public class RequestContext {
+    public static final ScopedValue<UserContext> CTX = ScopedValue.newInstance();
+}
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 pool_active_ratio 没有改善，或者 queue_wait_ms_p99 反而变差，就停止扩大范围，回到假设层重新复盘。
+// 使用（自动清理）
+public Order handle(Request req) {
+    return ScopedValue.where(RequestContext.CTX, authenticate(req))
+                      .run(() -> createOrder());
+}
+```
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 pool_active_ratio、queue_wait_ms_p99、rejected_tasks。这样它不是个人经验，而是团队机制。
+**典型场景 2：MDC / 日志 traceId**
 
-## 九、专项架构深挖：对象、链路、失败模式
+```java
+// 反例：MDC 内部用 ThreadLocal
+// logback-spring.xml 配置 %X{traceId}，MDC.put("traceId", tid) 内部是 ThreadLocal
 
-这一题不要停在“知道 Scoped Values”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+// 重构：用 SLF4J 2.x 的 MDCAdapter 桥接 ScopedValue（如果可用）
+// 或手动注入（最简单）
+public class ScopedMdcFilter implements Filter {
+    @Override
+    public void doFilter(ServletRequest req, ServletResponse res, FilterChain chain)
+            throws IOException, ServletException {
+        String traceId = ((HttpServletRequest) req).getHeader("traceparent");
+        ScopedValue.where(TRACE_ID, traceId).run(() -> {
+            // 同时写 MDC（兼容老日志）
+            MDC.put("traceId", traceId);
+            try {
+                chain.doFilter(req, res);
+            } finally {
+                MDC.remove("traceId");
+            }
+        });
+    }
+}
+```
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 业务线程池、队列、Future 链、锁竞争点；CPU 密集型与 IO 密集型任务；上下文、超时和取消信号 |
-| 设计主线 | 线程池按业务域隔离，拒绝策略要可解释；异步链路必须有超时、取消、降级和上下文透传；共享状态优先不可变或分片，减少大锁 |
-| 失败模式 | 队列无界导致内存被打满；异步任务丢失 trace 和安全上下文；锁竞争把 CPU 消耗在阻塞和唤醒上 |
-| 验证指标 | pool_active_ratio、queue_wait_ms_p99、rejected_tasks、lock_blocked_threads |
+**典型场景 3：必须用 ThreadLocal 的场景（事务/Buffer）**
 
-**架构拆解**：
+```java
+// 数据库连接（可变状态）→ 仍用 ThreadLocal，但要 try-finally remove
+public class TransactionManager {
+    private static final ThreadLocal<Connection> CONN = new ThreadLocal<>();
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 ThreadLocal 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 Scoped Values 与 ThreadLocal 的取舍 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 上下文传递 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+    public Connection getConn() {
+        Connection c = CONN.get();
+        if (c == null) {
+            c = dataSource.getConnection();
+            CONN.set(c);
+        }
+        return c;
+    }
 
-**高分回答细节**：
+    public void cleanup() {
+        Connection c = CONN.get();
+        if (c != null) {
+            try { c.close(); } catch (Exception ignored) {}
+            CONN.remove();   // 必须 remove，否则线程池复用时泄漏
+        }
+    }
+}
+```
 
-- 不要只说“可以用 Scoped Values”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+**迁移决策矩阵**：
 
-## 十、二轮场景追问与项目表达
+| 场景 | 选择 | 原因 |
+|------|------|------|
+| 请求上下文（userId/traceId/tenant） | ScopedValue | 不可变、bounded、百万 VT 友好 |
+| 配置（locale/timezone） | ScopedValue | 请求级别不变 |
+| 安全主体（Principal） | ScopedValue | 请求级别不变 |
+| 数据库连接 / 事务 | ThreadLocal | 可变状态、需要 commit/rollback |
+| Buffer / 缓存对象 | ThreadLocal | 可变状态、需要复用 |
+| 第三方库强制 ThreadLocal（Spring RequestContextHolder） | ThreadLocal | 兼容性 |
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+## 四、底层本质：为什么 ScopedValue 不泄漏
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+回到第一性：**为什么 ScopedValue 在百万虚拟线程下不爆炸，ThreadLocal 会爆炸？**
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“Scoped Values 与 ThreadLocal 的取舍”，重点看 pool_active_ratio、queue_wait_ms_p99、rejected_tasks，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+- **ThreadLocal 的存储结构**：每个 Thread 对象有一个 `ThreadLocalMap`，存所有 ThreadLocal 的值。虚拟线程也是 Thread，每个 VT 都有自己的 ThreadLocalMap。100 万 VT × 8 个 TL × 平均 100 字节 = 800MB+（还没算 Map 的 Entry 开销）。
+- **ScopedValue 的存储结构**：ScopedValue 的值存在调用栈的 `ScopedValueBindings`（continuation 的一部分），不存 Thread 对象。同一个 ScopedValue 在同一个作用域只有一份值，跟 VT 数量无关。100 万 VT 同时跑同一作用域的代码，ScopedValue 只存一份（作用域是栈帧属性）。
+- **清理机制**：ThreadLocal 的 remove 必须显式调用（容易忘），虚拟线程用完即弃时 GC 回收 Thread 对象才清 ThreadLocalMap（但堆压力大）。ScopedValue 的清理绑在 run/call 块退出时（编译期保证），无遗忘风险。
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+**InheritableThreadLocal 为什么在虚拟线程下错乱**：
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 Scoped Values 和 ThreadLocal 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+```
+平台线程时代：
+  父线程 set → 子线程创建时复制（InheritableThreadLocal 的 childValue）
+  父子关系清晰（Thread.start 时一次性复制）
 
-### 追问 3：你如何判断这个方案值得做？
+虚拟线程时代：
+  父 VT set → VT.fork 子 VT（实际是 mount 到 carrier）
+  carrier 持有的 InheritableThreadLocal 会被 fork 的子 VT"继承"
+  但 carrier 是共享的，多个 VT 复用同一 carrier
+  VT-A 的上下文通过 carrier 的 InheritableThreadLocal 被 VT-B 看到 = 错乱
+```
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 上下文传递 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+ScopedValue 不依赖 carrier，作用域是栈帧属性，子任务通过 StructuredTaskScope 的语义继承父作用域（编译期绑定），不存在 carrier 共享导致的错乱。
 
-### STAR 项目表达
+## 五、AI 架构师加问：5 个
 
-- **S（背景）**：原系统在 Scoped Values 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 Scoped Values 与 ThreadLocal 的取舍 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 pool_active_ratio、queue_wait_ms_p99 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+1. **AI 推理服务的上下文（userId / modelVersion / tokenCount）用 ScopedValue 还是 ThreadLocal？**
+   不可变的（userId、modelVersion、prompt 长度）用 ScopedValue（百万并发请求友好）；可变的（tokenCount 累加、streaming buffer）用 ThreadLocal + try-finally remove。如果是 JDK 24+ 用 ScopedValue + 长整型 Atomic 配合（外部可变状态用原子变量，不用 ThreadLocal）。
 
-### 二轮复盘清单
+2. **AI Agent 的 tool_call 怎么用 ScopedValue 传递会话上下文？**
+   一个 Agent 会话起一个虚拟线程，ScopedValue 注入 SessionContext（含 userId、对话历史 ID、权限范围）。scope.fork 的每个 tool_call 子任务自动继承 SessionContext，无需手动透传。tool_call 内部读 ScopedValue.get() 拿到 userId 去查数据库，权限边界清晰。
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+3. **怎么用 AI 自动检测 ThreadLocal 在虚拟线程下的内存风险？**
+   静态分析：扫描 ThreadLocal 声明 + 使用频率 + 是否 remove。结合运行时数据：JFR 看 ThreadLocalMap 的内存占用、heap dump 找 ThreadLocal 实例数。AI 输出"高风险 ThreadLocal 列表 + 是否可改 ScopedValue 建议"。可改的标准：是否可变、是否请求级别、是否被继承。
 
-## 十一、面试官 5 个企业级追问
+4. **AI Copilot 帮业务从 ThreadLocal 迁移到 ScopedValue，最容易翻车在哪？**
+   三个点：① 可变状态误判（数据库连接 / 事务 / Buffer 不能改 ScopedValue）；② 第三方库强制 ThreadLocal（Spring RequestContextHolder、HikariCP 连接池）要保留兼容层；③ MDC 桥接（日志框架内部用 ThreadLocal，要么用 SLF4J 2.x MDCAdapter 要么手动注入）。AI 要能识别"这段 ThreadLocal 是可变状态"并保留。
 
-1. **你在真实项目里怎么判断“Scoped Values 与 ThreadLocal 的取舍”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 pool_active_ratio、queue_wait_ms_p99、rejected_tasks。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+5. **大模型推理中 RAG 的检索上下文（query、embedding、retrievedDocs）怎么传？**
+   检索阶段：query 用 ScopedValue（不可变），embedding 结果用 ScopedValue.where 注入下一阶段；retrievedDocs 是 List 不可变集合，也可以用 ScopedValue。生成阶段：LLM streaming 的 token buffer 是可变状态用 ThreadLocal 或外部 Flux/Mono。整个 RAG 流程通过 StructuredTaskScope 编排，每个阶段 fork 子任务自动继承上一阶段的 ScopedValue。
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，Scoped Values 是否真是瓶颈，ThreadLocal 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
-
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 队列无界导致内存被打满。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 pool_active_ratio 和 queue_wait_ms_p99 做分钟级观察，一旦越过阈值立即止损。
-
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 上下文传递，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
-
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“Scoped Values 与 ThreadLocal 的取舍”，至少要沉淀 业务线程池、队列、Future 链、锁竞争点 的建模规范，以及 pool_active_ratio、queue_wait_ms_p99 的验收标准。
-
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“Scoped Values 与 ThreadLocal 的取舍”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 Scoped Values 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“Scoped Values 与 ThreadLocal 的取舍”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 pool_active_ratio、queue_wait_ms_p99 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 队列无界导致内存被打满，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 六、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：交通调度员拿着信号灯、匝道和应急车道，在处理“早高峰车辆突然涌入”。
+抓 **"不可变、bounded、自动清理、和 STS 搭配"**。
 
-- **场景**：先说明“Scoped Values 与 ThreadLocal 的取舍”服务于什么业务目标，不要上来就堆 Scoped Values。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 队列无界导致内存被打满、异步任务丢失 trace 和安全上下文。
-- **验证**：最后落到 pool_active_ratio、queue_wait_ms_p99、rejected_tasks，让面试官感觉你真的上线过。
+- **不可变**：一次 where 写入，不能 set
+- **bounded**：生命周期跟 run 块（不是跟线程）
+- **自动清理**：run 结束自动清理（无需 remove）
+- **STS 搭配**：StructuredTaskScope.fork 子任务自动继承
+- **ThreadLocal 仍要**：可变状态（连接、事务、Buffer）
+- **版本**：JDK 24（JEP 506）GA，JDK 21/22/23 预览
 
 ### 拟人化理解
 
-可以把“Scoped Values 与 ThreadLocal 的取舍”想成一个交通调度员：Scoped Values 是他的信号灯、匝道和应急车道，ThreadLocal 是他面对的现场信号，上下文传递 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先分流，再限速，最后处理事故点。这样记，比死背组件名更稳。
+把 ScopedValue 想成**任务工牌**。ThreadLocal 是"工位的抽屉"——员工（线程）随手塞东西进去，离职时才清空，复用工位时上一个员工的垃圾还在。ScopedValue 是"任务工牌"——开工时发，下班时收，不可改，发给谁就只有谁能看。100 万虚拟线程同时上班，工牌系统只管"当前在工位的工牌"（栈帧属性），不管历史员工数。InheritableThreadLocal 在 carrier 切换时像"工牌被下个员工顺手带走"（错乱），ScopedValue 不存在这个问题。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“Scoped Values 与 ThreadLocal 的取舍”，我会这样答：我会先区分 CPU 密集、IO 密集和等待型任务，再决定线程模型、隔离策略和取消传播。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 队列无界导致内存被打满，所以我会提前设计灰度、监控和止损阈值，重点看 pool_active_ratio、queue_wait_ms_p99。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 pool_active_ratio 或 queue_wait_ms_p99 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> ThreadLocal 在虚拟线程时代有三大坑：百万 VT 下内存爆炸、InheritableThreadLocal 在 carrier 切换时透传错乱、永不清理泄漏。ScopedValue（JDK 24 JEP 506 GA）是替代——不可变、生命周期绑定到 where.run 块、自动清理、和 StructuredTaskScope 天生搭配（fork 子任务自动继承）。用法：ScopedValue.newInstance() 定义、ScopedValue.where(K, V).run(...) 设置、K.get() 读取。适合请求上下文（userId/traceId/tenantId）。但 ScopedValue 不能完全替代 ThreadLocal——可变状态（数据库连接、事务、Buffer）还要 ThreadLocal + try-finally remove。落地优先级：先改 InheritableThreadLocal（事故源）、再改高频 ThreadLocal（内存源）、可变状态保留。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司 JDK 版本是 21 还是 24+？InheritableThreadLocal 用得多吗（很多老框架如 Spring 5.x 内部依赖）？虚拟线程数量级多大？这决定我聊 ScopedValue 替代方案还是先用 TransmittableThreadLocal 兜底（JDK 21 过渡）。
 
+## 七、苏格拉底式面试追问
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么不直接给 ThreadLocal 加 remove 规范，要换 ScopedValue？ | 内存爆炸和继承错乱 remove 解决不了。100 万 VT × ThreadLocal 还是百万份；InheritableThreadLocal 在 carrier 切换时不是"忘了 remove"而是机制本身错乱。ScopedValue 从设计上根除（作用域而非线程属性） |
+| 证据追问 | 怎么证明 ThreadLocal 在虚拟线程下真的有问题？ | heap dump 看 ThreadLocal 实例数（百万 VT 应百万级 ThreadLocalMap entry）、JFR 看 InheritableThreadLocal 的内存占用、业务侧偶发"用户 A 看到 B 的订单"（carrier 错乱证据）。ScopedValue 迁移后内存降 80%、错乱消失 |
+| 边界追问 | ScopedValue 能完全替代 ThreadLocal 吗？ | 不能。可变状态（连接、事务、Buffer）要 ThreadLocal；第三方库强制 ThreadLocal（Spring RequestContextHolder）要兼容。ScopedValue 只适合"不可变、bounded"的请求上下文 |
+| 反例追问 | 什么场景不该用 ScopedValue？ | 可变状态（连接池、事务、计数器）、第三方库强制 ThreadLocal、纯 CPU 计算无虚拟线程（Platform 线程 + ThreadLocal 没问题）、JDK 21 预览期生产不敢用 |
+| 风险追问 | 迁移到 ScopedValue 最大风险？ | ① JDK 版本（21 是预览需 --enable-preview）；② 第三方库强依赖 ThreadLocal（Spring 5.x 的 RequestContextHolder）要兼容层；③ MDC / 日志框架内部用 ThreadLocal，桥接麻烦。治法：先评估 JDK 24 GA、做兼容层、灰度切流 |
+| 验证追问 | 怎么证明迁移后没引入新问题？ | 单元测试覆盖：ScopedValue 设置/读取/作用域边界；压测：百万 VT 下内存稳定（不增长）；线上灰度：10% 流量跑 3 天看 P99、错误率、内存 |
+| 沉淀追问 | 团队推广 ScopedValue 沉淀什么？ | ThreadLocal 使用规范（什么场景该用哪个）、迁移 checklist（先改 InheritableThreadLocal）、ScopedValue + STS 的代码模板、第三方库兼容清单（Spring/Hibernate/HikariCP） |
+
+### 现场对话示例
+
+**面试官**：ThreadLocal 用了这么多年了，为什么 JDK 24 又搞个 ScopedValue？
+
+**候选人**：因为虚拟线程。平台线程时代 ThreadLocal 没问题——线程数几千，每个线程一份 ThreadLocal，内存可控。但虚拟线程时代百万 VT，每个 VT 都有自己的 ThreadLocalMap，100 万 VT × 8 个 ThreadLocal = 800MB+ 内存，光存上下文就 OOM。更严重的是 InheritableThreadLocal——carrier 是共享的，VT-A mount 到 carrier-1，VT-B 也 mount 到 carrier-1，VT-A 的 InheritableThreadLocal 通过 carrier 错乱传给 VT-B，业务侧就是"用户 A 看到用户 B 的订单"。ScopedValue 从设计上根除：上下文存调用栈（continuation）而非 Thread 对象，跟 VT 数量无关；子任务通过 StructuredTaskScope 语义继承，不依赖 carrier。
+
+**面试官**：ScopedValue 那不就是 final 变量吗？为什么不直接传参？
+
+**候选人**：传参有几个问题。第一，调用栈深时要透传每一层（service → dao → helper → util），代码侵入大。第二，第三方库（如 Spring Security）内部读上下文，没法改它的方法签名。第三，跨 scope.fork 的子任务要手动透传。ScopedValue 的价值是"隐式上下文 + 编译期清理 + STS 自动继承"——像 ThreadLocal 一样方便（任何层都能读），但没有 ThreadLocal 的内存和错乱问题。
+
+**面试官**：那 MDC / 日志 traceId 怎么办？logback 内部用 ThreadLocal。
+
+**候选人**：三种方案。第一，用 SLF4J 2.x 的 MDCAdapter 桥接 ScopedValue（如果版本支持）。第二，手动桥接——filter 里同时 set MDC 和 ScopedValue，退出时清 MDC（MDC 还是 ThreadLocal 但作用域小）。第三，等日志框架原生支持 ScopedValue（logback 后续版本）。短期用方案 2，长期等生态跟进。生产建议：ScopedValue 是源，MDC 是兼容层，业务代码读 ScopedValue，日志输出层桥接。
+
+## 常见考点
+
+1. **ScopedValue 是什么？**——JDK 24（JEP 506）GA 的不可变、bounded 上下文传递机制。ScopedValue.where(K, V).run(...) 设置 + K.get() 读取，自动清理。
+2. **ThreadLocal 在虚拟线程下有什么坑？**——三大坑：百万 VT 内存爆炸、InheritableThreadLocal 在 carrier 切换时透传错乱、永不清理泄漏。
+3. **ScopedValue 能完全替代 ThreadLocal 吗？**——不能。可变状态（数据库连接、事务、Buffer）仍要 ThreadLocal + try-finally remove。ScopedValue 只适合不可变的请求上下文。
+4. **ScopedValue 和 StructuredTaskScope 怎么配合？**——scope.fork 的子任务自动继承父作用域的 ScopedValue（无需 InheritableThreadLocal 的复杂机制）。
+5. **怎么迁移 ThreadLocal 到 ScopedValue？**——按场景：不可变请求上下文（userId/traceId）改 ScopedValue；可变状态（连接/事务/Buffer）保留 ThreadLocal；MDC 用桥接兼容。先改 InheritableThreadLocal（事故源）。

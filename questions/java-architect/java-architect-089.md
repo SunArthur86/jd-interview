@@ -9,259 +9,355 @@ tags:
 - 工具调用
 - 审计
 feynman:
-  essence: AI Agent 工具调用、状态与审计的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: AI Agent = LLM + 工具（function calling）+ 状态机 + 审计。LLM 负责"想"（决策下一步调用什么工具），工具负责"做"（执行确定性逻辑），状态机负责"控"（限制循环次数、预算、可调用工具集），审计负责"查"（每次 tool_call 可回溯）。
+  analogy: 像一个带权限的实习生——他聪明能自己规划任务步骤（规划），但要查系统必须用授权过的工具（function calling 白名单），每一步操作都登记在交接本（审计日志），干嗨了有预算上限和步数上限拦着（防死循环）。
+  first_principle: LLM 单次调用只能"输入→输出"一锤子，无法处理需要多步骤、依赖中间结果、需要调用外部能力的复杂任务。Agent 用 ReAct/Plan-Execute 循环让 LLM 迭代决策：观察→思考→行动→观察。但循环引入新风险：死循环、越权、成本爆炸、状态丢失。工程化的本质是用状态机、权限、预算、审计把这四类风险兜住。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 工具调用（function calling）：强 schema（JSON Schema 定义参数）、白名单（只暴露授权工具）、参数校验、结果回写
+  - 状态机：任务状态（created/running/paused/succeeded/failed）、步数上限、预算上限、可恢复（checkpoint）
+  - 权限：工具级 RBAC、高敏操作人工确认、沙箱执行（防命令注入）
+  - 审计：每次 tool_call 记录（tool_call_id、输入、输出、耗时、操作人）、全链路 traceId
+  - 可观测：tool_call_success_rate、agent_task_completion_rate、human_confirm_rate、token_cost_per_task
 first_principle:
-  problem: 面对“AI Agent 工具调用、状态与审计”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 如何让 LLM 安全地完成需要多步推理、调用外部工具、可能需要人工介入的复杂任务？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - LLM 决策非确定，可能选错工具、传错参数、陷入死循环
+  - 工具执行有副作用（查库、改数据、调资金接口），不可逆操作必须可控
+  - Agent 任务可能跑几分钟，中间可能失败，需要可恢复
+  - 每一步都要可审计、可回溯、可回放
+  rebuild: 把 Agent 建模为"状态机 + 工具集 + 循环控制器"。LLM 在每一步产出 tool_call 决策（带 schema 校验），控制器执行前做权限校验和预算检查，执行后记录审计并更新状态，循环直到任务完成或触发上限（步数/预算/超时）。高敏工具走人工确认，失败可从 checkpoint 恢复。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - ReAct 和 Plan-Execute 区别？——ReAct 是"想一步做一步"（reasoning + acting 交替），灵活但可能跑偏；Plan-Execute 是"先规划全流程再执行"，结构化但计划可能不适应变化。复杂任务用 Plan-Execute，简单任务用 ReAct。
+  - function calling 怎么防参数注入？——强 JSON Schema 定义参数类型和约束，服务端再校验一遍（不信任模型输出），危险参数（如 SQL、命令）走沙箱执行。
+  - Agent 状态怎么持久化？——每步 checkpoint 存数据库（任务 ID、当前状态、已完成步骤、中间结果），失败可从最近 checkpoint 恢复。长任务用 saga 模式，每步可补偿。
+  - 怎么防止 Agent 死循环烧钱？——硬上限：最大步数（如 20）、最大 token 预算、最大耗时（如 5 分钟）。超限强制终止并返回部分结果。监控 token_cost_per_task。
+  - 工具调用失败怎么办？——把错误信息回写给 LLM 让它重试或换工具（带"上次调用失败原因：xxx"），连续失败 N 次降级到人工或返回失败。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - Agent = LLM（决策）+ 工具（执行）+ 状态机（控制）+ 审计（追溯）
+  - 工具调用三道闸：强 schema 定义、白名单授权、服务端二次校验
+  - 高敏操作必走人工确认：建议 → 人确认 → 确定性执行 → 结果回写
+  - 防死循环四上限：步数、token 预算、耗时、重试次数
+  - 审计最小集：tool_call_id、输入、输出、耗时、操作人、traceId
 ---
 
-# 【Java 后端架构师】AI Agent 工具调用、状态与审计？
+# 【Java 后端架构师】AI Agent 工具调用、状态与审计
 
-> 适用场景：AI Agent/Infra。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。一个"智能客服 Agent"要处理"帮我查下订单 888 然后申请退款"——这需要 LLM 理解意图（多步任务）、调用查询工具（查订单）、调用退款工具（执行退款）、中间可能要人工审批（金额超阈值）。架构师要设计的是一套让 LLM 能"安全地多步操作生产系统"的工程框架，核心难点是：工具权限、状态可控、全程可审计。
 
-## 一、先明确问题边界
+## 一、概念层：Agent 的四要素
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+| 要素 | 职责 | 失败模式 | 工程手段 |
+|------|------|---------|---------|
+| **LLM（大脑）** | 理解意图、规划步骤、决定调用哪个工具 | 选错工具、传错参数、死循环 | 强 schema、重试上限、预算控制 |
+| **工具（双手）** | 执行确定性逻辑（查库、调接口、发通知） | 越权、副作用不可逆、命令注入 | 白名单、RBAC、沙箱、人工确认 |
+| **状态机（骨架）** | 管理任务流转、步数、可恢复 | 状态丢失、无法恢复、并发冲突 | checkpoint、saga、乐观锁 |
+| **审计（记忆）** | 记录每步操作，可回溯、可回放 | 无法排查、无法合规 | tool_call 日志、traceId、全链路 |
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+**核心架构原则**：Agent 不是"让 LLM 自由调用工具"，而是"用状态机和权限把 LLM 的决策能力约束在安全边界内"。LLM 负责想，工具负责做，状态机负责控，审计负责查。
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 Agent 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+## 二、机制层：基于 Spring AI / LangChain4j 的 Agent 实现
 
-## 二、推荐架构思路
+### 2.1 工具定义（强 Schema）
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+```java
+// 工具用注解定义 schema，Spring AI 自动转成 function calling 的 JSON Schema
+@Component
+public class OrderTools {
 
-## 三、技术落地点
+    @Tool(description = "查询订单状态。当用户询问订单进度、物流、详情时调用。")
+    public OrderInfo queryOrder(
+        @ToolParam(description = "订单 ID，纯数字") String orderId,
+        @ToolParam(description = "用户 ID，用于权限校验") String userId
+    ) {
+        // 服务端二次校验（不信任 LLM 传的参数）
+        if (!orderId.matches("\\d{10,20}"))
+            throw new ToolParamException("orderId 格式非法");
+        // 权限校验：userId 必须是订单的所有者
+        OrderInfo info = orderRepo.findById(orderId);
+        if (!info.getUserId().equals(userId))
+            throw new ToolPermissionException("无权查询此订单");
+        return info;
+    }
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+    @Tool(description = "申请退款。金额超 1000 元需人工审批。")
+    public RefundResult applyRefund(
+        @ToolParam(description = "订单 ID") String orderId,
+        @ToolParam(description = "退款原因") String reason,
+        @ToolParam(description = "操作人 ID") String operatorId
+    ) {
+        OrderInfo order = orderRepo.findById(orderId);
+        // 高敏操作：金额超阈值走人工确认
+        if (order.getAmount().compareTo(BigDecimal.valueOf(1000)) > 0) {
+            return RefundResult.needsApproval(orderId, reason);
+        }
+        return refundService.process(orderId, reason, operatorId);
+    }
+}
+```
 
-## 四、常见坑
+### 2.2 Function Calling Schema（自动生成）
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+Spring AI 自动把 `@Tool` 转成 OpenAI function calling 格式：
 
-## 五、面试回答模板
+```json
+{
+  "type": "function",
+  "function": {
+    "name": "queryOrder",
+    "description": "查询订单状态。当用户询问订单进度、物流、详情时调用。",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "orderId": {"type": "string", "description": "订单 ID，纯数字"},
+        "userId": {"type": "string", "description": "用户 ID，用于权限校验"}
+      },
+      "required": ["orderId", "userId"]
+    }
+  }
+}
+```
 
-可以按下面结构作答：
+### 2.3 Agent 循环控制器（核心）
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“AI Agent 工具调用、状态与审计”，核心是 Agent 与 工具调用 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+```java
+@Service
+@Slf4j
+public class AgentExecutor {
 
-## 六、加分点
+    private final ChatClient llm;
+    private final ToolRegistry toolRegistry;          // 工具白名单
+    private final AgentStateRepository stateRepo;     // 状态持久化
+    private final AuditLogger auditLogger;            // 审计
+    private final BudgetGuard budgetGuard;            // 预算/步数控制
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+    private static final int MAX_STEPS = 20;
+    private static final int MAX_TOKENS = 10_000;
+    private static final Duration MAX_DURATION = Duration.ofMinutes(5);
 
-## 七、企业级面试定位：从“会用”到“能负责”
+    public AgentResult execute(AgentTask task) {
+        AgentState state = stateRepo.init(task);       // 初始状态
 
-企业级面试不会只问“Agent 是什么”，而是看你能不能对一条真实生产链路负责。回答“AI Agent 工具调用、状态与审计”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+        while (state.notFinished()) {
+            // 1. 上限检查（防死循环烧钱）
+            budgetGuard.checkStepLimit(state, MAX_STEPS);
+            budgetGuard.checkTokenLimit(state, MAX_TOKENS);
+            budgetGuard.checkTimeLimit(state, MAX_DURATION);
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 AI Agent/Infra 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 Agent、工具调用、审计 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 tool_schema_error_rate、replay_success_rate、agent_failure_reason_count、cost_budget_burn 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+            // 2. LLM 决策下一步（带可用工具白名单 + 历史）
+            LlmResponse decision = llm.prompt()
+                .system(task.getSystemPrompt())
+                .messages(state.getHistory())
+                .tools(toolRegistry.authorizedTools(task.getUserId()))  // 权限过滤后的工具集
+                .call()
+                .toLlmResponse();
 
-### 企业级回答骨架
+            state.appendAssistant(decision);
+            budgetGuard.addTokens(decision.getTokensUsed());
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 Agent 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+            // 3. 如果 LLM 决定调用工具
+            if (decision.hasToolCalls()) {
+                for (ToolCall call : decision.getToolCalls()) {
+                    // 3.1 权限二次校验（不信任 LLM 选的工具）
+                    toolRegistry.authorize(call.getName(), task.getUserId());
+                    // 3.2 执行（带审计）
+                    ToolResult result = executeWithAudit(call, task);
+                    // 3.3 高敏操作需人工确认
+                    if (result.needsApproval()) {
+                        state.pauseForApproval(call, result);
+                        stateRepo.checkpoint(state);
+                        return AgentResult.needsHumanApproval(state);
+                    }
+                    state.appendToolResult(call.getId(), result);
+                }
+            } else {
+                // 4. LLM 给出最终答案，任务完成
+                stateRepo.checkpoint(state);
+                return AgentResult.success(decision.getContent());
+            }
+            stateRepo.checkpoint(state);   // 每步 checkpoint
+        }
+        return AgentResult.failure("超出步数上限");
+    }
 
-### 面试中要主动补的生产细节
+    private ToolResult executeWithAudit(ToolCall call, AgentTask task) {
+        long start = System.nanoTime();
+        try {
+            ToolResult result = toolRegistry.execute(call);
+            auditLogger.log(AuditEvent.builder()
+                .toolCallId(call.getId())
+                .toolName(call.getName())
+                .input(call.getArguments())
+                .output(result.getData())
+                .durationMs((System.nanoTime() - start) / 1_000_000)
+                .operatorId(task.getUserId())
+                .traceId(MDC.get("traceId"))
+                .status(SUCCESS)
+                .build());
+            return result;
+        } catch (Exception e) {
+            auditLogger.log(AuditEvent.failed(call, e, task.getUserId()));
+            throw e;
+        }
+    }
+}
+```
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+### 2.4 状态机与可恢复
 
-## 八、苏格拉底式面试追问
+```java
+// Agent 状态持久化（支持失败恢复）
+@Entity
+public class AgentState {
+    @Id String taskId;
+    String userId;
+    AgentStatus status;          // CREATED, RUNNING, PAUSED_FOR_APPROVAL, SUCCEEDED, FAILED
+    int stepCount;
+    int tokensUsed;
+    Instant startTime;
+    @Lob List<Message> history;  // 完整对话历史（可回放）
+    String pendingApprovalToolCallId;
+    // 失败后可从最近 checkpoint 恢复：loadState(taskId) → 继续循环
+}
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+// 人工审批后恢复
+public AgentResult resumeAfterApproval(String taskId, boolean approved) {
+    AgentState state = stateRepo.findById(taskId);
+    if (approved) {
+        ToolResult result = toolRegistry.executeApproved(state.getPendingCall());
+        state.appendToolResult(state.getPendingCallId(), result);
+        return execute(state);    // 继续循环
+    } else {
+        state.appendToolResult(state.getPendingCallId(),
+            ToolResult.rejected("用户拒绝"));
+        return execute(state);
+    }
+}
+```
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“AI Agent 工具调用、状态与审计”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 tool_schema_error_rate、replay_success_rate、agent_failure_reason_count、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 Agent 负责的范围，以及必须依赖 工具调用、审计 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 参数不校验导致危险调用，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+## 三、实战层：权限矩阵与人工确认
 
-### 现场对话示例
+```java
+// 工具权限矩阵（RBAC + ABAC）
+@Component
+public class ToolRegistry {
 
-**面试官**：你说要做“AI Agent 工具调用、状态与审计”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 tool_schema_error_rate、replay_success_rate、业务失败率和事故记录。
+    private final Map<String, Tool> tools;        // 白名单注册
+    private final PermissionService permService;
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 tool_schema_error_rate 没有改善，或者 replay_success_rate 反而变差，就停止扩大范围，回到假设层重新复盘。
+    // 按 userId 返回授权工具集（不信任 LLM 看到的全部工具）
+    public List<Tool> authorizedTools(String userId) {
+        User user = userService.findById(userId);
+        return tools.values().stream()
+            .filter(t -> permService.canCall(user, t.getName()))
+            .collect(toList());
+    }
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 tool_schema_error_rate、replay_success_rate、agent_failure_reason_count。这样它不是个人经验，而是团队机制。
+    // 高敏操作标记
+    public boolean requiresApproval(String toolName) {
+        return Set.of("applyRefund", "cancelOrder", "modifyPayment",
+                       "grantPermission", "deleteAccount").contains(toolName);
+    }
+}
+```
 
-## 九、专项架构深挖：对象、链路、失败模式
+**审计日志格式**（合规必需）：
 
-这一题不要停在“知道 Agent”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+```json
+{
+  "timestamp": "2026-07-13T10:30:00Z",
+  "traceId": "abc123",
+  "toolCallId": "call_xyz789",
+  "toolName": "applyRefund",
+  "operatorId": "user_888",
+  "agentTaskId": "task_001",
+  "input": {"orderId": "123456", "reason": "商品损坏"},
+  "output": {"refundId": "R001", "status": "APPROVAL_REQUIRED"},
+  "durationMs": 120,
+  "status": "SUCCESS",
+  "approvalRequired": true
+}
+```
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 工具注册表、参数 schema、执行沙箱、审计日志；任务状态、重试策略、人工确认和成本预算；评测集和回放环境 |
-| 设计主线 | 工具要强 schema、强权限、强审计；执行过程可中断、可恢复、可回放；上线前用离线评测和线上灰度共同验证 |
-| 失败模式 | 参数不校验导致危险调用；调用链不可回放无法定位问题；成本预算缺失导致调用失控 |
-| 验证指标 | tool_schema_error_rate、replay_success_rate、agent_failure_reason_count、cost_budget_burn |
+## 四、底层本质：为什么 Agent 比 RAG 更难工程化
 
-**架构拆解**：
+RAG 是"检索一次 + 生成一次"的单轮任务，Agent 是"多轮决策 + 多次工具调用 + 状态流转"的长任务。多出来的工程复杂度集中在四个维度：
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 工具调用 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 AI Agent 工具调用、状态与审计 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 审计 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+1. **非确定性放大**：单轮 LLM 错一次就错一次，Agent 循环 20 步，每步 5% 错误率累积下来 64% 任务出错。必须用 schema 校验、重试、人工确认把每步错误率压到 0.1% 以下。
 
-**高分回答细节**：
+2. **副作用累积**：RAG 只读不写，Agent 会调用有副作用的工具（退款、改库存）。多步执行后部分成功部分失败，需要 saga 模式做补偿。这比 RAG 复杂一个数量级。
 
-- 不要只说“可以用 Agent”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+3. **成本爆炸窗口**：RAG 固定检索 K 个文档 + 一次生成，成本可控。Agent 死循环会让 token 成本指数级增长，必须有硬预算上限。
 
-## 十、二轮场景追问与项目表达
+4. **可恢复性**：RAG 失败重查即可。Agent 跑了 15 步失败，从头重来既慢又可能对已执行的工具造成重复副作用。必须 checkpoint。
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+这四点决定了 Agent 工程化的核心不是"接 function calling API"（这只需 10 行代码），而是**用状态机、预算、权限、审计、补偿把一个非确定的循环过程约束成可控的生产系统**。
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+## 五、AI 工程化深挖：评估、护栏与可观测
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“AI Agent 工具调用、状态与审计”，重点看 tool_schema_error_rate、replay_success_rate、agent_failure_reason_count，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+1. **Agent 的效果怎么评估？**
+   分层 eval：(1) 单步——tool_call 的参数是否符合 schema、是否选对工具（tool_selection_accuracy）；(2) 端到端——agent_task_completion_rate（任务是否成功完成）、平均步数（效率）、token_cost_per_task（成本）；(3) 安全——human_confirm_rate（触发人工确认的比例，过高说明 Agent 太激进）、tool_permission_violation_rate（越权尝试率，必须为 0）。
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+2. **怎么防止 Agent 被诱导执行危险操作（prompt injection）？**
+   纵深防御：(1) 工具白名单按用户权限动态生成，LLM 根本看不到无权工具；(2) 工具执行前服务端二次校验权限（不信任 LLM）；(3) 高敏操作强制人工确认，LLM 无法绕过；(4) 工具参数走沙箱（如执行代码工具用 Docker 隔离，SQL 工具限制只读账号）。监控 tool_permission_violation_rate，非零立即告警。
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 Agent 和 工具调用 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+3. **Agent 长任务怎么保证可靠性？**
+   saga 模式 + checkpoint。每个工具调用是 saga 的一个 step，记录补偿动作（refund 的补偿是 reverse_refund）。状态每步 checkpoint 到数据库，失败从最近 checkpoint 恢复。超时（5 分钟）或步数上限（20）强制终止，返回已完成步骤和未完成步骤。监控 agent_task_completion_rate 和平均恢复时间。
 
-### 追问 3：你如何判断这个方案值得做？
+4. **多 Agent 协作怎么设计？**
+   单 Agent 适合简单任务，复杂任务拆成多 Agent（如 planner + executor + critic）。协调方式：(1) 中心化（orchestrator 调度）；(2) 去中心化（Agent 间消息传递）。多 Agent 引入通信成本和一致性挑战（如 critic 否决了 executor 的结果），需要明确的协议和状态共享机制。工程上优先单 Agent + 多工具，复杂度可控；确有必要才上多 Agent。
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 审计 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+5. **Agent 调用怎么和 trace 系统集成？**
+   每次 Agent 任务生成根 span，每个 LLM 调用和 tool_call 生成子 span（带 tool_name、参数摘要、耗时、token、cost）。traceId 贯穿用户请求 → Agent 循环 → 每步 LLM 调用 → 每步工具执行 → 下游服务调用。排查"这个退款为什么失败"时，能从 trace 看到完整决策链：LLM 第 3 步决定 applyRefund → 权限校验 → 执行 → 失败原因。
 
-### STAR 项目表达
-
-- **S（背景）**：原系统在 Agent 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 AI Agent 工具调用、状态与审计 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 tool_schema_error_rate、replay_success_rate 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
-
-### 二轮复盘清单
-
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
-
-## 十一、面试官 5 个企业级追问
-
-1. **你在真实项目里怎么判断“AI Agent 工具调用、状态与审计”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 tool_schema_error_rate、replay_success_rate、agent_failure_reason_count。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
-
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，Agent 是否真是瓶颈，工具调用 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
-
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 参数不校验导致危险调用。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 tool_schema_error_rate 和 replay_success_rate 做分钟级观察，一旦越过阈值立即止损。
-
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 审计，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
-
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“AI Agent 工具调用、状态与审计”，至少要沉淀 工具注册表、参数 schema、执行沙箱、审计日志 的建模规范，以及 tool_schema_error_rate、replay_success_rate 的验收标准。
-
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“AI Agent 工具调用、状态与审计”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 Agent 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“AI Agent 工具调用、状态与审计”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 tool_schema_error_rate、replay_success_rate 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 参数不校验导致危险调用，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 六、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：带实习生的值班组长拿着任务清单、权限卡、审批单和操作记录，在处理“实习生很聪明但不能让他直接动生产”。
+抓 **"工具、状态、权限、审计"** 四个词。
 
-- **场景**：先说明“AI Agent 工具调用、状态与审计”服务于什么业务目标，不要上来就堆 Agent。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 参数不校验导致危险调用、调用链不可回放无法定位问题。
-- **验证**：最后落到 tool_schema_error_rate、replay_success_rate、agent_failure_reason_count，让面试官感觉你真的上线过。
-
-### 拟人化理解
-
-可以把“AI Agent 工具调用、状态与审计”想成一个带实习生的值班组长：Agent 是他的任务清单、权限卡、审批单和操作记录，工具调用 是他面对的现场信号，审计 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先限定工具，再逐步授权。这样记，比死背组件名更稳。
+- **工具**：强 schema 定义、白名单授权、服务端二次校验、沙箱执行
+- **状态**：状态机 + 每步 checkpoint + 可恢复 + 四上限（步数/token/耗时/重试）
+- **权限**：工具级 RBAC、高敏操作人工确认、LLM 看不到无权工具
+- **审计**：tool_call_id + 输入输出 + 耗时 + 操作人 + traceId，全链路可回放
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“AI Agent 工具调用、状态与审计”，我会这样答：我会先把 Agent 当成会建议、会调用工具但必须受控的执行体，重点讲权限、审批、状态和回放。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 参数不校验导致危险调用，所以我会提前设计灰度、监控和止损阈值，重点看 tool_schema_error_rate、replay_success_rate。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 tool_schema_error_rate 或 replay_success_rate 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> AI Agent 工程化我拆成四要素。LLM 负责决策，用 Spring AI 的 @Tool 注解定义强 schema 的工具，function calling 时自动转 JSON Schema。工具调用有三道闸：白名单按用户权限动态生成（LLM 看不到无权工具）、服务端二次校验参数和权限（不信任 LLM 输出）、高敏操作（退款、改权限）强制人工确认。状态管理用状态机 + 每步 checkpoint，失败可恢复，配合四上限（步数 20、token 10000、耗时 5 分钟、重试 3 次）防死循环烧钱。审计上每次 tool_call 记录 tool_call_id、输入、输出、耗时、操作人、traceId，可全链路回放。核心评估指标：tool_call_success_rate、agent_task_completion_rate、human_confirm_rate、token_cost_per_task。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司 Agent 场景是内部工具（如运维 Agent、客服 Agent）还是面向 C 端用户？内部工具权限相对集中，C 端要处理海量用户的权限隔离和成本控制，架构侧重不同。
 
+## 七、苏格拉底式面试追问
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么用 Agent，不让 LLM 一次性生成完整答案？ | 单轮 LLM 无法处理多步任务（查 A 再基于 A 的结果查 B）、无法调用外部工具（实时数据）、无法处理需要条件分支的流程。Agent 用循环让 LLM 迭代决策。但简单查询仍用单轮，不过度设计 |
+| 证据追问 | 怎么证明 Agent 比人工/规则引擎好？ | 看 agent_task_completion_rate（自动化完成率）、平均完成耗时 vs 人工耗时、token_cost_per_task vs 人工成本。要有对照组：同任务走规则引擎 vs 走 Agent |
+| 边界追问 | Agent 适合什么任务，不适合什么？ | 适合：多步骤、需要推理、工具组合多样、规则难穷举（客服、运维、数据分析）。不适合：强确定性流程（支付）、高实时（< 1s）、高合规（不能有非确定决策）|
+| 反例追问 | 什么场景你不上 Agent？ | 单步查询（直接走 API）、强规则流程（状态机足够）、对延迟极敏感（Agent 循环慢）、合规要求零非确定决策（金融核心交易）。这些用传统代码更稳 |
+| 风险追问 | Agent 上线最大风险？ | 工具权限过大导致越权操作（如 LLM 被诱导调用 grantPermission）。兜底：工具白名单 + 服务端二次校验 + 高敏人工确认 + tool_permission_violation_rate 零容忍告警。第二风险是死循环烧钱，四上限兜底 |
+| 验证追问 | 怎么证明 Agent 安全？ | 故障演练：注入诱导 prompt 看是否越权、注入超大任务看是否触发步数上限、注入会死循环的输入看预算是否生效、注入危险参数看 schema 是否拦截。监控 human_confirm_rate 和 tool_permission_violation_rate |
+| 沉淀追问 | 团队 Agent 规范沉淀什么？ | 工具定义模板（@Tool + @ToolParam + 服务端校验）、权限矩阵配置、Agent 任务接入 checklist（必查四上限、必查人工确认点、必查审计字段）、Agent eval 集模板 |
+
+### 现场对话示例
+
+**面试官**：你说工具调用要做服务端二次校验，为什么不信任 LLM 传的参数？
+
+**候选人**：因为 LLM 输出是非确定的，可能传错（orderId 拼错）、可能被 prompt injection 诱导传恶意参数（如 SQL 注入字符串）、可能幻觉出不存在的 ID。所以工具方法内部必须校验：参数格式（正则）、参数合法性（ID 存在、归属正确）、业务前置条件（订单状态允许退款）。这和写 Web API 不信任前端传参是同一个道理——LLM 就是那个"前端"。
+
+**面试官**：Agent 跑到第 10 步服务重启了，怎么办？
+
+**候选人**：每步 checkpoint 到数据库（task_id、当前状态、已完成步骤的完整 history）。服务重启后从最近 checkpoint 加载状态，继续循环。对已执行的有副作用工具（如退款已发起），恢复时先查工具的当前状态（退款是否成功），避免重复执行。这就是 saga 模式——每个工具调用可查询、可补偿。监控平均恢复时间，要求 < 30 秒。
+
+**面试官**：怎么防止 Agent 被用户诱导泄露别人的订单？
+
+**候选人**：三层防护。第一层，工具白名单按 userId 过滤——用户 A 的 Agent 根本看不到 queryOrder 工具暴露给别人订单的入口（工具定义里 userId 是必填且从 session 取，不从 LLM 取）。第二层，工具执行时校验 userId 是否是订单所有者，不是抛 ToolPermissionException。第三层，审计日志记录每次调用，事后能追溯。监控 tool_permission_violation_rate，这个指标必须为零，非零就是安全事件。
+
+## 常见考点
+
+1. **function calling 和 tool calling 区别？**——本质一样，OpenAI 早期叫 function calling，后来统一为 tool calling。都是 LLM 输出结构化的工具调用请求（name + arguments），由外部代码执行后把结果回写给 LLM。Spring AI/LangChain4j 用 @Tool 注解自动生成 schema。
+2. **ReAct 是什么？**——Reasoning + Acting，Agent 循环模式。每步 LLM 先 reasoning（Thought：我应该先查订单），再 acting（Action：调用 queryOrder），观察结果（Observation：订单状态是已发货），循环直到完成。Plan-Execute 是变体，先一次性规划再执行。
+3. **Agent 状态怎么持久化？**——每步 checkpoint 存 DB（taskId、status、history、stepCount、tokensUsed）。history 存完整对话（含 tool_call 和 tool_result），可回放。失败从最近 checkpoint 恢复，配合 saga 补偿已执行的副作用。
+4. **怎么控制 Agent 成本？**——四上限：步数（20）、token（10000）、耗时（5 分钟）、重试（3）。超限强制终止返回部分结果。监控 token_cost_per_task，超阈值告警。模型路由：简单决策用 cheap 模型，复杂推理才用 expensive 模型。
+5. **Agent 和工作流引擎（如 Camunda）区别？**——工作流是确定性的（流程图固定），Agent 是非确定性的（LLM 动态决策下一步）。两者互补：确定性流程用工作流，需要灵活决策的环节嵌 Agent。生产实践常把 Agent 作为工作流的一个"智能节点"。

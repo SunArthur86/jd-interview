@@ -9,259 +9,394 @@ tags:
 - 虚拟线程
 - 线程池
 feynman:
-  essence: Spring Boot 虚拟线程配置与线程池共存策略的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: Spring Boot 3.2+ 一行配置 `spring.threads.virtual.enabled=true` 开启虚拟线程，但"开启"不等于"调优"。虚拟线程和平台线程池（@Async、TaskExecutor、HikariCP、Reactor）的共存策略——哪些应该改虚拟线程、哪些必须保留平台线程池、哪些要分而治之——才是落地的核心。
+  analogy: 像把一条小河（平台线程池）改造成"主干道 + 毛细血管"系统：主干道（carrier）固定几条负责重活，毛细血管（虚拟线程）百万条负责轻活（IO 等待）。但有些设备（GPU、JNI、第三方 SDK）只能用主干道，强行改造反而出事。
+  first_principle: 不是所有线程都该用虚拟线程。IO 密集用虚拟线程（让出 carrier），CPU 密集用平台线程池（避免 carrier 频繁切换），JNI/GPU 用固定平台线程（避免 pinning）。Spring Boot 的虚拟线程配置只是入口，业务要按场景区分。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - spring.threads.virtual.enabled=true（Spring Boot 3.2+）
+  - Tomcat / @Async / TaskExecutor 默认改虚拟线程
+  - 必须保留平台线程池的场景：CPU 密集、JNI/GPU、第三方 SDK
+  - HikariCP 不变（连接池大小独立于线程模型）
+  - Reactor / WebFlux 不需要虚拟线程（已经异步）
 first_principle:
-  problem: 面对“Spring Boot 虚拟线程配置与线程池共存策略”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: Spring Boot 开启虚拟线程后，哪些组件改了、哪些没改、怎么和现有线程池共存？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 虚拟线程适合 IO 密集（让出 carrier）
+  - CPU 密集用虚拟线程无收益（carrier 还是平台线程在跑）
+  - JNI/GPU 调用会 pinning，必须用平台线程池
+  - 连接池（HikariCP）独立于线程模型，按后端容量配
+  rebuild: Spring Boot 3.2+ 一行配置开启虚拟线程，自动把 Tomcat 请求线程、@Async、TaskExecutor 改成虚拟线程。但要分类处理：CPU 密集任务（计算、加解密）保留 Platform Thread Pool；JNI/GPU（CUDA、ONNX Runtime）用固定平台线程池；IO 密集（HTTP、DB、消息）用虚拟线程。HikariCP 大小按 MySQL 承载能力配，不随线程模型变。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - spring.threads.virtual.enabled 影响哪些组件？——Tomcat 请求线程、@Async 默认 Executor、Spring Boot TaskExecutor、Quartz 调度。不影响 HikariCP（连接池）、JMS Listener（独立配置）、Reactor（已异步）
+  - "@Async 的线程池怎么配？——默认改成 VirtualThreadTaskExecutor。如果要保留平台线程池，自定义 AsyncConfigurer 返回平台线程池"
+  - CPU 密集任务为什么不能用虚拟线程？——虚拟线程的 carrier 是平台线程（CPU 核数个），CPU 密集任务会让 carrier 长时间占用，影响其他虚拟线程调度。用平台线程池控制并发度
+  - WebFlux 要不要开虚拟线程？——没必要。WebFlux 已经异步（Reactor + Netty event loop），线程数固定。但 WebFlux 内部的 blocking call（如 JDBC）可以用虚拟线程包
+  - 怎么监控虚拟线程和平台线程的协作？——JFR 看 jdk.VirtualThreadPinned、jstack 看 carrier 数、Micrometer 1.12+ 暴露 jvm.threads.virtual.count
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - spring.threads.virtual.enabled=true（Spring Boot 3.2+）
+  - 自动改：Tomcat 请求线程、@Async、TaskExecutor
+  - 不改：HikariCP（连接池）、JMS Listener、Reactor
+  - 必须保留平台线程池：CPU 密集、JNI/GPU、第三方 SDK
+  - HikariCP 大小按后端容量配（不随线程模型变）
+  - 监控：JFR jdk.VirtualThreadPinned + jvm.threads.virtual.count
 ---
 
-# 【Java 后端架构师】Spring Boot 虚拟线程配置与线程池共存策略？
+# 【Java 后端架构师】Spring Boot 虚拟线程配置与线程池共存策略
 
-> 适用场景：JD 核心技术。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。订单服务 Spring Boot 3.2 开启虚拟线程后，QPS 翻倍但 GPU 风控推理服务出现 pinning（JNI 调用 CUDA），数据库连接池被打爆（百万虚拟线程等 10 个连接）。架构师必须设计虚拟线程和平台线程池的共存策略。
 
-## 一、先明确问题边界
+## 一、概念层：Spring Boot 虚拟线程的影响范围
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**spring.threads.virtual.enabled=true 影响的组件**（这张表面试必问）：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+| 组件 | 默认行为 | 开启虚拟线程后 | 配置 |
+|------|---------|--------------|------|
+| **Tomcat 请求线程** | 平台线程池（maxThreads=200） | VirtualThreadTaskExecutor | spring.threads.virtual.enabled |
+| **@Async 默认 Executor** | SimpleAsyncTaskExecutor（平台） | VirtualThreadTaskExecutor | spring.threads.virtual.enabled |
+| **TaskExecutor Bean** | 平台线程池 | 虚拟线程（如未自定义） | spring.threads.virtual.enabled |
+| **MVC async 请求** | 平台线程池 | 虚拟线程 | spring.threads.virtual.enabled |
+| **HikariCP 连接池** | 固定大小（10） | **不变** | spring.datasource.hikari.maximum-pool-size |
+| **JMS Listener** | 平台线程池 | 平台线程池（独立配） | spring.jms.listener.concurrency |
+| **Quartz 调度** | 平台线程池 | 平台线程池（独立配） | spring.quartz.thread-pool-size |
+| **WebFlux / Reactor** | Netty event loop | Netty event loop（已异步） | 不影响 |
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 Spring Boot 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**关键认知**：
+- 开启虚拟线程只影响"按请求/任务起线程"的组件（Tomcat / @Async / MVC async）
+- "连接池"（HikariCP）、"调度池"（Quartz）、"异步框架"（WebFlux）不受影响
+- WebFlux 已经是异步模型，开启虚拟线程没有收益（但也不会坏）
 
-## 二、推荐架构思路
+**配置示例**：
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+```yaml
+# application.yml
+spring:
+  threads:
+    virtual:
+      enabled: true      # 一行配置开启
 
-## 三、技术落地点
+  # HikariCP 不受影响，单独配
+  datasource:
+    hikari:
+      maximum-pool-size: 50    # 按后端 MySQL 容量配，不随线程模型变
+      connection-timeout: 2000
+```
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+## 二、机制层：自动配置与例外场景
 
-## 四、常见坑
+**Spring Boot 自动配置源码逻辑**：
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+```java
+// Spring Boot 3.2 的 TaskExecutionAutoConfiguration
+@ConditionalOnThreading(Threading.VIRTUAL)
+@Bean
+public TaskExecutor applicationTaskExecutor() {
+    return new TaskExecutorAdapter(Executors.newVirtualThreadPerTaskExecutor());
+}
 
-## 五、面试回答模板
+// Tomcat 的 ProtocolHandler
+@ConditionalOnThreading(Threading.VIRTUAL)
+public TomcatProtocolHandlerCustomizer<?> protocolHandlerVirtualThreadCustomizer() {
+    return protocolHandler -> {
+        protocolHandler.setExecutor(
+            new VirtualThreadTaskExecutor("tomcat-vt-")
+        );
+    };
+}
+```
 
-可以按下面结构作答：
+**必须保留平台线程池的场景**：
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“Spring Boot 虚拟线程配置与线程池共存策略”，核心是 Spring Boot 与 虚拟线程 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+| 场景 | 为什么不能用虚拟线程 | 解法 |
+|------|--------------------|------|
+| **CPU 密集任务** | carrier 长期占用，影响其他 VT 调度 | Platform ThreadPool 大小 = CPU 核数 |
+| **JNI / GPU 调用** | JNI 内阻塞必然 pinning | Platform ThreadPool 大小 = GPU 并发数 |
+| **第三方 SDK 用 synchronized + IO** | pinning 元凶 | Platform ThreadPool 或换 SDK |
+| **Reactor 阻塞调用桥接** | BlockHound 检测 + 平台线程隔离 | Schedulers.boundedElastic() |
+| **Spring Batch / 定时任务** | 长生命周期、CPU 混合 | 按任务特征配 |
 
-## 六、加分点
+**场景 1：CPU 密集任务保留平台线程池**
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+```java
+// 反例：CPU 密集用虚拟线程（无收益）
+@Service
+public class CryptoService {
+    @Async   // 如果 spring.threads.virtual.enabled=true，会用虚拟线程
+    public byte[] hash(byte[] data) {
+        return heavyHashComputation(data);   // CPU 密集，carrier 占满
+    }
+}
 
-## 七、企业级面试定位：从“会用”到“能负责”
+// 修复：自定义平台线程池
+@Configuration
+public class CpuIntensiveConfig {
+    @Bean("cpuExecutor")
+    public TaskExecutor cpuExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(Runtime.getRuntime().availableProcessors());
+        executor.setMaxPoolSize(Runtime.getRuntime().availableProcessors());
+        executor.setQueueCapacity(100);
+        executor.setThreadNamePrefix("cpu-");
+        return executor;
+    }
+}
 
-企业级面试不会只问“Spring Boot 是什么”，而是看你能不能对一条真实生产链路负责。回答“Spring Boot 虚拟线程配置与线程池共存策略”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+@Service
+public class CryptoService {
+    @Async("cpuExecutor")    // 指定平台线程池
+    public byte[] hash(byte[] data) {
+        return heavyHashComputation(data);
+    }
+}
+```
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 JD 核心技术 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 Spring Boot、虚拟线程、线程池 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 startup_seconds、bean_init_failures、tx_rollback_rate、aop_proxy_miss_count 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+**场景 2：JNI / GPU 调用用平台线程池**
 
-### 企业级回答骨架
+```java
+// GPU 推理（ONNX Runtime JNI）会 pinning，必须用平台线程池
+@Configuration
+public class GpuInferenceConfig {
+    @Bean("gpuExecutor")
+    public TaskExecutor gpuExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        // 大小 = GPU 可并发推理数（如 8）
+        executor.setCorePoolSize(8);
+        executor.setMaxPoolSize(8);
+        executor.setQueueCapacity(1000);
+        executor.setThreadNamePrefix("gpu-");
+        return executor;
+    }
+}
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 Spring Boot 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+@Service
+public class InferenceService {
+    @Async("gpuExecutor")    // 平台线程池，避免 pinning
+    public float[] infer(float[] input) {
+        return ortSession.run(input);   // JNI 调 ONNX Runtime，平台线程
+    }
+}
 
-### 面试中要主动补的生产细节
+// 主流程用虚拟线程
+public Order handle(Request req) {
+    // Tomcat 线程（虚拟线程）接收
+    float[] features = extractFeatures(req);   // 虚拟线程
+    float[] result = inferenceService.infer(features).get();  // 提交到 GPU 平台池，等待
+    // 虚拟线程在 .get() 时 unmount，carrier 服务其他 VT
+    return buildOrder(result);
+}
+```
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+**场景 3：HikariCP 配置（关键！）**
 
-## 八、苏格拉底式面试追问
+```yaml
+spring:
+  datasource:
+    hikari:
+      # 虚拟线程下，连接池是新瓶颈！
+      # 默认 maximum-pool-size=10，百万 VT 等 10 连接 = 全部 pinning
+      maximum-pool-size: 50       # 按 MySQL 承载能力配
+      connection-timeout: 2000    # 失败快，避免 VT 长时间挂起
+      # 公式：池大小 ≈ (核心数 × 2) + 有效磁盘数（PostgreSQL 公式）
+      # 实际：看 MySQL max_connections 和单查询耗时
+```
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+## 三、实战层：订单服务的虚拟线程落地
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“Spring Boot 虚拟线程配置与线程池共存策略”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 startup_seconds、bean_init_failures、tx_rollback_rate、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 Spring Boot 负责的范围，以及必须依赖 虚拟线程、线程池 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 自调用导致事务或 AOP 失效，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+**架构图**（架构师必须能画）：
 
-### 现场对话示例
+```
+HTTP 请求 ──> Tomcat 虚拟线程（per-request）
+                 │
+                 ├─> @Async("ioExecutor")      IO 异步任务（虚拟线程）
+                 │     └─ HTTP / DB / 消息队列
+                 │
+                 ├─> @Async("cpuExecutor")     CPU 密集任务（平台线程池）
+                 │     └─ 加解密 / 序列化 / 压缩
+                 │
+                 └─> @Async("gpuExecutor")     GPU 推理（平台线程池）
+                       └─ JNI / ONNX Runtime
 
-**面试官**：你说要做“Spring Boot 虚拟线程配置与线程池共存策略”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 startup_seconds、bean_init_failures、业务失败率和事故记录。
+HikariCP（独立配置）──> MySQL（max_connections=200）
+                       ↑ 池大小按 MySQL 容量配，不随 VT 变
+```
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 startup_seconds 没有改善，或者 bean_init_failures 反而变差，就停止扩大范围，回到假设层重新复盘。
+**完整配置**：
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 startup_seconds、bean_init_failures、tx_rollback_rate。这样它不是个人经验，而是团队机制。
+```yaml
+spring:
+  threads:
+    virtual:
+      enabled: true
 
-## 九、专项架构深挖：对象、链路、失败模式
+  # 虚拟线程 IO 任务用（不需要配，spring.threads.virtual 自动）
+  
+  datasource:
+    hikari:
+      maximum-pool-size: 50
+      connection-timeout: 2000
 
-这一题不要停在“知道 Spring Boot”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+# 平台线程池用代码配置
+```
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | BeanDefinition、Bean 生命周期、AOP 代理；事务边界、自动配置、starter；配置属性和条件装配 |
-| 设计主线 | 用 starter 固化通用能力，避免业务项目复制配置；事务只包住核心写操作，外部 IO 放到事务外；扩展点要有顺序、幂等和可观测 |
-| 失败模式 | 自调用导致事务或 AOP 失效；自动配置条件过宽影响所有服务；初始化逻辑过重拖慢启动和发布 |
-| 验证指标 | startup_seconds、bean_init_failures、tx_rollback_rate、aop_proxy_miss_count |
+```java
+@Configuration
+public class ThreadPoolConfig {
 
-**架构拆解**：
+    @Bean("cpuExecutor")
+    public TaskExecutor cpuExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(Runtime.getRuntime().availableProcessors());
+        executor.setMaxPoolSize(Runtime.getRuntime().availableProcessors());
+        executor.setQueueCapacity(100);
+        executor.setThreadNamePrefix("cpu-");
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        return executor;
+    }
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 虚拟线程 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 Spring Boot 虚拟线程配置与线程池共存策略 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 线程池 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+    @Bean("gpuExecutor")
+    public TaskExecutor gpuExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(8);       // GPU 并发数
+        executor.setMaxPoolSize(8);
+        executor.setQueueCapacity(1000);
+        executor.setThreadNamePrefix("gpu-");
+        return executor;
+    }
 
-**高分回答细节**：
+    @Bean("jmsListenerExecutor")
+    public TaskExecutor jmsListenerExecutor() {
+        // JMS Listener 默认平台线程池，按需配
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(10);
+        executor.setMaxPoolSize(20);
+        return executor;
+    }
+}
+```
 
-- 不要只说“可以用 Spring Boot”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+**业务代码使用**：
 
-## 十、二轮场景追问与项目表达
+```java
+@Service
+public class OrderService {
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+    @Resource(name = "cpuExecutor")
+    private TaskExecutor cpuExecutor;
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+    @Async("gpuExecutor")
+    public CompletableFuture<Float[]> infer(float[] features) {
+        return CompletableFuture.completedFuture(ortSession.run(features));
+    }
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“Spring Boot 虚拟线程配置与线程池共存策略”，重点看 startup_seconds、bean_init_failures、tx_rollback_rate，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+    public Order createOrder(OrderDTO dto) throws Exception {
+        // Tomcat 虚拟线程
+        Order order = orderRepo.create(dto);     // HikariCP 50 连接，VT 等待时 unmount
+        
+        // CPU 密集：异步提交平台线程池
+        cpuExecutor.submit(() -> {
+            String signature = heavyHash(order.getId());   // 平台线程跑
+        });
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+        // GPU 推理：提交 gpuExecutor（平台线程池）
+        if (dto.needRiskCheck()) {
+            infer(features).get(2, TimeUnit.SECONDS);      // VT 等待时 unmount
+        }
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 Spring Boot 和 虚拟线程 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+        return order;
+    }
+}
+```
 
-### 追问 3：你如何判断这个方案值得做？
+## 四、底层本质：为什么"开启"不等于"调优"
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 线程池 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+回到第一性：**为什么 spring.threads.virtual.enabled=true 只是起点，不是终点？**
 
-### STAR 项目表达
+- **虚拟线程只解决 IO 阻塞问题**：它让 carrier 在 VT 等 IO 时服务其他 VT。但 CPU 密集任务、JNI 调用、synchronized 阻塞都不受益（甚至受害）。
+- **线程模型分层**：现代应用是"IO 密集 + CPU 密集 + GPU/JNI"混合。一刀切用虚拟线程（CPU 任务用 VT）或一刀切用平台线程（IO 任务用平台）都是错的。要按任务特征分流。
+- **连接池是新瓶颈**：HikariCP 默认 10 个连接，VT 时代百万并发等 10 个连接 = 全部 pinning。连接池配置要从"按应用并发配"改成"按后端容量配"。
+- **监控盲区**：传统的 jvm.threads.live 看不出 VT 和平台线程的协作。要新增 jvm.threads.virtual.count、carrier CPU 利用率、pinning 事件计数。
 
-- **S（背景）**：原系统在 Spring Boot 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 Spring Boot 虚拟线程配置与线程池共存策略 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 startup_seconds、bean_init_failures 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+**Spring Boot 自动配置的边界**：
+- 自动改的：Tomcat / @Async 默认 / TaskExecutor（用户没显式配的）
+- 不自动改的：HikariCP（连接池，独立维度）、Quartz（调度，独立配置）、JMS（消息监听容器，独立配）
+- 用户自定义的：自定义 TaskExecutor Bean 不会被自动覆盖（@ConditionalOnMissingBean）
 
-### 二轮复盘清单
+**为什么 HikariCP 不自动改**：
+- HikariCP 大小取决于后端数据库容量（MySQL max_connections、PostgreSQL 公式），不是应用线程模型
+- 应用层不该决定连接池大小，要按 DB 容量算
+- 如果改成"按 VT 数配"会导致 DB 被打爆
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+## 五、AI 架构师加问：5 个
 
-## 十一、面试官 5 个企业级追问
+1. **AI 推理服务的虚拟线程怎么配置？**
+   网关层（HTTP 接收、鉴权、转发）用虚拟线程（Tomcat 自动）；模型推理用平台线程池（GPU JNI 会 pinning，executor 大小 = GPU 并发数）；数据预处理（IO 密集）用虚拟线程。三个线程模型分层共存，通过 CompletableFuture 或队列解耦。
 
-1. **你在真实项目里怎么判断“Spring Boot 虚拟线程配置与线程池共存策略”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 startup_seconds、bean_init_failures、tx_rollback_rate。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+2. **AI Copilot 帮业务配虚拟线程，最容易翻车在哪？**
+   三个点：① CPU 密集任务用 @Async 默认 Executor（虚拟线程）导致 carrier 占满；② JNI/GPU 调用没指定平台线程池导致 pinning；③ HikariCP 没调大（默认 10）导致 VT 等连接 pinning。AI 要能识别"这个方法是 CPU 密集 / JNI 调用"，建议用 @Async("platformExecutor")。
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，Spring Boot 是否真是瓶颈，虚拟线程 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+3. **AI Agent 调用多个工具，工具内部混合 CPU/IO/GPU，怎么编排？**
+   外层用 StructuredTaskScope（虚拟线程编排），每个 tool_call 根据特征分流：IO 工具（数据库/HTTP）走虚拟线程；CPU 工具（编码/解码）走 cpuExecutor 平台线程池；GPU 工具（推理）走 gpuExecutor 平台线程池。Agent 主流程虚拟线程负责等结果（让出 carrier），工具内部按特征选线程模型。
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 自调用导致事务或 AOP 失效。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 startup_seconds 和 bean_init_failures 做分钟级观察，一旦越过阈值立即止损。
+4. **AI 能自动评估服务的线程模型健康度吗？**
+   AI 分析 JFR 的 jdk.VirtualThreadPinned（pinning 热点）、jvm.threads.virtual.count（VT 数）、carrier CPU 利用率、HikariCP active/wait。建模：如果 pinning 率 > 10%，建议治理；如果 HikariCP wait 高，建议调大；如果 carrier CPU 接近 100%，建议拆分 CPU 密集任务到平台线程池。输出线程模型调优建议。
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 线程池，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+5. **大模型推理服务的"请求级虚拟线程 + 推理级平台线程池"架构怎么设计？**
+   Tomcat 接收 HTTP（虚拟线程）→ 解析 prompt（虚拟线程做 IO）→ 提交推理任务到 GPU Executor（平台线程池，避免 JNI pinning）→ 虚拟线程 .get() 等结果（unmount）→ 返回响应。GPU Executor 大小 = GPU 并发数（如 4），队列大小按业务容忍延迟配。流式输出场景下用 SynchronousQueue 或 Flux 把 token 流式传回，虚拟线程不阻塞等待完整响应。
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“Spring Boot 虚拟线程配置与线程池共存策略”，至少要沉淀 BeanDefinition、Bean 生命周期、AOP 代理 的建模规范，以及 startup_seconds、bean_init_failures 的验收标准。
-
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“Spring Boot 虚拟线程配置与线程池共存策略”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 Spring Boot 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“Spring Boot 虚拟线程配置与线程池共存策略”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 startup_seconds、bean_init_failures 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 自调用导致事务或 AOP 失效，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 六、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：应用装配师拿着自动配置、starter 和生命周期钩子，在处理“一堆能力要稳定装进同一个应用”。
+抓 **"一行配置、自动改 Tomcat、HikariCP 不变、CPU/GPU 用平台池"**。
 
-- **场景**：先说明“Spring Boot 虚拟线程配置与线程池共存策略”服务于什么业务目标，不要上来就堆 Spring Boot。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 自调用导致事务或 AOP 失效、自动配置条件过宽影响所有服务。
-- **验证**：最后落到 startup_seconds、bean_init_failures、tx_rollback_rate，让面试官感觉你真的上线过。
+- **配置**：spring.threads.virtual.enabled=true（Spring Boot 3.2+）
+- **自动改**：Tomcat 请求线程、@Async 默认、TaskExecutor
+- **不变**：HikariCP（按后端容量配）、JMS Listener、Quartz
+- **必须平台池**：CPU 密集（@Async("cpuExecutor")）、JNI/GPU、synchronized 重
+- **HikariCP 必调**：默认 10 太小，按后端 MySQL 容量配（50-100）
+- **监控**：JFR jdk.VirtualThreadPinned + jvm.threads.virtual.count
 
 ### 拟人化理解
 
-可以把“Spring Boot 虚拟线程配置与线程池共存策略”想成一个应用装配师：Spring Boot 是他的自动配置、starter 和生命周期钩子，虚拟线程 是他面对的现场信号，线程池 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先理清装配顺序，再控制扩展点边界。这样记，比死背组件名更稳。
+把虚拟线程配置想成**改造城市交通**。spring.threads.virtual.enabled 是"开启毛细血管系统"（百万虚拟线程跑 IO 轻活），但城市还有主干道（carrier 平台线程跑重活）。CPU 密集任务（如加密）像大型货车——只能走主干道，硬要走毛细血管会堵死；JNI/GPU 调用像超限运输——必须走专用主干道（平台线程池），否则 pinning 出事故。HikariCP 像高速公路收费站——容量固定（10 个通道），百万车辆（VT）挤 10 通道必然瘫痪，要按 DB 容量扩到 50 通道。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“Spring Boot 虚拟线程配置与线程池共存策略”，我会这样答：我会先看 Spring Boot 在这个场景里承担的是装配、约定还是治理能力，避免把业务复杂度藏进自动配置里。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 自调用导致事务或 AOP 失效，所以我会提前设计灰度、监控和止损阈值，重点看 startup_seconds、bean_init_failures。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 startup_seconds 或 bean_init_failures 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> Spring Boot 3.2+ 一行配置 spring.threads.virtual.enabled=true 开启虚拟线程，自动把 Tomcat 请求线程、@Async 默认 Executor、TaskExecutor 改成虚拟线程。但要分类共存：IO 密集（HTTP/DB/消息）用虚拟线程（让出 carrier）；CPU 密集（加解密/序列化）保留平台线程池（@Async("cpuExecutor")）；JNI/GPU（CUDA/ONNX）用平台线程池（避免 pinning）。HikariCP 不受影响——必须按后端 MySQL 容量配（50-100，不是默认 10），否则百万 VT 等 10 连接全 pinning。JMS Listener、Quartz 独立配置，不随 spring.threads.virtual 变。监控用 JFR 看 jdk.VirtualThreadPinned 事件 + Micrometer jvm.threads.virtual.count。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司 Spring Boot 版本？业务里有 CPU 密集任务（加解密/序列化）或 GPU/JNI 调用吗？HikariCP 默认配置多大？这决定我聊虚拟线程落地还是线程池共存策略。
 
+## 七、苏格拉底式面试追问
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 已经有 Reactor/WebFlux 了，还要虚拟线程吗？ | 不必须但推荐。WebFlux 已异步（Netty event loop），但 WebFlux 内部的 blocking call（如 JDBC）还是要靠 boundedElastic 平台线程池，虚拟线程能更好。如果纯 WebFlux + Reactive 全栈，虚拟线程收益小 |
+| 证据追问 | 怎么证明虚拟线程真的提升了性能？ | 压测：开启前后 QPS / P99 / 内存对比（IO 密集场景 QPS 应翻倍）；监控：jvm.threads.virtual.count + carrier CPU 利用率（应拉满）；JFR：pinning 事件 < 1/分钟 |
+| 边界追问 | 所有 @Async 都该用虚拟线程吗？ | 不是。CPU 密集 @Async 用虚拟线程无收益（carrier 占满）；JNI/GPU @Async 必须 platform pool（pinning）；只有 IO 密集 @Async 用虚拟线程有收益。要按任务特征分流 |
+| 反例追问 | 什么场景不要开 spring.threads.virtual.enabled？ | 纯 CPU 密集服务（无收益）、JNI/GPU 主导服务（pinning 严重）、第三方库大量 synchronized（pinning）、JDK < 21 |
+| 风险追问 | 开启虚拟线程最大风险？ | ① HikariCP 不调大导致 VT 等连接 pinning；② CPU 密集任务被 @Async 默认执行器（虚拟线程）跑导致 carrier 占满；③ JNI/GPU pinning；④ 第三方库 synchronized pinning。治法：HikariCP 调大、@Async 指定平台池、JFR 监控 pinning |
+| 验证追问 | 怎么证明虚拟线程落地后健康？ | jstack 看 carrier 数和挂起原因（carrier RUNNABLE 但 CPU 低 = pinning）；JFR 看 jdk.VirtualThreadPinned 频率（< 100/分钟健康）；Micrometer 看 jvm.threads.virtual.count（业务合理范围）；HikariCP active/wait（wait 低健康） |
+| 沉淀追问 | 团队推广虚拟线程沉淀什么？ | 线程模型选型矩阵（按任务特征分流）、Spring Boot 虚拟线程 + 平台池共存模板、HikariCP 容量评估 SOP、JFR pinning 监控告警、Code Review checklist（@Async 是否指定正确 executor） |
+
+### 现场对话示例
+
+**面试官**：spring.threads.virtual.enabled=true 开启后，所有 @Async 都用虚拟线程了？
+
+**候选人**：默认是。但这是问题——CPU 密集任务和 JNI/GPU 调用不能用虚拟线程。CPU 密集用虚拟线程会让 carrier 占满（虚拟线程的载体还是平台线程）；JNI/GPU 会 pinning（carrier 钉死）。所以生产代码必须显式指定 executor：@Async("cpuExecutor") 用平台线程池跑 CPU 任务，@Async("gpuExecutor") 用平台线程池跑 GPU 推理。只有 IO 密集 @Async 用默认虚拟线程。这是线程模型分层的核心。
+
+**面试官**：HikariCP 怎么配？
+
+**候选人**：HikariCP 不受 spring.threads.virtual 影响，要按后端 MySQL 容量配。原默认 10 个连接在虚拟线程下是灾难——百万 VT 等 10 连接全 pinning。生产建议：maximum-pool-size 按 MySQL 的 max_connections 和单查询耗时算，一般 50-100；connection-timeout 调到 2s（失败快，避免 VT 长时间挂起）。HikariCP Wiki 公式：池大小 = (核心数 × 2) + 有效磁盘数，但实际还要看 DB 承载。
+
+**面试官**：JFR 怎么监控虚拟线程健康？
+
+**候选人**：三个核心指标。第一，jdk.VirtualThreadPinned 事件（threshold 默认 20ms），pinning 频率高说明 synchronized 或 native 调用多，要治理。第二，jvm.threads.virtual.count（Micrometer 暴露），虚拟线程数应在业务合理范围（不是无限增长）。第三，carrier CPU 利用率（process_cpu_usage），正常应该和业务负载匹配；如果 carrier RUNNABLE 但 CPU 低，说明大量 pinning（carrier 在等）。配合 jstack 看 carrier 状态最直观。
+
+## 常见考点
+
+1. **spring.threads.virtual.enabled 影响什么？**——Tomcat 请求线程、@Async 默认 Executor、TaskExecutor Bean。不影响 HikariCP、JMS、Quartz、WebFlux。
+2. **CPU 密集任务能用虚拟线程吗？**——不推荐。CPU 密集用虚拟线程无收益（carrier 还是平台线程在跑），反而占满 carrier。用 @Async("cpuExecutor") 指定平台线程池。
+3. **HikariCP 在虚拟线程下怎么配？**——按后端 MySQL 容量配（50-100），不随线程模型变。默认 10 个连接是灾难（百万 VT 等连接 pinning）。
+4. **JNI/GPU 调用为什么不能用虚拟线程？**——JNI 内阻塞必然 pinning（JVM 看不到 native 栈）。用平台线程池（gpuExecutor）隔离。
+5. **怎么监控虚拟线程健康？**——JFR jdk.VirtualThreadPinned（pinning 频率）+ jvm.threads.virtual.count（VT 数）+ carrier CPU 利用率 + HikariCP wait。

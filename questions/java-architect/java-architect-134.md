@@ -9,259 +9,443 @@ tags:
 - 加密
 - 密钥轮转
 feynman:
-  essence: 数据脱敏、加密与密钥轮转架构的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: 数据脱敏/加密的本质是"按敏感等级分层处理"——展示层脱敏（手机号 138****8888）、传输层 TLS、存储层 AES-256 字段加密、备份层 TDE 透明加密。密钥轮转是"加密强度的时间衰减防御"——即使一个密钥泄露，轮转后旧密钥失活，泄露窗口可控。Java 后端落地三个抓手：(1) 自定义注解 + Jackson Serializer 自动脱敏；(2) AES-GCM 字段加密（DEK + KEK 双层密钥，envelope encryption）；(3) HashiCorp Vault 管理密钥，自动轮转 + 审计。
+  analogy: 像物流仓库的"分层防护"。脱敏是出库时贴黑条（用户看不全）；传输加密是运输车带锁（路上安全）；存储加密是仓库保险柜（落库加密）；密钥轮转是定期换保险柜密码（即使旧密码泄露，换后无效）；KMS 是中央密码管理处（统一签发 + 审计 + 销毁）。
+  first_principle: 为什么不能只用一个密钥？因为密钥使用越久，泄露概率越大（员工离职、日志泄露、侧信道攻击）。轮转把"长期暴露窗口"切成"N 个短期窗口"，每个窗口结束后旧密钥失活，泄露影响缩小。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 脱敏三档：展示脱敏（138****8888）、日志脱敏（不打印 PII）、传输脱敏（HTTPS）
+  - 加密三档：传输 TLS、字段 AES-GCM、备份 TDE
+  - 信封加密（Envelope Encryption）：DEK 加密数据，KEK 加密 DEK，KEK 存 KMS
+  - 密钥版本化：每个密钥有 version，加密时记录 version，解密时按 version 查密钥
+  - KMS：HashiCorp Vault / AWS KMS / 阿里云 KMS，统一签发 + 审计 + 轮转
 first_principle:
-  problem: 面对“数据脱敏、加密与密钥轮转架构”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 数据生命周期中（传输、存储、备份、展示），每一层都面临泄露风险，如何分层防护且密钥可控？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 单一防护层必破——传输加密了存储明文、存储加密了备份明文，等于没加密
+  - 密钥不能和应用一起存储（同库同泄露），必须独立 KMS
+  - 密钥使用越久泄露风险越大，必须定期轮转
+  rebuild: 分层防护——传输 TLS（防中间人）+ 字段 AES-GCM（防 DB 拖库）+ 备份 TDE（防备份泄露）+ 展示脱敏（防 UI 泄露）。密钥用信封加密（DEK + KEK），DEK 每条数据独立随机（防批量拖库后批量破解），KEK 由 KMS 集中管理定期轮转（90 天）。所有密钥访问进审计日志，离开 KMS 必须授权 + 双因子。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - AES-GCM 为什么优于 AES-CBC？——GCM 提供认证加密（AEAD），同时保证机密性 + 完整性；CBC 只机密性，需额外 MAC 防 padding oracle 攻击。GCM 还能并行加速。
+  - DEK 怎么生成？——每条数据用 CSPRNG（如 SecureRandom）生成 256 bit 随机 key，加密后存储。绝对不能复用。
+  - 密钥轮转时旧数据怎么解？——加密时记录 key_version，解密时按 version 查旧 KEK 解密；轮转是"新数据用新密钥"，旧数据按需 lazy re-encrypt 或后台批量迁移。
+  - 脱敏规则怎么配置？——按字段类型（手机号 138****8888、身份证 110***********0010、邮箱 a***@b.com、银行卡 6212**********1234）。
+  - 数据库透明加密（TDE）够吗？——不够。TDE 只防"磁盘丢失"（落盘加密），不防"DBA 查数据库"（数据在内存是明文）。敏感字段必须应用层 AES 加密。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 脱敏：展示（138****8888）+ 日志（不打印 PII）+ 传输（HTTPS）
+  - 加密：传输 TLS + 字段 AES-GCM + 备份 TDE
+  - 信封加密：DEK 加数据 + KEK 加 DEK，KMS 管 KEK
+  - 密钥轮转：90 天 KEK + 每条独立 DEK
+  - KMS：Vault / AWS KMS，统一签发 + 审计 + 轮转
 ---
 
-# 【Java 后端架构师】数据脱敏、加密与密钥轮转架构？
+# 【Java 后端架构师】数据脱敏、加密与密钥轮转架构
 
-> 适用场景：架构设计。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。京东用户表 5 亿条，含手机号、身份证、银行卡、地址等 PII。一次 DB 拖库（如内鬼导出）就泄露全部用户信息——监管罚款 + 用户客诉 + 品牌损失。引入字段加密 + 信封加密 + 密钥轮转后，即使 DB 被拖库，数据是密文无法直接读。
 
-## 一、先明确问题边界
+## 一、概念层
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**数据生命周期分层防护**：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+| 层 | 威胁 | 防护 |
+|----|------|------|
+| 输入 | 客户端篡改 | HTTPS（TLS 1.3）+ 签名 |
+| 处理 | 内存泄露 | 最小化保留时间、用完即清 |
+| 存储 | DB 拖库 | 字段 AES-GCM 加密 + 信封加密 |
+| 备份 | 备份盘丢失 | TDE（Transparent Data Encryption） |
+| 传输 | 中间人 | mTLS（服务间）+ HTTPS（外） |
+| 展示 | UI 截图泄露 | 字段脱敏（手机号 138****8888） |
+| 日志 | 日志聚合泄露 | 不打印 PII / 自动脱敏 |
+| 销毁 | 数据残留 | 安全删除（多次覆写）+ 密钥销毁（密文永久不可解） |
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 脱敏 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**敏感数据分级**：
 
-## 二、推荐架构思路
+| 等级 | 例子 | 处理 |
+|------|------|------|
+| 极敏感（L4） | 密码、密钥、私钥 | 不可逆哈希（密码）+ KMS 托管（密钥） |
+| 高敏（L3） | 身份证、银行卡、生物特征 | AES-GCM 加密 + 信封 + KMS |
+| 中敏（L2） | 手机号、邮箱、地址 | AES 加密或字段脱敏 |
+| 低敏（L1） | 用户名、注册时间 | 不加密，按需脱敏 |
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+## 二、机制层：脱敏实现
 
-## 三、技术落地点
+**自定义注解 + Jackson Serializer**：
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+```java
+// 1. 脱敏注解
+@Target(ElementType.FIELD)
+@Retention(RetentionPolicy.RUNTIME)
+@JacksonAnnotationsInside
+@JsonSerialize(using = MaskingSerializer.class)
+public @interface Sensitive {
+    SensitiveType value();
+}
 
-## 四、常见坑
+public enum SensitiveType {
+    PHONE, ID_CARD, EMAIL, BANK_CARD, ADDRESS, NAME
+}
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+// 2. 自定义 Serializer
+public class MaskingSerializer extends JsonSerializer<String>
+        implements ContextualSerializer {
 
-## 五、面试回答模板
+    private SensitiveType type;
 
-可以按下面结构作答：
+    @Override
+    public void serialize(String value, JsonGenerator gen, SerializerProvider provider)
+            throws IOException {
+        gen.writeString(mask(value, type));
+    }
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“数据脱敏、加密与密钥轮转架构”，核心是 脱敏 与 加密 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+    @Override
+    public JsonSerializer<?> createContextual(SerializerProvider prov, BeanProperty prop) {
+        Sensitive ann = prop.getAnnotation(Sensitive.class);
+        MaskingSerializer s = new MaskingSerializer();
+        s.type = ann.value();
+        return s;
+    }
 
-## 六、加分点
+    private String mask(String value, SensitiveType type) {
+        if (value == null) return null;
+        switch (type) {
+            case PHONE:      // 138****8888
+                return value.length() == 11
+                    ? value.substring(0,3) + "****" + value.substring(7)
+                    : "****";
+            case ID_CARD:    // 110***********0010
+                return value.length() >= 14
+                    ? value.substring(0,3) + "***********" + value.substring(value.length()-4)
+                    : "****";
+            case EMAIL:      // a***@b.com
+                int at = value.indexOf("@");
+                return at > 0
+                    ? value.charAt(0) + "***" + value.substring(at)
+                    : "****";
+            case BANK_CARD:  // 6212**********1234
+                return value.length() >= 8
+                    ? value.substring(0,4) + "**********" + value.substring(value.length()-4)
+                    : "****";
+            case NAME:       // 张*
+                return value.length() > 0 ? value.charAt(0) + "*".repeat(value.length()-1) : "*";
+            case ADDRESS:    // 北京市朝阳区****
+                return value.length() > 6 ? value.substring(0,6) + "****" : "****";
+            default: return "****";
+        }
+    }
+}
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+// 3. 使用
+public class UserVO {
+    private Long id;
 
-## 七、企业级面试定位：从“会用”到“能负责”
+    @Sensitive(SensitiveType.NAME)
+    private String name;
 
-企业级面试不会只问“脱敏 是什么”，而是看你能不能对一条真实生产链路负责。回答“数据脱敏、加密与密钥轮转架构”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+    @Sensitive(SensitiveType.PHONE)
+    private String phone;
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 架构设计 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 脱敏、加密、密钥轮转 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 auth_fail_rate、permission_deny_count、secret_rotation_age、sensitive_log_hits 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+    @Sensitive(SensitiveType.ID_CARD)
+    private String idCard;
 
-### 企业级回答骨架
+    @Sensitive(SensitiveType.EMAIL)
+    private String email;
+}
+// 返回前端自动脱敏：{id:1, name:"张*", phone:"138****8888", idCard:"110***********0010"}
+```
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 脱敏 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+**日志脱敏**（Logback 配置）：
 
-### 面试中要主动补的生产细节
+```xml
+<!-- logback.xml - 用 Pattern 替换 -->
+<pattern>
+  %replace(%msg){'phone":"(\d{3})\d{4}(\d{4})', 'phone":"$1****$2'}
+</pattern>
+```
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+或者用 Logstash Logback Encoder 自定义 Converter：
 
-## 八、苏格拉底式面试追问
+```java
+public class PiiMaskingConverter extends CompositeConverter<ILoggingEvent> {
+    private static final Pattern PHONE = Pattern.compile("(1[3-9])\\d{9}");
+    private static final Pattern ID_CARD = Pattern.compile("(\\d{17}[\\dXx])");
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+    @Override
+    protected String transform(ILoggingEvent event, String in) {
+        String s = PHONE.matcher(in).replaceAll("$1********");
+        return ID_CARD.matcher(s).replaceAll("******************");
+    }
+}
+```
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“数据脱敏、加密与密钥轮转架构”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 auth_fail_rate、permission_deny_count、secret_rotation_age、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 脱敏 负责的范围，以及必须依赖 加密、密钥轮转 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 JWT 长期有效无法吊销，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+## 三、机制层：AES-GCM 字段加密 + 信封加密
 
-### 现场对话示例
+**信封加密流程**（必画）：
 
-**面试官**：你说要做“数据脱敏、加密与密钥轮转架构”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 auth_fail_rate、permission_deny_count、业务失败率和事故记录。
+```
+数据加密流程：
+  1. 应用向 KMS 申请 KEK（Key Encryption Key）的当前版本
+  2. 应用生成随机 DEK（Data Encryption Key，256 bit AES）
+  3. 用 DEK 加密数据：ciphertext = AES-GCM(plaintext, DEK, nonce)
+  4. 用 KEK 加密 DEK：encrypted_dek = AES-GCM(DEK, KEK)
+  5. 存储：{ciphertext, encrypted_dek, kek_version, nonce}
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 auth_fail_rate 没有改善，或者 permission_deny_count 反而变差，就停止扩大范围，回到假设层重新复盘。
+数据解密流程：
+  1. 读 {ciphertext, encrypted_dek, kek_version, nonce}
+  2. 向 KMS 申请 kek_version 对应的 KEK
+  3. 用 KEK 解 encrypted_dek 得到 DEK
+  4. 用 DEK + nonce 解 ciphertext 得到 plaintext
+  5. 用完即清 DEK（不在内存久留）
+```
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 auth_fail_rate、permission_deny_count、secret_rotation_age。这样它不是个人经验，而是团队机制。
+**Java 实现**：
 
-## 九、专项架构深挖：对象、链路、失败模式
+```java
+@Service
+public class FieldEncryptionService {
 
-这一题不要停在“知道 脱敏”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+    @Autowired private KmsClient kmsClient;
+    @Autowired private SecureRandom random = new SecureRandom();
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 身份、凭证、密钥、证书、权限、审计记录；认证链路、授权策略、加解密和脱敏组件；漏洞修复和密钥轮转流程 |
-| 设计主线 | 认证确认“你是谁”，授权确认“你能做什么”；敏感数据最小化暴露，传输、存储、日志分别治理；密钥和证书必须支持轮转、审计和应急吊销 |
-| 失败模式 | JWT 长期有效无法吊销；日志打印明文敏感信息；内部接口默认可信导致横向越权 |
-| 验证指标 | auth_fail_rate、permission_deny_count、secret_rotation_age、sensitive_log_hits |
+    // 加密
+    public EncryptedField encrypt(String plaintext) throws Exception {
+        // 1. 生成随机 DEK
+        byte[] dek = new byte[32];  // 256-bit AES
+        random.nextBytes(dek);
 
-**架构拆解**：
+        // 2. 生成 nonce
+        byte[] nonce = new byte[12];  // GCM 推荐 12 字节
+        random.nextBytes(nonce);
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 加密 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 数据脱敏、加密与密钥轮转架构 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 密钥轮转 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+        // 3. 用 DEK 加密数据
+        SecretKey dekKey = new SecretKeySpec(dek, "AES");
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.ENCRYPT_MODE, dekKey, new GCMParameterSpec(128, nonce));
+        byte[] ciphertext = cipher.doFinal(plaintext.getBytes(StandardCharsets.UTF_8));
 
-**高分回答细节**：
+        // 4. 从 KMS 拿当前 KEK，加密 DEK
+        KeyVersion kekVersion = kmsClient.getCurrentKeyVersion("user-data-kek");
+        byte[] encryptedDek = kmsClient.encrypt("user-data-kek", dek);
 
-- 不要只说“可以用 脱敏”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+        // 5. 立刻清内存
+        Arrays.fill(dek, (byte) 0);
 
-## 十、二轮场景追问与项目表达
+        return new EncryptedField(
+            Base64.getEncoder().encodeToString(ciphertext),
+            Base64.getEncoder().encodeToString(encryptedDek),
+            Base64.getEncoder().encodeToString(nonce),
+            kekVersion.getVersion()
+        );
+    }
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+    // 解密
+    public String decrypt(EncryptedField field) throws Exception {
+        // 1. 从 KMS 解密 DEK
+        byte[] encryptedDek = Base64.getDecoder().decode(field.getEncryptedDek());
+        byte[] dek = kmsClient.decrypt("user-data-kek", field.getKekVersion(), encryptedDek);
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+        // 2. 用 DEK 解密数据
+        SecretKey dekKey = new SecretKeySpec(dek, "AES");
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.DECRYPT_MODE, dekKey,
+            new GCMParameterSpec(128, Base64.getDecoder().decode(field.getNonce())));
+        byte[] plaintext = cipher.doFinal(Base64.getDecoder().decode(field.getCiphertext()));
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“数据脱敏、加密与密钥轮转架构”，重点看 auth_fail_rate、permission_deny_count、secret_rotation_age，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+        // 3. 立刻清内存
+        Arrays.fill(dek, (byte) 0);
+        return new String(plaintext, StandardCharsets.UTF_8);
+    }
+}
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+// Entity
+@Entity
+public class User {
+    @Id private Long id;
+    private String name;
+    @Convert(converter = EncryptedStringConverter.class)
+    private String phone;           // 存储为密文
+    @Convert(converter = EncryptedStringConverter.class)
+    private String idCard;
+}
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 脱敏 和 加密 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+// JPA Converter 自动加解密
+@Converter
+public class EncryptedStringConverter implements AttributeConverter<String, String> {
 
-### 追问 3：你如何判断这个方案值得做？
+    @Autowired private FieldEncryptionService encryptor;  // 静态注入
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 密钥轮转 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+    @Override
+    public String convertToDatabaseColumn(String plaintext) {
+        try { return JSON.toJSONString(encryptor.encrypt(plaintext)); }
+        catch (Exception e) { throw new RuntimeException(e); }
+    }
 
-### STAR 项目表达
+    @Override
+    public String convertToEntityAttribute(String dbValue) {
+        try {
+            EncryptedField field = JSON.parseObject(dbValue, EncryptedField.class);
+            return encryptor.decrypt(field);
+        } catch (Exception e) { throw new RuntimeException(e); }
+    }
+}
+```
 
-- **S（背景）**：原系统在 脱敏 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 数据脱敏、加密与密钥轮转架构 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 auth_fail_rate、permission_deny_count 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+## 四、机制层：KMS 集成与密钥轮转
 
-### 二轮复盘清单
+**HashiCorp Vault 配置**（必背）：
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+```bash
+# 启动 Vault dev 模式（生产用 Raft storage + auto-unseal）
+vault server -dev -dev-root-token-id="root"
 
-## 十一、面试官 5 个企业级追问
+# 启用 transit engine（加密即服务）
+vault secrets enable transit
 
-1. **你在真实项目里怎么判断“数据脱敏、加密与密钥轮转架构”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 auth_fail_rate、permission_deny_count、secret_rotation_age。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+# 创建 KEK（user-data-kek），自动轮转 90 天
+vault write -f transit/keys/user-data-kek \
+    type=aes256-gcm96 \
+    auto_rotate_period=2160h \
+    exportable=false \
+    allow_plaintext_backup=false
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，脱敏 是否真是瓶颈，加密 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+# 加密 DEK（应用调用）
+vault write transit/encrypt/user-data-kek plaintext=$(base64 <<< "$DEK")
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 JWT 长期有效无法吊销。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 auth_fail_rate 和 permission_deny_count 做分钟级观察，一旦越过阈值立即止损。
+# 解密 DEK
+vault write transit/decrypt/user-data-kek ciphertext="$ENC_DEK"
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 密钥轮转，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+# 手动轮转（强制）
+vault write -f transit/keys/user-data-kek/rotate
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“数据脱敏、加密与密钥轮转架构”，至少要沉淀 身份、凭证、密钥、证书、权限、审计记录 的建模规范，以及 auth_fail_rate、permission_deny_count 的验收标准。
+# 查看版本
+vault read transit/keys/user-data-kek
+# 输出：latest_version 2, ...
+```
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
+**Java Vault 客户端**：
 
-1. **如果把“数据脱敏、加密与密钥轮转架构”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 脱敏 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
+```java
+@Service
+public class VaultKmsClient implements KmsClient {
 
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“数据脱敏、加密与密钥轮转架构”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 auth_fail_rate、permission_deny_count 对业务链路的影响。
+    @Autowired private VaultTemplate vault;
 
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 JWT 长期有效无法吊销，要能通过 trace、tool_call_id 和业务流水快速回放。
+    @Override
+    public byte[] encrypt(String keyName, byte[] plaintext) {
+        String b64 = Base64.getEncoder().encodeToString(plaintext);
+        VaultResponse resp = vault.write("transit/encrypt/" + keyName,
+            Map.of("plaintext", b64));
+        String ciphertext = (String) resp.getRequiredData().get("ciphertext");
+        return ciphertext.getBytes();
+    }
 
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
+    @Override
+    public byte[] decrypt(String keyName, int version, byte[] ciphertext) {
+        String ct = new String(ciphertext);
+        VaultResponse resp = vault.write("transit/decrypt/" + keyName,
+            Map.of("ciphertext", ct));
+        String b64 = (String) resp.getRequiredData().get("plaintext");
+        return Base64.getDecoder().decode(b64);
+    }
 
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
+    @Override
+    public KeyVersion getCurrentKeyVersion(String keyName) {
+        VaultResponseSupport<KeyMetadata> resp = vault.read("transit/keys/" + keyName);
+        return new KeyVersion(resp.getRequiredData().getLatestVersion());
+    }
+}
+```
 
-## 十三、记忆口诀与面试现场表达
+**轮转策略**：
+
+| 密钥类型 | 轮转周期 | 原因 |
+|---------|---------|------|
+| **DEK** | 每条数据独立 | 防批量拖库后批量破解 |
+| **KEK** | 90 天 | 减少长期暴露窗口 |
+| **TLS 证书** | 90 天（Let's Encrypt 风格） | 减少私钥泄露影响 |
+| **JWT 签名密钥** | 30 天 | 配合 kid 标识版本 |
+
+## 五、底层本质：信封加密为什么这样设计
+
+回到第一性：**信封加密（Envelope Encryption）解决"性能 + 安全 + 可用性"三角**。
+
+- **为什么不用 KEK 直接加密数据**：KMS 在远端，每次加解密都调 KMS 网络开销大（10-50ms）。直接 KEK 加密每条数据都要调 KMS，性能不可接受。
+- **为什么用 DEK 加密数据，KEK 加密 DEK**：DEK 在应用本地生成和使用（性能），加密后的 DEK 通过 KMS 解（安全）。这样网络开销只有"DEK 加密"一次（< 1ms），数据加解密在本地（AES 硬件加速）。
+- **为什么每条数据独立 DEK**：如果所有数据共用一个 DEK，DEK 泄露所有数据裸奔。每条独立 DEK 让"泄露一条 = 泄露一条"，不会批量爆炸。
+- **为什么 KEK 轮转**：KEK 长期使用泄露风险累积。轮转后新数据用新 KEK 加密 DEK，旧数据保留旧 encrypted_dek（带 key_version），轮转不影响旧数据可解。轮转的本质是"切短暴露窗口"。
+
+**密钥销毁 = 终极删除**：传统"删除数据"是删行，磁盘残留可恢复。密文数据要"真删"，只需销毁对应 KEK 版本——所有用该 KEK 加密的 DEK 永久不可解，密文变垃圾。这是 GDPR"被遗忘权"的工程实现。
+
+## 六、AI 架构师加问：5 个
+
+1. **LLM 训练数据怎么脱敏？**
+   训练前 NLP 流水线识别 PII（手机号、身份证、邮箱）→ 替换为占位符（如 [PHONE]）→ 训练。推理时 LLM 不输出原始 PII，输出时按规则脱敏。RAG 场景检索的 PII 必须脱敏后才能进 prompt。
+
+2. **LLM 怎么自动识别敏感字段？**
+   NER 模型（如 spaCy、LLM 函数调用）识别 PII 实体（PER、PHONE、EMAIL、ID_CARD）。结合字段名启发式（如 `phone`、`id_card` 列名）。但识别准确率 95%+，剩下 5% 要人工 review。
+
+3. **AI 服务调 KMS 怎么鉴权？**
+   AI 服务用 service account JWT 向 Vault 鉴权，scope 限定能用哪个 key、能 encrypt 还是 decrypt。所有 KMS 调用进 audit log（谁、什么时候、用了哪个 key、加解密什么）。
+
+4. **用 LLM 辅助密钥轮转决策？**
+   LLM 读密钥使用日志 + 泄露新闻（如某 CVE 暴露）+ 业务量，推荐轮转时机（如"密钥用了 80 天 + 最近有内鬼事件 → 立即轮转"）。但决策落地必须人工确认。
+
+5. **AI 推理结果的敏感信息怎么处理？**
+   LLM 输出做 PII 检测（NER 模型扫描输出），发现敏感信息自动脱敏（如把生成的回复里的真实手机号改成 ***）。或者用 prompt 约束"不要输出真实手机号"。
+
+## 七、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：机场安检负责人拿着证件、闸机、黑名单和安检记录，在处理“高峰期既要快又不能放错人”。
+抓 **"分层防护、信封加密、Vault 管 KEK、90 天轮转"**。
 
-- **场景**：先说明“数据脱敏、加密与密钥轮转架构”服务于什么业务目标，不要上来就堆 脱敏。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 JWT 长期有效无法吊销、日志打印明文敏感信息。
-- **验证**：最后落到 auth_fail_rate、permission_deny_count、secret_rotation_age，让面试官感觉你真的上线过。
+- **分层防护**：传输 TLS + 字段 AES-GCM + 备份 TDE + 展示脱敏
+- **信封加密**：DEK 加数据（本地快）+ KEK 加 DEK（KMS 安全）
+- **KMS（Vault）**：KEK 集中签发 + 审计 + 90 天自动轮转
+- **每条独立 DEK**：防批量拖库后批量破解
+- **密钥销毁 = 终极删除**：删 KEK 让密文永久不可解
 
 ### 拟人化理解
 
-可以把“数据脱敏、加密与密钥轮转架构”想成一个机场安检负责人：脱敏 是他的证件、闸机、黑名单和安检记录，加密 是他面对的现场信号，密钥轮转 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先验身份，再按风险分流。这样记，比死背组件名更稳。
+把数据防护想成**物流仓库分层防护**。脱敏是出库贴黑条（用户看不到全貌）；传输加密是运输车带锁；存储加密是仓库保险柜；备份加密是异地仓库的保险柜；密钥轮转是定期换保险柜密码；KMS 是中央密码管理处（统一签发 + 审计 + 销毁）。信封加密是"运输时把保险柜密码锁在更高级的保险柜里"——开外层保险柜（KMS）拿内层密码（DEK），开内层密码拿货物。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“数据脱敏、加密与密钥轮转架构”，我会这样答：我会先把身份、权限、数据范围和审计链路讲清楚，安全题不能只停留在鉴权组件。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 JWT 长期有效无法吊销，所以我会提前设计灰度、监控和止损阈值，重点看 auth_fail_rate、permission_deny_count。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 auth_fail_rate 或 permission_deny_count 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> 我们用分层防护：传输 HTTPS + mTLS 服务间；字段 AES-GCM 加密（手机号、身份证、银行卡）+ 信封加密（每条数据独立 DEK，KEK 加密 DEK 存 KMS）；备份用 MySQL TDE；展示用 @Sensitive 注解 + Jackson Serializer 自动脱敏（138****8888）；日志用 Logback Converter 扫 PII。密钥管理用 HashiCorp Vault，KEK 90 天自动轮转，所有 KMS 调用进 audit log。信封加密的核心是"DEK 本地加解密（性能）+ KEK 集中托管（安全）"——KMS 调用只有 DEK 加解密一次（< 1ms），数据加解密在本地。轮转时新数据用新 KEK，旧数据按 key_version 解，不影响存量。"密钥销毁 = 终极删除"——删 KEK 让密文永久不可解，这是 GDPR 被遗忘权的工程实现。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司 PII 数据加密用什么方案？字段加密还是数据库 TDE？KMS 用 Vault 还是云厂商？密钥轮转周期多久？
 
+## 八、苏格拉底式面试追问（7 层表格 + 现场对话）
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么不用数据库 TDE 就够了？ | 用威胁模型说话：TDE 只防"磁盘丢失"，不防"DBA 拖库"（数据在内存明文）。字段加密防 DBA 直接 select 拿明文，是纵深防御 |
+| 证据追问 | 怎么证明加密有效？ | 模拟拖库：DBA 直接 select 看到的是密文；渗透测试：尝试在内存 dump 找明文（应只在调用瞬间存在）；密钥审计：所有 KMS 调用有日志 |
+| 边界追问 | 加密能解决什么，不能解决什么？ | 解决：拖库泄露、磁盘丢失、备份泄露。不能解决：应用被攻破后内存里取明文（需要运行时保护）、密钥本身被泄露（需要 KMS 治理） |
+| 反例追问 | 什么场景不做字段加密？ | 公开数据（如商品名）、低敏数据（注册时间）、查询性能要求极高（加密后无法索引）。这些场景直存明文 |
+| 风险追问 | 加密上线最大风险？ | 主动点出：密钥丢失导致数据永久不可解（必须密钥备份）、性能下降（加解密开销 1-2ms）、查询受限（密文无法 LIKE 查询）、轮转失败导致业务中断 |
+| 验证追问 | 怎么验证密钥轮转不影响业务？ | 灰度切流：先新数据用新 KEK，旧数据按 version 解；监控解密成功率（应 100%）；故障演练：杀 KMS 实例，业务降级（缓存 DEK） |
+| 沉淀追问 | 团队数据加密治理沉淀什么？ | 字段加密 starter（注解 + Converter）、Vault 部署 SOP、密钥轮转流程、加密字段清单、脱敏规则库、安全审计 dashboards |
+
+### 现场对话示例
+
+**面试官**：字段加密后怎么查询？比如按手机号查用户。
+
+**候选人**：这是字段加密的最大痛点。三种方案。第一，盲索引（Blind Index）——用一个固定密钥的 HMAC 把手机号 hash 出来单独存一列 `phone_hash`，建索引。查询时 `WHERE phone_hash = HMAC(查询手机号)`。HMAC 不可逆，但能等值查询。第二，确定性加密（Deterministic Encryption）——同样明文加密成同样密文（用固定 IV），可以等值查询但安全性弱（同密文攻击）。第三，敏感度低就别加密（手机号低敏可直接存）。京东的实操：手机号用盲索引（HMAC-SHA256），身份证完全加密（不查询，按 user_id 关联），邮箱确定性加密（可等值查但加 salt 防 rainbow table）。
+
+**面试官**：密钥轮转时旧数据怎么办？
+
+**候选人**：两种策略。第一，lazy re-encrypt——旧数据按 key_version 解密时，顺手用新 KEK 重新加密 DEK 写回。这样轮转是无感的，旧数据被读到时才升级。第二，批量迁移——后台 job 扫描所有旧 version 数据批量 re-encrypt，适合数据量小或必须强制升级的场景。生产推荐 lazy 模式（零停机）+ 定期 batch 迁移（清理遗留）。轮转流程：(1) 新 KEK 上线，新数据用新 version；(2) 旧 KEK 保留可解（不能删，否则旧数据不可读）；(3) lazy 或 batch 升级；(4) 所有数据升级后旧 KEK 标记 deprecated，但保留 90 天再销毁（兜底）。
+
+**面试官**：KMS 挂了怎么办？
+
+**候选人**：这是关键风险。三层保护。第一，KMS 高可用部署——Vault 多副本 + Raft storage + auto-unseal（用云 KMS 做 unseal key）。第二，应用本地缓存 DEK——解密后的 DEK 在内存 cache（TTL 5 分钟），KMS 短暂故障不影响已 cache 的数据。第三，降级策略——KMS 完全不可用时只允许读已有缓存（不加密新数据），或 fallback 到应急密钥（保险柜备份的纸质密钥，仅灾难启用）。京东的实操：Vault 3 副本跨机房，应用 cache DEK 5 分钟，从未因 KMS 故障影响业务。
+
+## 常见考点
+
+1. **AES-GCM 为什么优于 CBC？**——GCM 提供 AEAD（认证加密），同时保证机密性 + 完整性；CBC 只机密性需额外 MAC。GCM 还能并行加速。
+2. **加密索引怎么建？**——盲索引（HMAC 单独列建索引）支持等值查询；范围查询不友好（要么不加密，要么用 OPE 同态加密但安全性弱）。
+3. **TDE 和字段加密冲突吗？**——不冲突，互补。TDE 防磁盘丢失，字段加密防 DBA 拖库。两者叠加是纵深防御。
+4. **密钥怎么安全备份？**——KMS 用 Shamir's Secret Sharing 拆成 N 份分给 N 个人，需要 K（K < N）份才能恢复。物理备份在保险柜。
+5. **GDPR 被遗忘权怎么实现？**——加密数据删除行 + 删除对应 KEK 版本（密文永久不可解）。这是"加密即删除"的工程实现。

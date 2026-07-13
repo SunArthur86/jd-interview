@@ -9,259 +9,329 @@ tags:
 - 重排
 - 置信度
 feynman:
-  essence: RAG 召回评测、重排与答案置信度的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: RAG 召回评测的本质是"用标注好的 query-doc 对量化检索质量"——recall@k（Top-K 是否包含相关文档）、MRR（相关文档排名倒数）、NDCG（排序质量）。重排（rerank）是用 cross-encoder 精排双塔召回的粗结果，把"语义相关但排序不准"修正到准确。答案置信度是"让模型自评 + 检索证据支撑度"双信号融合，低置信度触发拒答或转人工。
+  analogy: 像高考录取——双塔召回是"初筛过线"（量大但粗），cross-encoder 重排是"面试精筛"（慢但准），置信度是"综合分是否够投档线"（不够就补录或退档）。
+  first_principle: 检索质量 = 召回率 × 精确率 × 排序质量。双塔（embedding）召回率高但排序粗（只算向量余弦），cross-encoder 精排排序准但慢（query+doc 拼接过 transformer）。两者级联：双塔取 Top-50，cross-encoder 精排取 Top-5，兼顾召回和精度。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 评测三指标：recall@k（召回率）、MRR（平均倒数排名）、NDCG（归一化折损累积增益）
+  - 重排核心：cross-encoder（bge-reranker）比双塔精度高 10-20%，但慢 10 倍，只重排 Top-50
+  - RRF 融合：向量 + BM25 两路召回用 RRF 合并，score = Σ 1/(k+rank)，k=60
+  - 答案置信度：logit_entropy（模型不确定性）+ citation_coverage（引用覆盖率）+ retrieval_score（检索分数）
+  - 拒答策略：置信度 < 阈值 → "根据现有资料无法回答" → 转人工或换检索策略
 first_principle:
-  problem: 面对“RAG 召回评测、重排与答案置信度”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 如何让 RAG 的召回结果又准又排序合理，且对"无法回答的问题"有可靠的拒答机制？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 双塔召回（query 和 doc 独立 embedding）丢失了 query-doc 交互信息，排序精度有限
+  - cross-encoder（query+doc 拼接）捕获交互信息，精度高但计算量大（每对都要过 transformer）
+  - 召回不相关文档会污染 LLM 上下文导致幻觉，必须用置信度兜底
+  - 评测必须离线化（标注集）+ 在线化（用户反馈），不能靠感觉
+  rebuild: 三段式——双塔召回 Top-50（混合向量+BM25 用 RRF 融合）→ cross-encoder 重排 Top-5（bge-reranker）→ 喂 LLM 生成答案并算置信度（logit + citation + retrieval 三信号），低置信度拒答转人工。离线用标注集跑 recall@10/MRR/NDCG，在线看 answer_citation_rate 和 user_feedback。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - cross-encoder 为什么比双塔准？——双塔是 query 和 doc 分别编码后算余弦，交互信息只在最后点积；cross-encoder 是 query+doc 拼接后过 transformer，每层都有 attention 交互，能捕获细粒度匹配（如"退货"和"7天无理由"的语义关联）。
+  - 重排模型怎么选？——中文用 bge-reranker-large（27亿参数，精度高）、bge-reranker-base（560M，性价比高）。英文用 cohere-rerank-3 或 bge-reranker-en。私有化部署首选 BGE 系列（开源）。
+  - 置信度阈值怎么定？——用标注集跑，把"应该能回答"和"应该拒答"两类样本的置信度分布画出来，取两类分布交叉点作为阈值。一般 0.6-0.7。
+  - 召回质量突然下降怎么发现？——在线监控 recall@10（用隐式反馈：用户点了"没有帮助"的 query 回溯看召回结果）+ 离线回归测试（每次索引/embedding 变更跑评测集）。
+  - NDCG 和 MRR 区别？——MRR 只看第一个相关文档的排名；NDCG 考虑所有相关文档的排名且靠前的权重更高（折损）。推荐场景用 NDCG（多相关文档），问答场景用 MRR（一个正确答案）。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 评测三指标：recall@k（召回）、MRR（首命中排名）、NDCG（排序质量）
+  - 重排：cross-encoder（bge-reranker）比双塔精度高 10-20%，只重排 Top-50
+  - RRF 融合：score = Σ 1/(k+rank)，k=60，向量+BM25 两路合并
+  - 置信度三信号：logit_entropy + citation_coverage + retrieval_score
+  - 拒答：置信度 < 0.6 拒答转人工，防幻觉最后防线
 ---
 
-# 【Java 后端架构师】RAG 召回评测、重排与答案置信度？
+# 【Java 后端架构师】RAG 召回评测、重排与答案置信度
 
-> 适用场景：AI Agent/Infra。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。客服 RAG 上线后，发现 20% 的回答"看起来对但引用错了文档"，10% 的问题明明知识库有答案却答非所问。问题不在 LLM，在召回——双塔召回的 Top-5 里有 2 个不相关文档，排序也乱。架构师要从"召回评测、cross-encoder 重排、答案置信度"三个维度把 RAG 质量拉起来。
 
-## 一、先明确问题边界
+## 一、概念层：RAG 质量的三层评测
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+| 层级 | 指标 | 含义 | 目标 |
+|------|------|------|------|
+| **检索层** | recall@k | Top-K 是否包含相关文档 | > 0.9 |
+| **检索层** | MRR | 第一个相关文档的排名倒数 | > 0.7 |
+| **检索层** | NDCG@k | 排序质量（靠前相关文档权重高） | > 0.8 |
+| **生成层** | faithfulness | 回答是否忠于检索文档 | > 0.95 |
+| **生成层** | answer_citation_rate | 回答带引用的比例 | > 0.9 |
+| **业务层** | user_feedback_score | 用户点赞/点踩 | > 4.0/5 |
+| **业务层** | first_contact_resolution | 首次解决率 | > 0.7 |
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+## 二、机制层：混合召回 + RRF 融合
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 RAG评测 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+```java
+@Service
+public class HybridRetrievalService {
 
-## 二、推荐架构思路
+    private final MilvusClient vectorStore;          // 向量检索
+    private final ElasticsearchClient esClient;      // BM25 检索
+    private final CrossEncoderReranker reranker;     // 重排
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+    public List<Chunk> retrieve(String query, UserContext user) {
+        // 1. 向量召回 Top-50（语义相关）
+        float[] queryVec = embeddingModel.embed(query);
+        List<Chunk> vecResults = vectorStore.search(
+            SearchParam.builder()
+                .vector(queryVec).topK(50)
+                .expr(buildAclFilter(user))           // 权限 pre-filter
+                .build());
 
-## 三、技术落地点
+        // 2. BM25 召回 Top-50（关键词匹配）
+        List<Chunk> bm25Results = esClient.search(
+            s -> s.index("kb_chunks")
+                .query(q -> q.match(m -> m.field("content").query(query)))
+                .size(50), Chunk.class);
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+        // 3. RRF 融合（Reciprocal Rank Fusion）
+        List<Chunk> merged = rrfFuse(vecResults, bm25Results, 60);
 
-## 四、常见坑
+        // 4. cross-encoder 重排 Top-50 → Top-5
+        List<Chunk> reranked = reranker.rerank(query, merged, 5);
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+        return reranked;
+    }
 
-## 五、面试回答模板
+    /**
+     * RRF 融合：score = Σ 1/(k + rank_i)
+     * 不用调权重，对不同检索器的分数分布鲁棒
+     */
+    private List<Chunk> rrfFuse(List<Chunk> vec, List<Chunk> bm25, int k) {
+        Map<String, Double> scores = new HashMap<>();
+        Map<String, Chunk> chunkMap = new HashMap<>();
 
-可以按下面结构作答：
+        for (int i = 0; i < vec.size(); i++) {
+            Chunk c = vec.get(i);
+            scores.merge(c.getChunkId(), 1.0 / (k + i + 1), Double::sum);
+            chunkMap.put(c.getChunkId(), c);
+        }
+        for (int i = 0; i < bm25.size(); i++) {
+            Chunk c = bm25.get(i);
+            scores.merge(c.getChunkId(), 1.0 / (k + i + 1), Double::sum);
+            chunkMap.put(c.getChunkId(), c);
+        }
+        return scores.entrySet().stream()
+            .sorted(Map.Entry.<String, Double>comparingByValue().reversed())
+            .map(e -> chunkMap.get(e.getKey()))
+            .collect(toList());
+    }
+}
+```
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“RAG 召回评测、重排与答案置信度”，核心是 RAG评测 与 重排 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+## 三、机制层：cross-encoder 重排
 
-## 六、加分点
+```java
+@Service
+public class CrossEncoderReranker {
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+    private final ONNXModel model;    // bge-reranker-large（ONNX 部署）
 
-## 七、企业级面试定位：从“会用”到“能负责”
+    /**
+     * Cross-encoder：query + doc 拼接过 transformer，输出相关性分数
+     * 比双塔精度高 10-20%（捕获 query-doc 交互），但慢 10 倍
+     */
+    public List<Chunk> rerank(String query, List<Chunk> candidates, int topK) {
+        // 1. 构造 query-doc 对
+        List< Pair<String, String>> pairs = candidates.stream()
+            .map(c -> Pair.of(query, c.getContent()))
+            .collect(toList());
 
-企业级面试不会只问“RAG评测 是什么”，而是看你能不能对一条真实生产链路负责。回答“RAG 召回评测、重排与答案置信度”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+        // 2. 批量推理（bge-reranker 输出相关性分数 0-1）
+        List<Double> scores = model.scoreBatch(pairs);
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 AI Agent/Infra 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 RAG评测、重排、置信度 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 retrieval_hit_rate、permission_filter_miss、index_freshness_seconds、answer_citation_rate 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+        // 3. 按分数排序取 Top-K
+        return IntStream.range(0, candidates.size())
+            .boxed()
+            .sorted(Comparator.comparing(scores::get).reversed())
+            .limit(topK)
+            .map(candidates::get)
+            .collect(toList());
+    }
+}
+```
 
-### 企业级回答骨架
+**为什么 cross-encoder 比双塔准**：
+- 双塔：query 和 doc 分别 embedding，最后算余弦。交互信息只在最后点积。
+- cross-encoder：`[CLS] query [SEP] doc [SEP]` 拼接后过 transformer，每层 attention 都有 query-doc 交互，能捕获"退货"和"7天无理由"的细粒度关联。
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 RAG评测 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+代价：cross-encoder 每对都要过 transformer（O(N) 次），双塔 doc 可预编码（query 只编码 1 次）。所以 cross-encoder 只重排 Top-50，不直接做全库检索。
 
-### 面试中要主动补的生产细节
+## 四、机制层：答案置信度与拒答
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+```java
+@Service
+public class RagConfidenceService {
 
-## 八、苏格拉底式面试追问
+    private final ChatClient llm;
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+    public RagAnswer answerWithConfidence(String query, List<Chunk> context) {
+        // 1. 生成答案（要求模型输出 logprobs 评估不确定性）
+        LlmResponse response = llm.prompt()
+            .system(RAG_SYSTEM_PROMPT)
+            .user(buildPrompt(query, context))
+            .options(OptionBuilder.logprobs(5))        // 请求 top-5 logprobs
+            .call()
+            .toLlmResponse();
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“RAG 召回评测、重排与答案置信度”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 retrieval_hit_rate、permission_filter_miss、index_freshness_seconds、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 RAG评测 负责的范围，以及必须依赖 重排、置信度 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 权限过滤后置导致敏感信息泄露，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+        // 2. 计算三信号置信度
+        double logitConfidence = calcLogitConfidence(response.getLogprobs());
+        double citationConfidence = calcCitationCoverage(response.getContent(), context);
+        double retrievalConfidence = calcRetrievalScore(context);
 
-### 现场对话示例
+        // 3. 融合（加权）
+        double confidence = 0.4 * logitConfidence
+                          + 0.3 * citationConfidence
+                          + 0.3 * retrievalConfidence;
 
-**面试官**：你说要做“RAG 召回评测、重排与答案置信度”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 retrieval_hit_rate、permission_filter_miss、业务失败率和事故记录。
+        // 4. 低置信度拒答
+        if (confidence < 0.6) {
+            metrics.counter("rag.refuse").increment();
+            return RagAnswer.refuse("根据现有资料无法回答，已转人工", confidence);
+        }
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 retrieval_hit_rate 没有改善，或者 permission_filter_miss 反而变差，就停止扩大范围，回到假设层重新复盘。
+        return RagAnswer.of(response.getContent(), context, confidence);
+    }
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 retrieval_hit_rate、permission_filter_miss、index_freshness_seconds。这样它不是个人经验，而是团队机制。
+    /**
+     * logit 置信度：模型生成 token 的平均 logprob
+     * logprob 高说明模型确定，低说明不确定（可能幻觉）
+     */
+    private double calcLogitConfidence(List<LogProb> logprobs) {
+        double avg = logprobs.stream()
+            .mapToDouble(lp -> Math.exp(lp.getLogprob()))
+            .average().orElse(0);
+        return sigmoid(avg);   // 归一化到 0-1
+    }
 
-## 九、专项架构深挖：对象、链路、失败模式
+    /**
+     * 引用覆盖率：回答里引用的 doc_id 是否都在检索结果中
+     * 引用不存在的文档 = 幻觉
+     */
+    private double calcCitationCoverage(String answer, List<Chunk> context) {
+        Set<String> validDocIds = context.stream()
+            .map(Chunk::getDocId).collect(toSet());
+        Set<String> citedDocIds = extractCitations(answer);
+        if (citedDocIds.isEmpty()) return 0;          // 无引用 = 低置信
+        long valid = citedDocIds.stream()
+            .filter(validDocIds::contains).count();
+        return (double) valid / citedDocIds.size();
+    }
 
-这一题不要停在“知道 RAG评测”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+    /**
+     * 检索分数：Top-1 chunk 的相关性分数
+     */
+    private double calcRetrievalScore(List<Chunk> context) {
+        if (context.isEmpty()) return 0;
+        return context.get(0).getScore();              // cross-encoder 分数 0-1
+    }
+}
+```
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 文档、切片、向量、倒排索引、召回结果；权限过滤、重排模型、答案引用和反馈；知识库版本和增量索引任务 |
-| 设计主线 | 先做权限过滤，再做召回和重排，避免越权知识进入上下文；索引链路区分全量构建和增量更新；答案必须带引用、置信度和无法回答策略 |
-| 失败模式 | 权限过滤后置导致敏感信息泄露；索引延迟造成回答过期；召回噪声过大导致幻觉 |
-| 验证指标 | retrieval_hit_rate、permission_filter_miss、index_freshness_seconds、answer_citation_rate |
+## 五、实战层：离线评测与在线监控
 
-**架构拆解**：
+### 5.1 离线评测集
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 重排 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 RAG 召回评测、重排与答案置信度 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 置信度 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+```java
+@Service
+public class RagEvalRunner {
 
-**高分回答细节**：
+    /**
+     * 跑标注评测集，算 recall@k / MRR / NDCG
+     * 每次 embedding/索引/重排模型变更都跑，指标退化阻断发布
+     */
+    public EvalReport run(EvalDataset dataset) {
+        EvalReport report = new EvalReport();
+        for (EvalQuery q : dataset.getQueries()) {
+            List<Chunk> results = retrievalService.retrieve(q.getQuery(), q.getUser());
+            report.recordRecallAtK(q, results, 10);    // recall@10
+            report.recordMRR(q, results);              // MRR
+            report.recordNDCG(q, results, 10);         // NDCG@10
+        }
+        EvalReport summary = report.summarize();
+        // recall@10 < 0.9 阻断
+        if (summary.getRecallAt10() < 0.9) {
+            throw new QualityGateException("recall@10=" + summary.getRecallAt10());
+        }
+        return summary;
+    }
+}
+```
 
-- 不要只说“可以用 RAG评测”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+### 5.2 在线监控指标
 
-## 十、二轮场景追问与项目表达
+```java
+// 关键看板指标
+// - recall_proxy：用用户反馈反推（点踩的 query 回溯召回，相关文档是否在 Top-K）
+// - answer_citation_rate：带引用回答比例
+// - refuse_rate：拒答率（过低可能强答幻觉，过高可能阈值太严）
+// - avg_confidence：平均置信度，突降说明检索质量退化
+// - rerank_latency_p99：重排延迟，cross-encoder 较慢要监控
+```
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+## 六、底层本质：检索质量的三段式优化
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+RAG 质量问题的根因定位链路：
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“RAG 召回评测、重排与答案置信度”，重点看 retrieval_hit_rate、permission_filter_miss、index_freshness_seconds，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+```
+用户反馈"答错了"
+  ↓
+看 answer_citation_rate 是否下降（生成层问题？）
+  ↓ 没降
+看 recall@10 是否达标（检索层问题？）
+  ↓ recall 低
+定位：embedding 模型？chunk 策略？权限过滤误杀？
+  ↓ recall 高但排序乱
+定位：没上 cross-encoder？或重排模型退化？
+  ↓ recall 和排序都好
+定位：LLM 幻觉（faithfulness 低）？prompt 不够约束？
+```
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+**三段式优化的本质是"分层归因"**：检索层（recall）→ 排序层（rerank）→ 生成层（faithfulness），每层有独立指标，不混淆。最常见的错误是"回答不好就调 prompt"——如果根因是召回不相关文档，调 prompt 没用，要调检索。
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 RAG评测 和 重排 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+## 七、AI 工程化深挖
 
-### 追问 3：你如何判断这个方案值得做？
+1. **怎么建 RAG 评测集不靠人工标注？**
+   用 LLM 辅助：从历史 query 日志采样，用强模型（GPT-4）判断每个 query 应该召回哪些文档（LLM-as-judge），人工抽检修正。冷启动用 LLM 生成合成 query（给一个文档生成可能的提问），覆盖长尾。
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 置信度 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+2. **重排模型怎么调优？**
+   通用 bge-reranker 在特定领域（医疗/法律）可能不够准，用领域数据微调（在 bge-reranker 基础上继续训练）。微调数据：query + 正例 doc + 负例 doc（难负例：同主题但不直接回答的 doc）。监控 rerank_lift（重排前后 recall@1 的提升幅度）。
 
-### STAR 项目表达
+3. **置信度校准怎么做？**
+   模型的 logprob 往往过自信（说 0.9 实际只有 0.7 准确率）。用 Platt scaling 或 temperature scaling 校准——在验证集上拟合一个逻辑回归把 raw confidence 映射到真实准确率。校准后的置信度才能作为拒答阈值依据。
 
-- **S（背景）**：原系统在 RAG评测 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 RAG 召回评测、重排与答案置信度 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 retrieval_hit_rate、permission_filter_miss 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+4. **多路召回怎么加权融合？**
+   RRF 不用调权重但不够灵活。学习排序（LTR）更优——用 XGBoost 训练一个排序模型，特征是各路的分数、文档属性（长度/新鲜度/权威性），输出统一排序分。但需要标注数据，冷启动用 RRF。
 
-### 二轮复盘清单
+5. **RAG 评测怎么集成到 CI/CD？**
+   评测集版本化管理（随业务更新）。每次 PR 触发离线评测（recall@10 / faithfulness），指标退化超阈值（如 recall 下降 2%）阻断合并。线上 A/B 测试用同一套指标，保证离线和在线对齐。
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
-
-## 十一、面试官 5 个企业级追问
-
-1. **你在真实项目里怎么判断“RAG 召回评测、重排与答案置信度”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 retrieval_hit_rate、permission_filter_miss、index_freshness_seconds。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
-
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，RAG评测 是否真是瓶颈，重排 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
-
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 权限过滤后置导致敏感信息泄露。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 retrieval_hit_rate 和 permission_filter_miss 做分钟级观察，一旦越过阈值立即止损。
-
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 置信度，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
-
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“RAG 召回评测、重排与答案置信度”，至少要沉淀 文档、切片、向量、倒排索引、召回结果 的建模规范，以及 retrieval_hit_rate、permission_filter_miss 的验收标准。
-
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“RAG 召回评测、重排与答案置信度”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 RAG评测 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“RAG 召回评测、重排与答案置信度”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 retrieval_hit_rate、permission_filter_miss 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 权限过滤后置导致敏感信息泄露，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 八、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：图书馆参考咨询员拿着目录、索引、借阅权限和引用卡片，在处理“用户问得很急，但答案必须有出处”。
+抓 **"recall、rerank、confidence"** 三个词。
 
-- **场景**：先说明“RAG 召回评测、重排与答案置信度”服务于什么业务目标，不要上来就堆 RAG评测。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 权限过滤后置导致敏感信息泄露、索引延迟造成回答过期。
-- **验证**：最后落到 retrieval_hit_rate、permission_filter_miss、index_freshness_seconds，让面试官感觉你真的上线过。
-
-### 拟人化理解
-
-可以把“RAG 召回评测、重排与答案置信度”想成一个图书馆参考咨询员：RAG评测 是他的目录、索引、借阅权限和引用卡片，重排 是他面对的现场信号，置信度 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先确认能不能看，再找准书页。这样记，比死背组件名更稳。
+- **recall**：双塔召回 Top-50 + BM25 混合，RRF 融合（score=Σ1/(60+rank)）
+- **rerank**：cross-encoder（bge-reranker）重排 Top-5，精度高 10-20%，只重排少量
+- **confidence**：logit_entropy + citation_coverage + retrieval_score 三信号融合，< 0.6 拒答
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“RAG 召回评测、重排与答案置信度”，我会这样答：我会先区分检索、重排、生成和引用校验，RAG 的核心不是“接向量库”，而是可信回答链路。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 权限过滤后置导致敏感信息泄露，所以我会提前设计灰度、监控和止损阈值，重点看 retrieval_hit_rate、permission_filter_miss。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
+> RAG 召回我上混合检索——向量召回 Top-50（语义）+ BM25 Top-50（关键词），RRF 融合（公式 score=Σ 1/(60+rank)，不用调权重）。融合后用 cross-encoder（bge-reranker-large）重排 Top-5，cross-encoder 把 query+doc 拼接过 transformer 捕获细粒度交互，比双塔精度高 10-20%，但慢 10 倍所以只重排少量。评测三指标：recall@10（召回率）、MRR（首命中排名）、NDCG（排序质量），离线用标注集跑，recall < 0.9 阻断发布。答案置信度用三信号：logit_entropy（模型不确定性）+ citation_coverage（引用覆盖率）+ retrieval_score（检索分数），加权融合 < 0.6 触发拒答转人工，这是防幻觉最后防线。质量归因分层：recall 低调检索，rerank 后排序还乱调重排，都好但答案差调 prompt 或换 LLM。
 
-### 被追问时的转场话术
+## 九、苏格拉底式面试追问
 
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 retrieval_hit_rate 或 permission_filter_miss 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么不直接用更强的 LLM，要优化召回？ | LLM 上限是 context 质量，garbage in garbage out。GPT-4 喂不相关文档也会幻觉。召回是天花板，LLM 是接近天花板的程度。先优化召回再优化 LLM |
+| 证据追问 | 怎么证明 cross-encoder 重排有效？ | A/B 对比：无重排 vs 有重排的 recall@1 和 answer_citation_rate。rerank_lift（重排前后 recall@1 提升幅度）是核心指标，通常提 10-20% |
+| 边界追问 | RAG 评测解决不了什么？ | 解决不了 query 本身歧义（用户问得不清楚）、知识库没有的答案（recall 再高也没用）、推理类问题（需要多步推理，单次召回不够） |
+| 反例追问 | 什么场景不用重排？ | 召回量小（Top-5 已经很准）、延迟敏感（cross-encoder 加 50ms）、简单 FAQ（关键词匹配就够）。过度上重排是浪费 |
+| 风险追问 | 置信度拒答的风险？ | 阈值设太高导致大量拒答（用户体验差），设太低漏过幻觉。要校准（Platt scaling）+ 用业务数据调阈值，监控 refuse_rate 在 5-15% 为健康 |
+| 验证追问 | 怎么证明评测集有代表性？ | 覆盖真实 query 分布（从日志采样）、覆盖长尾（不只高频 query）、定期更新（业务演进）。用 user_feedback_score 验证——评测集表现好的 query 线上用户也满意 |
+| 沉淀追问 | 团队沉淀什么？ | 评测集（版本化）、重排模型微调 pipeline、置信度校准 SOP、RAG 质量看板（recall/citation/confuse_rate）、质量归因 checklist |
 
-### 反问面试官
+## 常见考点
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
-
+1. **cross-encoder 和双塔区别？**——双塔是 query/doc 独立编码后点积，快但粗；cross-encoder 是拼接后过 transformer，慢但准（捕获交互）。工程上双塔召回 + cross-encoder 重排级联。
+2. **RRF 融合为什么不用加权平均？**——不同检索器分数分布不同（向量余弦 0-1，BM25 是 TF-IDF 分数），加权难调。RRF 只用排名（1/(k+rank)），对分数分布鲁棒，k=60 是经验值。
+3. **NDCG 怎么算？**——DCG = Σ rel_i / log2(i+1)，NDCG = DCG / IDCG（理想 DCG）。考虑了相关文档的排名位置（靠前权重高）和分级相关性（文档可以"非常相关""一般相关"）。
+4. **拒答率多少合适？**——5-15%。过低（< 5%）可能强答幻觉，过高（> 20%）体验差。要结合业务——医疗/法律宁可拒答不可错答，闲聊可以宽松。

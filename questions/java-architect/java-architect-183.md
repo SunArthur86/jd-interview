@@ -2,266 +2,410 @@
 id: java-architect-183
 difficulty: L3
 category: java-architect
-subcategory: 数据隔离
+subcategory: 多租户 SaaS
 tags:
 - Java 架构师
+- 多租户
 - SaaS
+- 套餐
 - 配额
 - 限流
 feynman:
-  essence: 多租户 SaaS 的套餐、配额与限流的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: 多租户 SaaS 的核心是"tenant_id 隔离 + 套餐配额 + 限流降级"。所有表带 tenant_id 字段实现逻辑隔离（共享 DB 共享 Schema）。套餐（免费/基础/企业）决定配额（用户数/API 调用/存储）。配额用 Redis 计数器实时统计，超限拒绝或降级。
+  analogy: 像写字楼——所有公司共用一栋楼（共享 DB），每家公司有独立门牌（tenant_id 隔离）。免费套餐用公共会议室（限流），企业套餐有专属电梯（高配额）。超员了保安拦住（配额超限）。
+  first_principle: 多租户的核心矛盾是"资源隔离 vs 成本"。物理隔离（每租户独立 DB）安全但成本高。逻辑隔离（共享 DB + tenant_id）成本低但要防数据串户（A 租户看到 B 租户数据）。配额防单租户耗尽共享资源（"吵闹的邻居"问题）。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - tenant_id 隔离：所有表带 tenant_id，MyBatis 拦截器自动注入 WHERE tenant_id=?
+  - 套餐定义：免费/基础/企业，定义配额（用户数/API/存储/功能）
+  - 配额统计：Redis 计数器（日/月维度），实时 incr + 判断
+  - 限流：单租户 QPS 限流（令牌桶），超限返回 429
+  - 降级：配额耗尽降级（如免费套餐用户超限后只读）
 first_principle:
-  problem: 面对“多租户 SaaS 的套餐、配额与限流”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 多租户 SaaS 如何实现数据隔离（防串户）、按套餐配额计费、防单租户耗尽资源？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 物理隔离（独立 DB）成本高，逻辑隔离（共享 DB + tenant_id）成本低
+  - 逻辑隔离要防数据串户（SQL 漏 WHERE tenant_id 会导致 A 看 B 数据）
+  - 不同套餐配额不同（免费 100 用户，企业 10000 用户）
+  - 单租户可能耗尽共享资源（"吵闹的邻居"），必须配额限流
+  rebuild: 所有表带 tenant_id 字段，MyBatis 拦截器自动注入 WHERE tenant_id=?（防漏写）。套餐表定义配额（plan_id → 用户数/API/存储上限）。Redis 计数器实时统计用量（tenant:quota:{tenantId}:{resource}:{period}），每次操作 incr + 判断超限。令牌桶限流（单租户 QPS），超限返回 429。配额耗尽降级（免费套餐超限转只读或拒绝）。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - 怎么防数据串户？——MyBatis 拦截器自动注入 WHERE tenant_id。ThreadLocal 存当前 tenantId（从 token 解析），所有 SQL 自动加 tenant_id 条件。开发不用手写。
+  - 套餐配额怎么存？——plan 表定义各套餐上限（用户数/API/存储）。租户订阅套餐（tenant → planId）。配额用 Redis 计数器实时统计（incr + 过期）。
+  - 配额超限怎么办？——拒绝（创建用户失败/API 返回 429）或降级（免费套餐超限转只读）。结合套餐策略，企业套餐可超额付费。
+  - 怎么限流？——令牌桶。单租户 QPS 限流（如免费 10 QPS，企业 1000 QPS）。Redis + Lua 实现令牌桶。超限返回 429 + Retry-After。
+  - 怎么计费？——按用量计费。统计 API 调用次数/存储量/用户数，月底出账单。Redis 计数器数据持久化到 DB 做对账。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - tenant_id 隔离：所有表带字段，MyBatis 拦截器自动注入 WHERE
+  - 套餐：plan 表（免费/基础/企业），定义配额上限
+  - 配额统计：Redis 计数器 tenant:quota:{tenantId}:{resource}:{period}
+  - 限流：令牌桶（单租户 QPS），超限返回 429
+  - 降级：配额耗尽转只读或拒绝，企业可超额付费
 ---
 
-# 【Java 后端架构师】多租户 SaaS 的套餐、配额与限流？
+# 【Java 后端架构师】多租户 SaaS 的套餐、配额与限流
 
-> 适用场景：高并发高可用。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD SaaS 产品（如京东商家开放平台 SaaS 版）。多个企业租户共享一套系统，按套餐（免费/基础/企业）提供不同配额。架构师要设计的是"tenant_id 隔离 + 套餐配额 + 限流降级"的多租户系统。
 
-## 一、先明确问题边界
+## 一、概念层：多租户架构
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+```
+所有租户 → 共享 DB（共享 Schema）→ 表带 tenant_id 字段
+                                        ↓
+                              MyBatis 拦截器自动注入 WHERE tenant_id=?
+                                        ↓
+套餐（plan）→ 配额定义（用户数/API/存储）
+                                        ↓
+                              Redis 计数器实时统计用量
+                                        ↓
+                    超限拒绝（429）或降级（转只读）
+```
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+## 二、机制层：tenant_id 隔离
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 SaaS 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+```java
+/**
+ * 租户上下文：ThreadLocal 存当前租户
+ */
+public class TenantContext {
+    private static final ThreadLocal<Long> TENANT_ID = new ThreadLocal<>();
 
-## 二、推荐架构思路
+    public static void set(Long tenantId) {
+        TENANT_ID.set(tenantId);
+    }
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+    public static Long get() {
+        return TENANT_ID.get();
+    }
 
-## 三、技术落地点
+    public static void clear() {
+        TENANT_ID.remove();
+    }
+}
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+/**
+ * 拦截器：从 token 解析 tenantId 存入 ThreadLocal
+ */
+@Component
+public class TenantInterceptor implements HandlerInterceptor {
 
-## 四、常见坑
+    @Override
+    public boolean preHandle(HttpServletRequest req, HttpServletResponse
+            resp, Object handler) {
+        String token = req.getHeader("Authorization");
+        Claims claims = JwtUtil.parse(token);
+        Long tenantId = claims.get("tenantId", Long.class);
+        TenantContext.set(tenantId);
+        return true;
+    }
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+    @Override
+    public void afterCompletion(HttpServletRequest req, HttpServletResponse
+            resp, Object handler, Exception ex) {
+        TenantContext.clear();      // 防内存泄漏
+    }
+}
+```
 
-## 五、面试回答模板
+```java
+/**
+ * MyBatis 拦截器：自动注入 WHERE tenant_id=?
+ * 开发不用手写 tenant_id 条件，防漏写导致串户
+ */
+@Intercepts(@Signature(type = Executor.class, method = "query",
+    args = {MappedStatement.class, Object.class, RowBounds.class,
+            ResultHandler.class}))
+public class TenantInterceptor implements Interceptor {
 
-可以按下面结构作答：
+    @Override
+    public Object intercept(Invocation invocation) throws Throwable {
+        Long tenantId = TenantContext.get();
+        if (tenantId == null) return invocation.proceed();
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“多租户 SaaS 的套餐、配额与限流”，核心是 SaaS 与 配额 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+        // 获取原始 SQL，注入 WHERE tenant_id=?
+        Object[] args = invocation.getArgs();
+        MappedStatement ms = (MappedStatement) args[0];
+        BoundSql boundSql = ms.getBoundSql(args[1]);
+        String sql = boundSql.getSql();
 
-## 六、加分点
+        // 简化：用 SQL 解析器（JSqlParser）注入 tenant_id 条件
+        String newSql = injectTenantId(sql, tenantId);
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+        // 替换 SQL（反射改 BoundSql）
+        Field field = boundSql.getClass().getDeclaredField("sql");
+        field.setAccessible(true);
+        field.set(boundSql, newSql);
 
-## 七、企业级面试定位：从“会用”到“能负责”
+        return invocation.proceed();
+    }
 
-企业级面试不会只问“SaaS 是什么”，而是看你能不能对一条真实生产链路负责。回答“多租户 SaaS 的套餐、配额与限流”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+    private String injectTenantId(String sql, Long tenantId) {
+        // 用 JSqlParser 解析 SQL，在 WHERE 子句加 tenant_id = ?
+        // 实际项目用 MyBatis-Plus TenantLineInnerInterceptor
+        return sql.replaceAll("(?i)WHERE",
+            "WHERE tenant_id = " + tenantId + " AND ");
+    }
+}
+```
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 高并发高可用 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 SaaS、配额、限流 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 tenant_context_miss、authz_deny_count、cross_tenant_alarm、audit_log_coverage 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+## 三、机制层：套餐定义
 
-### 企业级回答骨架
+```sql
+-- 套餐定义：各套餐配额上限
+CREATE TABLE plan (
+    plan_id VARCHAR(20) PRIMARY KEY,
+    name VARCHAR(50),
+    max_users INT,                  -- 最大用户数
+    max_api_calls_daily INT,        -- 每日 API 调用上限
+    max_storage_gb INT,             -- 存储上限 GB
+    max_qps INT,                    -- QPS 上限
+    features JSON,                  -- 功能开关（如高级报表）
+    price_monthly DECIMAL(10,2)
+);
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 SaaS 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+INSERT INTO plan VALUES
+('FREE', '免费版', 10, 1000, 1, 10,
+ '{"advanced_report":false}', 0),
+('BASIC', '基础版', 100, 10000, 10, 100,
+ '{"advanced_report":false}', 299),
+('ENTERPRISE', '企业版', 10000, 1000000, 100, 1000,
+ '{"advanced_report":true}', 2999);
 
-### 面试中要主动补的生产细节
+-- 租户订阅套餐
+CREATE TABLE tenant (
+    tenant_id BIGINT PRIMARY KEY,
+    name VARCHAR(100),
+    plan_id VARCHAR(20),
+    status VARCHAR(20),            -- ACTIVE/SUSPENDED
+    create_time DATETIME
+);
+```
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+## 四、机制层：配额统计与检查（Redis 计数器）
 
-## 八、苏格拉底式面试追问
+```java
+@Service
+@Slf4j
+public class QuotaService {
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+    private final RedisTemplate<String, String> redis;
+    private final PlanRepo planRepo;
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“多租户 SaaS 的套餐、配额与限流”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 tenant_context_miss、authz_deny_count、cross_tenant_alarm、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 SaaS 负责的范围，以及必须依赖 配额、限流 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 缓存 Key 缺少租户维度造成串数据，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+    /**
+     * 检查并消费配额（原子操作）
+     * 返回 true 表示配额充足，false 表示超限
+     */
+    public boolean tryConsume(Long tenantId, ResourceType type, int amount) {
+        Plan plan = getTenantPlan(tenantId);
+        int limit = getLimit(plan, type);
 
-### 现场对话示例
+        // 按日统计（key 带 yyyyMMdd）
+        String date = LocalDate.now().format(YYYYMMDD);
+        String key = "tenant:quota:" + tenantId + ":" + type + ":" + date;
 
-**面试官**：你说要做“多租户 SaaS 的套餐、配额与限流”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 tenant_context_miss、authz_deny_count、业务失败率和事故记录。
+        // Lua 原子操作：incr + 判断超限
+        String lua = "local current = redis.call('incrby', KEYS[1], ARGV[1]) "
+            + "if current == tonumber(ARGV[1]) then "
+            + "  redis.call('expire', KEYS[1], 86400) "
+            + "end "
+            + "if current > tonumber(ARGV[2]) then "
+            + "  redis.call('incrby', KEYS[1], -ARGV[1]) "
+            + "  return 0 "
+            + "end "
+            + "return 1";
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 tenant_context_miss 没有改善，或者 authz_deny_count 反而变差，就停止扩大范围，回到假设层重新复盘。
+        Long result = redis.execute(new DefaultRedisScript<>(lua,
+            Long.class), Collections.singletonList(key),
+            String.valueOf(amount), String.valueOf(limit));
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 tenant_context_miss、authz_deny_count、cross_tenant_alarm。这样它不是个人经验，而是团队机制。
+        if (result == 0) {
+            log.warn("配额超限: tenant={} type={} current={}/{}",
+                tenantId, type, getCurrent(key), limit);
+            metrics.counter("quota.exceeded", "tenant",
+                String.valueOf(tenantId), "type", type.name())
+                .increment();
+            return false;
+        }
+        return true;
+    }
 
-## 九、专项架构深挖：对象、链路、失败模式
+    private int getLimit(Plan plan, ResourceType type) {
+        switch (type) {
+            case API_CALL: return plan.getMaxApiCallsDaily();
+            case STORAGE: return plan.getMaxStorageGb();
+            case USER: return plan.getMaxUsers();
+            default: throw new IllegalArgumentException();
+        }
+    }
+}
 
-这一题不要停在“知道 SaaS”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+/**
+ * 配额检查注解 + AOP
+ */
+@Aspect
+@Component
+public class QuotaAspect {
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 租户、账号、角色、资源、数据范围；tenant_id、数据权限表达式、行列级权限；审计日志、越权拦截和脱敏策略 |
-| 设计主线 | 租户上下文从网关透传到应用、缓存和数据库；强隔离优先独立库表，弱隔离用租户字段和权限过滤；权限校验前置到查询构造和领域服务边界 |
-| 失败模式 | 缓存 Key 缺少租户维度造成串数据；后台任务绕过权限过滤；SQL 拼接遗漏 tenant_id 导致越权查询 |
-| 验证指标 | tenant_context_miss、authz_deny_count、cross_tenant_alarm、audit_log_coverage |
+    @Around("@annotation(quotaCheck)")
+    public Object check(ProceedingJoinPoint pjp, QuotaCheck quotaCheck)
+            throws Throwable {
+        Long tenantId = TenantContext.get();
+        if (!quotaService.tryConsume(tenantId,
+                quotaCheck.type(), 1)) {
+            throw new QuotaExceededException("配额超限，请升级套餐");
+        }
+        return pjp.proceed();
+    }
+}
 
-**架构拆解**：
+// 使用：
+@QuotaCheck(type = ResourceType.API_CALL)
+@PostMapping("/api/orders")
+public Order createOrder(@RequestBody OrderRequest req) {
+    // 自动检查 API 调用配额
+    return orderService.create(req);
+}
+```
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 配额 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 多租户 SaaS 的套餐、配额与限流 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 限流 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+## 五、机制层：租户限流（令牌桶）
 
-**高分回答细节**：
+```java
+/**
+ * 租户级 QPS 限流：令牌桶
+ */
+@Service
+public class TenantRateLimiter {
 
-- 不要只说“可以用 SaaS”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+    private final RedisTemplate<String, String> redis;
 
-## 十、二轮场景追问与项目表达
+    public boolean tryAcquire(Long tenantId) {
+        Plan plan = getTenantPlan(tenantId);
+        int qps = plan.getMaxQps();
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+        String key = "ratelimit:tenant:" + tenantId;
+        long now = System.currentTimeMillis();
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+        // Lua 令牌桶：按 QPS 补充令牌，消费一个
+        String lua = "local key = KEYS[1] "
+            + "local capacity = tonumber(ARGV[1]) "
+            + "local now = tonumber(ARGV[2]) "
+            + "local tokens = tonumber(redis.call('get', key..':tokens') or capacity) "
+            + "local last = tonumber(redis.call('get', key..':last') or now) "
+            + "local delta = math.max(0, now - last) * capacity / 1000 "
+            + "tokens = math.min(capacity, tokens + delta) "
+            + "if tokens < 1 then return 0 end "
+            + "tokens = tokens - 1 "
+            + "redis.call('set', key..':tokens', tokens) "
+            + "redis.call('set', key..':last', now) "
+            + "redis.call('expire', key..':tokens', 60) "
+            + "return 1";
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“多租户 SaaS 的套餐、配额与限流”，重点看 tenant_context_miss、authz_deny_count、cross_tenant_alarm，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+        Long result = redis.execute(new DefaultRedisScript<>(lua,
+            Long.class), Collections.singletonList(key),
+            String.valueOf(qps), String.valueOf(now));
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+        return result == 1;
+    }
+}
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 SaaS 和 配额 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+/**
+ * 限流过滤器：所有 API 请求先限流
+ */
+@Component
+public class RateLimitFilter extends OncePerRequestFilter {
 
-### 追问 3：你如何判断这个方案值得做？
+    @Override
+    protected void doFilterInternal(HttpServletRequest req,
+            HttpServletResponse resp, FilterChain chain)
+            throws ServletException, IOException {
+        Long tenantId = TenantContext.get();
+        if (!rateLimiter.tryAcquire(tenantId)) {
+            resp.setStatus(429);
+            resp.setHeader("Retry-After", "1");
+            resp.getWriter().write("{\"error\":\"rate limit exceeded\"}");
+            return;
+        }
+        chain.doFilter(req, resp);
+    }
+}
+```
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 限流 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+## 六、机制层：配额耗尽降级
 
-### STAR 项目表达
+```java
+/**
+ * 降级策略：免费套餐配额耗尽，转只读模式
+ */
+@Service
+public class DegradeService {
 
-- **S（背景）**：原系统在 SaaS 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 多租户 SaaS 的套餐、配额与限流 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 tenant_context_miss、authz_deny_count 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+    public void onQuotaExceeded(Long tenantId, Plan plan) {
+        if ("FREE".equals(plan.getPlanId())) {
+            // 免费套餐：超限后降级为只读
+            tenantRepo.updateStatus(tenantId, TenantStatus.READONLY);
+            notifyTenant(tenantId, "配额已用尽，当前为只读模式，升级套餐恢复");
+        } else if ("BASIC".equals(plan.getPlanId())) {
+            // 基础套餐：允许超额（下月账单扣费）
+            log.info("基础套餐超额，允许并计费: tenant={}", tenantId);
+        } else {
+            // 企业套餐：直接允许
+        }
+    }
+}
+```
 
-### 二轮复盘清单
+## 七、底层本质：隔离与配额的本质
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+**逻辑隔离的本质**：所有表带 tenant_id，SQL 加 WHERE tenant_id=? 过滤。成本低（共享 DB 共享 Schema）但要防漏写 tenant_id 导致串户。MyBatis 拦截器自动注入（开发不手写）+ 代码审查 + 测试（专用测试查"无 tenant_id 的 SQL"）。物理隔离（独立 DB）最安全但成本高（每租户一套 DB），适合金融/医疗等强合规场景。
 
-## 十一、面试官 5 个企业级追问
+**"吵闹的邻居"问题**：共享资源（DB/CPU/带宽）中，单租户可能耗尽资源影响其他租户。配额（用户数/API/存储）+ 限流（QPS）防单租户独占。这是多租户的核心治理问题——既要共享降成本，又要隔离保质量。
 
-1. **你在真实项目里怎么判断“多租户 SaaS 的套餐、配额与限流”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 tenant_context_miss、authz_deny_count、cross_tenant_alarm。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+**配额统计的本质**：实时统计用量（Redis incr），判断是否超套餐上限。key 设计按维度（tenant:quota:{tenantId}:{resource}:{period}），period 是日/月。Lua 保证 incr + 判断原子（否则并发下多消费）。计数器有过期时间（日级 key 24 小时过期，月级 30 天）。
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，SaaS 是否真是瓶颈，配额 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+**令牌桶限流的本质**：按 QPS 补充令牌（如 100 QPS = 每秒补 100 个），请求消费一个令牌。桶有容量上限（突发流量缓冲）。Redis + Lua 实现原子（令牌补充 + 消费）。超限返回 429 + Retry-After。
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 缓存 Key 缺少租户维度造成串数据。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 tenant_context_miss 和 authz_deny_count 做分钟级观察，一旦越过阈值立即止损。
+**降级策略的本质**：配额耗尽后的处理因套餐而异——免费套餐严格（降级只读或拒绝，促付费转化），基础套餐弹性（允许超额下月扣费），企业套餐宽松（直接允许，月度对账）。这是**商业策略**在技术上的体现。
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 限流，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+## 八、AI 工程化深挖
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“多租户 SaaS 的套餐、配额与限流”，至少要沉淀 租户、账号、角色、资源、数据范围 的建模规范，以及 tenant_context_miss、authz_deny_count 的验收标准。
+1. **怎么用 AI 预测租户用量？** 历史用量 + 业务周期训练模型，预测"租户 A 本月 API 调用将达 120%，建议升级套餐"。主动外呼提升续费率。
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
+2. **怎么用 AI 检测异常租户？** 异常模式：某租户突然 API 调用暴增（可能被攻击/爬数据）、存储异常增长（可能滥用）。AI 检测 + 告警 + 限流。
 
-1. **如果把“多租户 SaaS 的套餐、配额与限流”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 SaaS 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
+3. **怎么用 LLM 做租户客服？** 租户工单接入 LLM（带租户的配置/数据上下文），自动回复常见问题（"怎么升级套餐/加用户"）。降低人工客服成本。
 
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“多租户 SaaS 的套餐、配额与限流”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 tenant_context_miss、authz_deny_count 对业务链路的影响。
+4. **怎么用 AI 智能定价？** 根据租户用量/行业/规模，AI 推荐最适合的套餐（"您当前用量适合基础版，每年省 2000 元"）。提升转化。
 
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 缓存 Key 缺少租户维度造成串数据，要能通过 trace、tool_call_id 和业务流水快速回放。
+5. **怎么用 AI 做配额推荐？** 分析租户历史用量，AI 推荐最佳配额配置（"您的 API 用量稳定在 5000/天，建议配 8000 留余量"）。平衡成本和体验。
 
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 九、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：经验丰富的值班负责人拿着工具箱、调度台和应急预案，在处理“业务流量和系统风险同时出现”。
+抓 **"tenant_id、套餐、配额、限流"** 四个词。
 
-- **场景**：先说明“多租户 SaaS 的套餐、配额与限流”服务于什么业务目标，不要上来就堆 SaaS。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 缓存 Key 缺少租户维度造成串数据、后台任务绕过权限过滤。
-- **验证**：最后落到 tenant_context_miss、authz_deny_count、cross_tenant_alarm，让面试官感觉你真的上线过。
-
-### 拟人化理解
-
-可以把“多租户 SaaS 的套餐、配额与限流”想成一个经验丰富的值班负责人：SaaS 是他的工具箱、调度台和应急预案，配额 是他面对的现场信号，限流 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看指标，再控风险，最后谈优化。这样记，比死背组件名更稳。
+- **tenant_id**：所有表带字段，MyBatis 拦截器自动注入 WHERE tenant_id=?
+- **套餐**：plan 表定义配额上限（用户数/API/存储/QPS/功能）
+- **配额**：Redis 计数器 tenant:quota:{tenantId}:{type}:{period}，Lua 原子 incr+判断
+- **限流**：令牌桶（单租户 QPS），超限返回 429 + Retry-After
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“多租户 SaaS 的套餐、配额与限流”，我会这样答：我会先确认业务目标、规模、SLA 和一致性要求，再选择合适的架构手段。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 缓存 Key 缺少租户维度造成串数据，所以我会提前设计灰度、监控和止损阈值，重点看 tenant_context_miss、authz_deny_count。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
+> 多租户 SaaS 我用 tenant_id 逻辑隔离 + 套餐配额 + 限流降级。隔离——所有表带 tenant_id 字段，TenantContext（ThreadLocal）存当前租户（从 JWT 解析），MyBatis 拦截器（TenantLineInnerInterceptor）自动注入 WHERE tenant_id=?（开发不手写，防漏写串户）。共享 DB 共享 Schema（成本低），物理隔离（独立 DB）只在强合规场景用。套餐——plan 表定义各套餐上限（FREE/BASIC/ENTERPRISE，配用户数/API/存储/QPS/功能），租户订阅套餐（tenant → planId）。配额统计——Redis 计数器 key=tenant:quota:{tenantId}:{type}:{yyyyMMdd}，Lua 原子 incr+判断（防并发多消费），日级 key 24 小时过期。@QuotaCheck 注解 + AOP 自动检查（如 API 调用每次 incr 1，超 max_api_calls_daily 返回配额超限）。限流——令牌桶（Redis+Lua 实现），按套餐 QPS 补充令牌（FREE 10 QPS，ENTERPRISE 1000 QPS），超限返回 429 + Retry-After。降级策略——免费套餐配额耗尽降级只读（促付费转化），基础套餐允许超额下月扣费，企业套餐直接允许。这是"吵闹邻居"问题的治理——共享资源下防单租户独占。监控 quota_exceeded_rate、ratelimit_429_count、tenant_usage_growth。
 
-### 被追问时的转场话术
+## 十、苏格拉底追问
 
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 tenant_context_miss 或 authz_deny_count 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+| 追问 | 证据/答案 |
+|------|-----------|
+| 为什么不用独立 DB（物理隔离）？ | 成本高（万租户 = 万 DB）。逻辑隔离（共享 DB + tenant_id）成本低，配合拦截器防串户够用。强合规（金融）才用物理隔离。 |
+| MyBatis 拦截器漏注入怎么办？ | 三层防护：拦截器自动注入 + 代码审查（查无 tenant_id 的 SQL）+ 测试（专用测试查跨租户访问）。 |
+| 配额并发超消费怎么办？ | Lua 原子操作（incr + 判断 + 回滚在一个 Lua 脚本）。不用 Lua 的话并发下多个请求同时判断"未超限"都通过，导致超额。 |
+| 配额耗尽怎么降级？ | 按套餐策略——免费降级只读（促付费），基础允许超额扣费，企业允许。商业策略在技术上的体现。 |
+| 怎么计费？ | 按用量。Redis 计数器数据持久化到 DB，月底出账单。计数器和 DB 对账（防 Redis 丢失）。 |
 
-### 反问面试官
+## 十、常见考点
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
-
+1. **多租户怎么隔离？**——逻辑隔离（共享 DB + tenant_id 字段）。MyBatis 拦截器自动注入 WHERE tenant_id=?（开发不手写）。物理隔离（独立 DB）成本高，强合规才用。
+2. **套餐配额怎么实现？**——plan 表定义上限，Redis 计数器实时统计（Lua 原子 incr+判断）。@QuotaCheck 注解 + AOP 自动检查。日级 key 24 小时过期。
+3. **怎么防"吵闹的邻居"？**——配额（用户/API/存储上限）+ 限流（QPS 令牌桶）。单租户不能耗尽共享资源影响其他租户。
+4. **限流怎么实现？**——令牌桶（Redis+Lua）。按套餐 QPS 补充令牌（FREE 10 QPS，ENTERPRISE 1000 QPS），超限返回 429 + Retry-After。
+5. **配额耗尽怎么办？**——降级策略因套餐而异。免费降级只读（促付费），基础允许超额扣费，企业允许。

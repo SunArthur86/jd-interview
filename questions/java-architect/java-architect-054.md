@@ -9,259 +9,421 @@ tags:
 - 状态机
 - 一致性
 feynman:
-  essence: 订单系统状态机与一致性设计的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: 订单状态机的本质是"用有限状态机（FSM）约束订单生命周期"——每个状态有明确的合法后继状态，非法跳转必须被拒绝。一致性设计的核心是"状态变更的原子性"——用乐观锁（version 字段）+ 状态前置条件（WHERE status='WAIT_PAY'）保证并发下只有一个变更成功。订单系统最大的事故来源是"并发状态跳转"（支付和取消同时发生），状态机+乐观锁是兜底。
+  analogy: 像地铁闸机。闸机有"关闭"和"打开"两个状态，只有"刷卡成功"能让关闭→打开，只有"人员通过"能让打开→关闭。非法跳转（关闭状态强行通过）被物理阻挡。订单状态机同理——"待支付"状态只能跳到"已支付"或"已取消"，不能直接跳到"已完成"。
+  first_principle: 为什么订单要用状态机？因为订单的状态变化有严格的前置条件（只有待支付才能支付，只有已支付才能发货）。如果不用状态机约束，代码里写 if(status==X) 容易遗漏判断，导致"已取消的订单被发货"这种逻辑 bug。状态机把"合法跳转规则"集中声明，运行时强制校验，非法跳转抛异常。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 订单状态：待支付→已支付→已发货→已完成（主流程），待支付→已取消（取消）
+  - 状态机三要素：当前状态、目标状态、转换条件
+  - 并发控制：乐观锁 version + WHERE status=前置状态
+  - 非法跳转拦截：数据库层用 UPDATE WHERE status=? 拦截
+  - 状态变更 + 副作用（扣库存/退款）要事务一致或事件最终一致
 first_principle:
-  problem: 面对“订单系统状态机与一致性设计”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 订单生命周期有 N 个状态和 M 种跳转，如何防止并发下的非法状态跳转（如支付和取消同时执行）？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 订单状态跳转有严格前置条件（只有待支付才能支付）
+  - 并发请求可能导致竞态（支付和取消同时到达，都判断为"待支付"都执行）
+  - 状态变更必须原子（不能"半个支付"——扣款了但状态没改）
+  rebuild: 用状态机声明所有合法跳转（WAIT_PAY→PAID, WAIT_PAY→CANCELLED）。状态变更用乐观锁——UPDATE order SET status='PAID', version=version+1 WHERE id=? AND status='WAIT_PAY' AND version=旧version。并发下只有一个 UPDATE 成功（影响行数=1），另一个失败（影响行数=0，状态已变）。状态变更和副作用（扣库存/发券）用本地事务或领域事件最终一致。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - 状态机用什么框架？——Spring StateMachine（重），或自研轻量状态机（Enum + Map<当前状态, 允许目标状态>）。京东订单用自研，性能好且可控。
+  - 订单状态怎么扩展？——状态用枚举固化，扩展时加新枚举值。历史订单的状态不变，新订单用新状态。状态机配置用版本化（v1 状态机/v2 状态机），按订单类型路由。
+  - 已取消订单能恢复吗？——业务上一般不允许（要重新下单）。如果要恢复，加"已取消→待支付"的逆向跳转，但要处理副作用（库存已释放，要重新锁定）。推荐不恢复，重新下单。
+  - 状态变更失败怎么补偿？——乐观锁失败重试（指数退避，最多 3 次）；副作用失败（扣库存失败）走 Saga 补偿（回滚订单状态）。
+  - 状态机怎么测试？——遍历所有合法跳转（必须成功）+ 所有非法跳转（必须抛异常）。用参数化测试覆盖状态矩阵。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 订单状态：待支付→已支付→已发货→已完成（主链）
+  - 状态机：Enum + Map<状态, 允许后继>，非法跳转抛异常
+  - 并发控制：乐观锁 UPDATE WHERE status=前置 AND version=旧
+  - 状态+副作用：本地事务 或 领域事件最终一致
+  - 状态变更日志：记录每次状态变化的 from/to/operator/time
 ---
 
-# 【Java 后端架构师】订单系统状态机与一致性设计？
+# 【Java 后端架构师】订单系统状态机与一致性设计
 
-> 适用场景：JD 核心技术。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。京东订单每天千万级，状态从"待支付"到"已完成"经历 N 次跳转。最常见的生产事故是"并发状态冲突"——用户点取消的同时支付回调到达，两个操作都判断当前是"待支付"都执行，结果订单状态错乱（已取消但扣了款）。状态机+乐观锁是这类事故的根治方案。
 
-## 一、先明确问题边界
+## 一、概念层：订单状态机定义
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**订单状态与合法跳转**（面试必画）：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+```
+                         ┌──────────┐
+                    ┌───►│ CANCELLED │ (已取消)
+                    │    └──────────┘
+                    │
+┌─────────┐ pay()  │   ┌──────┐ ship()  ┌────────┐ deliver() ┌───────────┐
+│WAIT_PAY │───────►├──►│ PAID │────────►│SHIPPED │──────────►│ COMPLETED │
+│(待支付) │        │   │(已支付)│        │(已发货) │           │ (已完成)   │
+└─────────┘        │   └──────┘        └────────┘           └───────────┘
+       ▲           │       │                │
+       │ cancel()  │       │ refund()       │ return()
+       └───────────┘       ▼                ▼
+                      ┌──────────┐     ┌────────────┐
+                      │REFUNDING │     │ RETURNING  │
+                      │ (退款中)  │     │ (退货中)    │
+                      └────┬─────┘     └─────┬──────┘
+                           │ refund_ok()     │ return_ok()
+                           ▼                 ▼
+                      ┌──────────┐     ┌────────────┐
+                      │ REFUNDED │     │ RETURNED   │
+                      │(已退款)   │     │(已退货)     │
+                      └──────────┘     └────────────┘
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 订单 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+合法跳转矩阵（有限部分）：
+  WAIT_PAY → PAID          (支付)
+  WAIT_PAY → CANCELLED     (取消)
+  PAID     → SHIPPED       (发货)
+  PAID     → REFUNDING     (申请退款)
+  SHIPPED  → COMPLETED     (确认收货)
+  SHIPPED  → RETURNING     (申请退货)
 
-## 二、推荐架构思路
+非法跳转（必须拒绝）：
+  WAIT_PAY → SHIPPED       (未支付不能直接发货)
+  CANCELLED → PAID         (已取消不能恢复支付)
+  COMPLETED → CANCELLED    (已完成不能取消)
+```
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+## 二、机制层：状态机代码实现
 
-## 三、技术落地点
+**自研轻量状态机**：
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+```java
+// 状态枚举
+public enum OrderStatus {
+    WAIT_PAY,     // 待支付
+    PAID,         // 已支付
+    SHIPPED,      // 已发货
+    COMPLETED,    // 已完成
+    CANCELLED,    // 已取消
+    REFUNDING,    // 退款中
+    REFUNDED,     // 已退款
+    RETURNING,    // 退货中
+    RETURNED      // 已退货
+}
 
-## 四、常见坑
+// 状态机配置（声明合法跳转）
+public enum OrderEvent {
+    PAY,           // 支付
+    CANCEL,        // 取消
+    SHIP,          // 发货
+    DELIVER,       // 确认收货
+    REQUEST_REFUND,// 申请退款
+    REFUND_OK,     // 退款成功
+    REQUEST_RETURN,// 申请退货
+    RETURN_OK      // 退货成功
+}
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+@Configuration
+public class OrderStateMachineConfig {
 
-## 五、面试回答模板
+    // 合法跳转表：Map<当前状态, Map<事件, 目标状态>>
+    @Bean
+    public Map<OrderStatus, Map<OrderEvent, OrderStatus>> transitions() {
+        Map<OrderStatus, Map<OrderEvent, OrderStatus>> map = new HashMap<>();
+        // WAIT_PAY + PAY → PAID
+        transition(map, WAIT_PAY, PAY, PAID);
+        transition(map, WAIT_PAY, CANCEL, CANCELLED);
+        transition(map, PAID, SHIP, SHIPPED);
+        transition(map, PAID, REQUEST_REFUND, REFUNDING);
+        transition(map, SHIPPED, DELIVER, COMPLETED);
+        transition(map, SHIPPED, REQUEST_RETURN, RETURNING);
+        transition(map, REFUNDING, REFUND_OK, REFUNDED);
+        transition(map, RETURNING, RETURN_OK, RETURNED);
+        return Collections.unmodifiableMap(map);   // 不可变，防止运行时篡改
+    }
 
-可以按下面结构作答：
+    private void transition(Map map, OrderStatus from, OrderEvent event, OrderStatus to) {
+        map.computeIfAbsent(from, k -> new HashMap<>()).put(event, to);
+    }
+}
+```
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“订单系统状态机与一致性设计”，核心是 订单 与 状态机 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+**订单聚合根的状态变更方法**（DDD 充血）：
 
-## 六、加分点
+```java
+public class Order {
+    private Long id;
+    private OrderStatus status;
+    private Integer version;      // 乐观锁版本号
+    private BigDecimal amount;
+    private List<OrderItem> items;
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+    @Autowired
+    private Map<OrderStatus, Map<OrderEvent, OrderStatus>> transitions;
 
-## 七、企业级面试定位：从“会用”到“能负责”
+    // 状态变更：校验合法性
+    public void transition(OrderEvent event) {
+        Map<OrderEvent, OrderStatus> allowed = transitions.get(this.status);
+        if (allowed == null || !allowed.containsKey(event)) {
+            // 非法跳转，抛异常并记录监控
+            throw new IllegalStateTransitionException(
+                "非法状态跳转: " + this.status + " + " + event +
+                ", order_id=" + this.id);
+        }
+        OrderStatus oldStatus = this.status;
+        this.status = allowed.get(event);
+        // 记录状态变更日志（审计）
+        this.addStateChangeLog(oldStatus, this.status, event);
+    }
 
-企业级面试不会只问“订单 是什么”，而是看你能不能对一条真实生产链路负责。回答“订单系统状态机与一致性设计”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+    // 业务方法：支付
+    public OrderPaidEvent pay() {
+        transition(OrderEvent.PAY);   // 状态机校验
+        return new OrderPaidEvent(this.id, this.amount);
+    }
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 JD 核心技术 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 订单、状态机、一致性 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 order_create_success_rate、state_conflict_count、timeout_cancel_lag、order_pay_diff_count 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+    // 业务方法：取消
+    public OrderCancelledEvent cancel() {
+        transition(OrderEvent.CANCEL);
+        return new OrderCancelledEvent(this.id);
+    }
+}
+```
 
-### 企业级回答骨架
+## 三、机制层：并发控制与非法跳转拦截
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 订单 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+**乐观锁 SQL**（数据库层拦截）：
 
-### 面试中要主动补的生产细节
+```java
+@Mapper
+public interface OrderMapper {
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+    // 乐观锁更新：WHERE status=前置状态 AND version=旧版本
+    @Update("UPDATE t_order SET status = #{newStatus}, " +
+            "version = version + 1, update_time = NOW() " +
+            "WHERE id = #{orderId} " +
+            "AND status = #{expectedStatus} " +
+            "AND version = #{expectedVersion}")
+    int optimisticUpdate(@Param("orderId") Long orderId,
+                         @Param("newStatus") String newStatus,
+                         @Param("expectedStatus") String expectedStatus,
+                         @Param("expectedVersion") Integer expectedVersion);
+}
 
-## 八、苏格拉底式面试追问
+// 应用层使用
+@Service
+public class OrderApplicationService {
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+    @Transactional
+    public void payOrder(Long orderId) {
+        Order order = orderRepo.findById(orderId);
+        OrderStatus oldStatus = order.getStatus();
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“订单系统状态机与一致性设计”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 order_create_success_rate、state_conflict_count、timeout_cancel_lag、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 订单 负责的范围，以及必须依赖 状态机、一致性 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 支付成功但订单未更新，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+        try {
+            order.pay();   // 状态机校验（应用层）
+        } catch (IllegalStateTransitionException e) {
+            // 应用层校验失败，记录非法跳转
+            monitor.record("order_state_conflict", orderId, oldStatus, "PAY");
+            throw e;
+        }
 
-### 现场对话示例
+        // 乐观锁更新（数据库层兜底）
+        int affected = orderMapper.optimisticUpdate(
+            orderId,
+            order.getStatus().name(),
+            oldStatus.name(),        // 期望的旧状态
+            order.getVersion()       // 期望的旧版本
+        );
 
-**面试官**：你说要做“订单系统状态机与一致性设计”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 order_create_success_rate、state_conflict_count、业务失败率和事故记录。
+        if (affected == 0) {
+            // 更新失败：并发冲突（其他请求已改状态）
+            Order current = orderRepo.findById(orderId);
+            monitor.record("order_state_conflict", orderId, oldStatus,
+                current.getStatus().name());
+            throw new ConcurrentStateConflictException(
+                "订单状态并发冲突: orderId=" + orderId +
+                ", expected=" + oldStatus + ", actual=" + current.getStatus());
+        }
+    }
+}
+```
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 order_create_success_rate 没有改善，或者 state_conflict_count 反而变差，就停止扩大范围，回到假设层重新复盘。
+**非法状态跳转拦截 SQL**（更严格的约束）：
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 order_create_success_rate、state_conflict_count、timeout_cancel_lag。这样它不是个人经验，而是团队机制。
+```sql
+-- 方法 1：乐观锁（推荐）
+UPDATE t_order
+SET status = 'PAID', version = version + 1, update_time = NOW()
+WHERE id = 12345
+  AND status = 'WAIT_PAY'       -- 前置状态条件
+  AND version = 5;               -- 乐观锁版本
 
-## 九、专项架构深挖：对象、链路、失败模式
+-- 如果 status 已不是 WAIT_PAY（被取消），affected_rows = 0，支付失败
 
-这一题不要停在“知道 订单”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+-- 方法 2：CHECK 约束（MySQL 8.0+ 支持）
+ALTER TABLE t_order
+ADD CONSTRAINT chk_status_transition
+CHECK (
+    NOT (status = 'PAID' AND OLD.status = 'CANCELLED')  -- 已取消不能变已支付
+    -- 注意：MySQL 的 CHECK 不能引用 OLD，这里用触发器替代
+);
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 订单、订单项、履约单、支付单、售后单；订单状态机、库存预占、超时取消任务；幂等键和业务流水号 |
-| 设计主线 | 订单主状态收敛，履约、支付、售后用子状态协作；创建、支付、取消、发货都要有非法状态拦截；超时任务必须可重入并能补偿漏扫 |
-| 失败模式 | 支付成功但订单未更新；取消和支付并发导致状态冲突；延迟任务丢失造成库存不释放 |
-| 验证指标 | order_create_success_rate、state_conflict_count、timeout_cancel_lag、order_pay_diff_count |
+-- 方法 3：触发器（强制状态机规则）
+DELIMITER //
+CREATE TRIGGER before_order_status_update
+BEFORE UPDATE ON t_order
+FOR EACH ROW
+BEGIN
+    -- 非法跳转检查
+    IF OLD.status = 'CANCELLED' AND NEW.status = 'PAID' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = '非法状态跳转: CANCELLED → PAID';
+    END IF;
+    IF OLD.status = 'COMPLETED' AND NEW.status = 'CANCELLED' THEN
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = '非法状态跳转: COMPLETED → CANCELLED';
+    END IF;
+END//
+DELIMITER ;
+```
 
-**架构拆解**：
+## 四、机制层：状态变更日志与一致性
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 状态机 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 订单系统状态机与一致性设计 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 一致性 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+**状态变更日志表**（审计必备）：
 
-**高分回答细节**：
+```sql
+CREATE TABLE t_order_state_log (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    order_id BIGINT NOT NULL,
+    from_status VARCHAR(20) NOT NULL,
+    to_status VARCHAR(20) NOT NULL,
+    event VARCHAR(20) NOT NULL,         -- 触发事件（PAY/CANCEL）
+    operator VARCHAR(50),               -- 操作人（用户/系统/管理员）
+    operator_type VARCHAR(20),          -- USER/SYSTEM/ADMIN
+    remark VARCHAR(200),
+    create_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_order (order_id, create_time)
+);
 
-- 不要只说“可以用 订单”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+-- 每次状态变更记录一条
+INSERT INTO t_order_state_log (order_id, from_status, to_status, event, operator)
+VALUES (12345, 'WAIT_PAY', 'PAID', 'PAY', 'system_callback');
+```
 
-## 十、二轮场景追问与项目表达
+**状态变更与副作用的一致性**：
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+```java
+@Service
+public class OrderApplicationService {
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+    // 场景：支付成功后扣库存（跨聚合）
+    @Transactional
+    public void onPaymentSuccess(Long orderId) {
+        // 1. 本地事务：状态变更 + 日志
+        Order order = orderRepo.findById(orderId);
+        order.pay();
+        int affected = orderMapper.optimisticUpdate(...);
+        if (affected == 0) throw new ConcurrentStateConflictException();
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“订单系统状态机与一致性设计”，重点看 order_create_success_rate、state_conflict_count、timeout_cancel_lag，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+        // 2. 扣库存：跨服务调用（不在同一事务）
+        try {
+            inventoryClient.deduct(order.getItems());
+        } catch (Exception e) {
+            // 扣库存失败：发补偿事件，后续 Saga 回滚支付
+            eventPublisher.publish(new InventoryDeductFailedEvent(orderId));
+            throw e;
+        }
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+        // 3. 发领域事件（Outbox 模式，同事务）
+        outboxRepo.save(new OutboxMessage(new OrderPaidEvent(orderId)));
+    }
+}
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 订单 和 状态机 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+// 补偿 Saga：支付成功但扣库存失败 → 退款 + 取消订单
+@EventListener
+public class OrderCompensationSaga {
 
-### 追问 3：你如何判断这个方案值得做？
+    @Async
+    public void onInventoryDeductFailed(InventoryDeductFailedEvent event) {
+        Long orderId = event.getOrderId();
+        // 1. 退款
+        paymentClient.refund(orderId);
+        // 2. 取消订单
+        orderApplicationService.cancelOrder(orderId, "库存不足自动取消");
+        // 3. 告警
+        alertService.send("订单" + orderId + "扣库存失败已自动退款取消");
+    }
+}
+```
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 一致性 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+## 五、底层本质：状态机是业务不变量的固化
 
-### STAR 项目表达
+回到第一性：**订单状态机的本质是"把业务规则（状态跳转约束）从代码里固化到数据结构里"**。
 
-- **S（背景）**：原系统在 订单 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 订单系统状态机与一致性设计 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 order_create_success_rate、state_conflict_count 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+- **不用状态机（if-else 散落）**：每个 Service 方法手动判断 `if (order.status == WAIT_PAY)`，10 个方法 10 处判断，漏一处就出 bug（如发货方法忘了判断状态，把已取消的订单发了）。
+- **用状态机（集中声明）**：合法跳转集中在 Map 里，所有状态变更走 `transition(event)` 方法，非法跳转自动抛异常。新增状态只改 Map，不改业务方法。
 
-### 二轮复盘清单
+**乐观锁的本质是"检测并发冲突而非阻止"**：悲观锁（SELECT FOR UPDATE）在事务开始就锁行，阻止并发；乐观锁不锁行，UPDATE 时用 WHERE version=旧 检测——如果 version 变了说明有人改过，本次 UPDATE 失败。乐观锁适合"冲突少"的场景（订单状态变更不是超高并发），性能比悲观锁好（不持有锁）。
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+**并发冲突的典型场景**：用户点"取消订单"和支付网关回调"支付成功"几乎同时到达。两个请求都读到 `status=WAIT_PAY`，都尝试更新。乐观锁保证只有一个成功：
+- 请求 A（取消）：UPDATE SET status='CANCELLED' WHERE status='WAIT_PAY' AND version=5 → 成功（version→6）
+- 请求 B（支付）：UPDATE SET status='PAID' WHERE status='WAIT_PAY' AND version=5 → 失败（status 已是 CANCELLED）
 
-## 十一、面试官 5 个企业级追问
+支付失败的请求走补偿——通知支付网关该订单已取消，触发退款。这就是为什么支付回调要幂等+可补偿。
 
-1. **你在真实项目里怎么判断“订单系统状态机与一致性设计”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 order_create_success_rate、state_conflict_count、timeout_cancel_lag。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+## 六、AI 架构师加问：5 个
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，订单 是否真是瓶颈，状态机 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+1. **用 AI 检测订单状态机漏洞，怎么做？**
+   AI 分析代码里的所有状态变更点，对比状态机配置，找出"绕过 transition() 方法直接 setStatus() 的代码"。静态扫描 + 人工 review。历史事故样本训练 AI 识别常见漏洞模式。
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 支付成功但订单未更新。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 order_create_success_rate 和 state_conflict_count 做分钟级观察，一旦越过阈值立即止损。
+2. **AI 辅助设计订单状态机，怎么用？**
+   AI 从需求文档抽取状态和事件，生成状态机配置草案（Map<状态, Map<事件, 目标>>）。但复杂业务（退款逆向、售后分支）要人工补充——AI 容易漏掉边界场景。生成后用状态矩阵测试覆盖所有合法/非法跳转。
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 一致性，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+3. **AI Agent 操作订单，怎么过状态机？**
+   Agent 调用 OrderApplicationService 的标准方法（payOrder/cancelOrder），走状态机校验。Agent 不能绕过状态机直改 DB。Agent 的操作记录到 state_log（operator=AI_AGENT），可追溯。
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“订单系统状态机与一致性设计”，至少要沉淀 订单、订单项、履约单、支付单、售后单 的建模规范，以及 order_create_success_rate、state_conflict_count 的验收标准。
+4. **用 AI 预测订单状态冲突概率，怎么做？**
+   AI 分析订单的并发请求模式——同订单的多请求时间间隔、用户操作习惯（点取消后多快收到支付回调）。高冲突概率的订单加悲观锁（SELECT FOR UPDATE），低冲突用乐观锁。
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
+5. **AI 推理修改订单状态，怎么保证安全？**
+   AI 的推理结果不能直接 UPDATE 订单状态，必须调聚合根的 transition() 方法，走状态机校验。Code Review 检查：任何修改 status 字段的代码必须经过 transition()，禁止直接 order.setStatus()。
 
-1. **如果把“订单系统状态机与一致性设计”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 订单 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“订单系统状态机与一致性设计”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 order_create_success_rate、state_conflict_count 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 支付成功但订单未更新，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 七、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：经验丰富的值班负责人拿着工具箱、调度台和应急预案，在处理“业务流量和系统风险同时出现”。
+抓 **"状态机声明跳转、乐观锁防并发、状态日志留审计、事件解耦副作用"**。
 
-- **场景**：先说明“订单系统状态机与一致性设计”服务于什么业务目标，不要上来就堆 订单。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 支付成功但订单未更新、取消和支付并发导致状态冲突。
-- **验证**：最后落到 order_create_success_rate、state_conflict_count、timeout_cancel_lag，让面试官感觉你真的上线过。
-
-### 拟人化理解
-
-可以把“订单系统状态机与一致性设计”想成一个经验丰富的值班负责人：订单 是他的工具箱、调度台和应急预案，状态机 是他面对的现场信号，一致性 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看指标，再控风险，最后谈优化。这样记，比死背组件名更稳。
+- **状态机**：Map<状态, Map<事件, 目标>>，transition(event) 校验合法性
+- **乐观锁**：UPDATE WHERE status=前置 AND version=旧，affected=0 则冲突
+- **状态日志**：t_order_state_log 记录 from/to/event/operator
+- **一致性**：状态变更本地事务，副作用（扣库存）用领域事件最终一致
+- **非法跳转**：应用层 transition() 校验 + 数据库层 WHERE status=? 双重兜底
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“订单系统状态机与一致性设计”，我会这样答：我会先确认业务目标、规模、SLA 和一致性要求，再选择合适的架构手段。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 支付成功但订单未更新，所以我会提前设计灰度、监控和止损阈值，重点看 order_create_success_rate、state_conflict_count。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
+> 订单状态机用自研轻量实现——状态枚举（WAIT_PAY/PAID/SHIPPED/COMPLETED）+ 事件枚举（PAY/CANCEL/SHIP），合法跳转声明在 Map<状态, Map<事件, 目标>> 里。订单聚合根的 pay() 方法调 transition(PAY) 校验合法性，非法跳转抛 IllegalStateTransitionException。并发控制用乐观锁——UPDATE SET status='PAID', version=version+1 WHERE id=? AND status='WAIT_PAY' AND version=旧，affected_rows=0 说明并发冲突（状态已被其他请求改了）。比如取消和支付同时到达，都读到 WAIT_PAY，乐观锁保证只有一个 UPDATE 成功，另一个 affected=0 走补偿。状态变更日志记录每次 from/to/event/operator，审计用。副作用（扣库存/发券）用领域事件解耦——本地事务只管状态变更，扣库存跨服务走事件最终一致，失败走 Saga 补偿。最容易翻车的是直接 order.setStatus() 绕过状态机——Code Review 强制所有状态变更走 transition()。
 
-### 被追问时的转场话术
+## 八、苏格拉底式面试追问
 
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 order_create_success_rate 或 state_conflict_count 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么不用悲观锁（SELECT FOR UPDATE），乐观锁够吗？ | 用冲突频率说话：订单状态变更不是超高并发（单订单 QPS < 10），乐观锁冲突率 < 1%，重试即可。悲观锁持有锁时间长影响吞吐。用 order_state_conflict_count（状态冲突次数）和 lock_wait_timeout_count（锁等待超时）量化 |
+| 证据追问 | 怎么证明状态机没漏洞？ | 自动化测试：遍历所有合法跳转（必须成功）+ 所有非法跳转（必须抛异常）；监控 order_state_conflict_count（应该低，高说明状态变更逻辑有问题）；非法跳转日志扫描（IllegalStateTransitionException 应该趋近 0） |
+| 边界追问 | 状态机能防所有异常吗？ | 不能。防不了"业务逻辑错误"（如扣款金额错误但状态正常变更）、防不了"跨服务不一致"（状态变了但库存没扣）、防不了"运维误操作"（DBA 直改 DB）。这些要靠对账和审计 |
+| 反例追问 | 什么场景状态机过度设计？ | 简单 CRUD（配置表无状态流转）、单状态对象（只有"有效/无效"两态）、一次性流程（如导入任务跑完即弃）。这些用 if-else 更简单 |
+| 风险追问 | 订单状态机最大的风险？ | 主动点出：绕过状态机直改 DB（DBA 操作或代码漏洞）、状态机和业务逻辑不同步（状态变了但副作用没执行）、状态爆炸（N 个状态 M 个跳转，配置复杂）、历史订单状态不兼容新状态机版本 |
+| 验证追问 | 怎么验证乐观锁有效？ | 并发测试：N 个线程同时支付同一订单，断言只有一个成功；压力测试：单订单 1000 TPS 状态变更，统计冲突率和成功率；混沌测试：kill 某个服务，验证状态一致性（状态变了的订单是否正确回滚） |
+| 沉淀追问 | 订单状态机沉淀什么？ | 状态机框架（Map 配置+transition 校验+日志）、状态矩阵测试模板、状态变更监控大盘（order_state_conflict_count 非法跳转告警）、状态机版本化规范 |
 
-### 反问面试官
+### 现场对话示例
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+**面试官**：用户点取消和支付回调同时到达，乐观锁怎么保证不混乱？
 
+**候选人**：乐观锁在数据库层保证"只有一个成功"。两个请求几乎同时到达，都读到 status=WAIT_PAY, version=5。请求 A（取消）先执行 UPDATE SET status='CANCELLED', version=6 WHERE id=? AND status='WAIT_PAY' AND version=5，成功，affected=1，version 变成 6。请求 B（支付）随后执行 UPDATE SET status='PAID', version=6 WHERE id=? AND status='WAIT_PAY' AND version=5，但因为 status 已经是 CANCELLED（不再是 WAIT_PAY），WHERE 条件不匹配，affected=0。这时请求 B 知道并发冲突，走补偿——通知支付网关"该订单已取消，请退款"。这就是为什么支付回调必须幂等+可补偿——回调成功不代表订单最终支付成功，可能被并发取消。京东订单的实践：支付回调先乐观锁更新状态，失败则查当前状态——如果已取消，触发退款（资金回流）；如果已支付（重复回调），幂等返回成功。监控 order_state_conflict_count 指标，冲突率高时排查是否状态变更逻辑有问题。
+
+**面试官**：已取消的订单能改回待支付吗？
+
+**候选人**：业务上一般不允许。已取消意味着库存已释放、优惠券已退回，要"恢复"就得重新锁定库存+重新用券，逻辑复杂且容易出错。京东的做法是已取消订单不可恢复，用户要重新下单。但有一种场景需要"类似恢复"——超时取消后用户又想支付。这时不是恢复原订单，而是创建新订单（复用原订单的商品和地址），走完整下单流程。如果一定要做"恢复"，状态机里加 CANCELLED → WAIT_PAY 的逆向跳转，但要处理副作用——重新锁定库存（可能已售罄）、重新核销优惠券（可能已过期）。复杂度高且容易出 bug，不推荐。状态机设计原则：正向流转简单，逆向流转要慎重——每个逆向都要考虑副作用回滚。
+
+**面试官**：订单状态变更和扣库存不在一个事务，怎么保证一致？
+
+**候选人**：用领域事件+最终一致+Saga 补偿。支付成功后，订单状态变更（UPDATE status=PAID）在本地事务，同事务写 Outbox 表（OrderPaidEvent）。事务提交后，异步任务扫 Outbox 投递事件到 MQ，库存服务消费 OrderPaidEvent 扣库存。如果扣库存失败（库存不足），库存服务发 InventoryDeductFailedEvent，订单服务的 Saga 监听器收到后执行补偿——退款 + 取消订单。这样订单状态和扣库存最终一致（可能短暂不一致：订单已支付但库存还没扣，但最终收敛）。关键点：状态变更是"已提交"的本地事务，不会回滚；扣库存失败靠补偿（退款+取消）恢复一致。这比分布式事务（XA/TCC）侵入性低，适合订单这种长流程。如果资金零差错要求，扣库存可以放支付前（下单时锁定库存），这样支付时库存已锁定，不会出现"支付成功但没货"。
+
+## 常见考点
+
+1. **Spring StateMachine 和自研怎么选？**——Spring StateMachine 功能全（嵌套状态/守卫/动作）但重，学习成本高。自研（Enum+Map）轻量可控，适合简单状态流转。京东订单用自研，复杂度可控且性能好。
+2. **状态机和流程引擎（BPMN）什么关系？**——状态机是"状态视角"（订单在什么状态），流程引擎是"流程视角"（订单走到第几步）。简单订单用状态机，复杂履约流程（多部门协作）用流程引擎（如 Camunda）。
+3. **乐观锁和悲观锁怎么选？**——冲突少选乐观锁（不持锁，性能好），冲突多选悲观锁（避免重试风暴）。订单状态变更冲突少（单订单低频），用乐观锁。库存扣减冲突多（热点商品），用悲观锁或 Redis 原子操作。
+4. **状态变更日志和审计日志区别？**——状态变更日志专门记录订单状态变化（from/to/event），是业务级审计；审计日志记录所有操作（查询/修改/删除），是安全级审计。两者互补。

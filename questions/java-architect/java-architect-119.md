@@ -6,262 +6,420 @@ subcategory: 高可用
 tags:
 - Java 架构师
 - KEDA
-- 事件驱动伸缩
-- 队列扩容
+- 事件驱动
+- 自动伸缩
 feynman:
-  essence: KEDA 事件驱动伸缩与队列消费扩容的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: KEDA（Kubernetes Event-Driven Autoscaling）是 K8s 的事件驱动伸缩器——基于队列深度/消息积压等"外部信号"伸缩 Pod，而非 CPU/内存。解决 HPA 基于 CPU 的盲区：CPU 高不一定需要扩容（可能是 GC），队列积压才真的需要扩容（消费不过来）。KEDA 集成 Kafka/RabbitMQ/Redis Streams/AWS SQS 等 60+ 事件源，让 Java 消费者按"待处理消息数"精确扩容。
+  analogy: 像"餐厅按排队人数调服务员"——HPA 是"按厨房温度调服务员"（温度高不一定忙），KEDA 是"按门口排队人数调服务员"（排队多才真忙）。排队（队列积压）是真实的负载信号。
+  first_principle: 伸缩的本质是"让资源匹配负载"。HPA 基于 CPU/内存——但 CPU 高可能是 GC（不需要扩容），队列积压才是真负载。KEDA 基于"外部指标"（queue depth / lag / 积压数），直接反映业务负载。KEDA 还支持 scale-to-zero（无消息时缩到 0），省成本。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - KEDA = K8s 事件驱动伸缩（基于外部信号，非 CPU）
+  - ScaledObject：定义伸缩对象 + 触发器（trigger）
+  - 60+ 事件源：Kafka / RabbitMQ / Redis Streams / AWS SQS / Prometheus
+  - scale-to-zero：无负载时缩到 0（省成本）
+  - 部署为 K8s Operator，无侵入
+  - 和 HPA 共存：KEDA 管外部指标，HPA 管 CPU
 first_principle:
-  problem: 面对“KEDA 事件驱动伸缩与队列消费扩容”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: Java 消费者服务消费 Kafka，高峰消息积压 10 万条，怎么快速扩容？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - HPA 基于 CPU，但消费者 CPU 低（IO 密集，等 Kafka）
+  - CPU 低不代表不忙——可能在等下游/IO
+  - 真实负载是"待消费消息数"（queue lag）
+  rebuild: KEDA 部署为 K8s Operator，监听 ScaledObject CRD。ScaledObject 定义：① 目标 Deployment；② 触发器（如 Kafka，topic + consumerGroup + lag 阈值）；③ 伸缩范围（min/max replicas）。KEDA 定期查询 Kafka lag，lag > 阈值 → 扩容；lag < 阈值 → 缩容；lag = 0 → scale-to-zero。Java 消费者零改动——KEDA 只调 Deployment replicas，业务代码不感知。典型：订单消费组 lag > 1000 → 扩到 20 Pod；lag = 0 → 缩到 0。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - KEDA 和 HPA 区别？——HPA 基于 CPU/内存（内置指标），KEDA 基于外部事件源（Kafka lag / 队列深度）。两者可共存
+  - KEDA 怎么查 Kafka lag？——KEDA 定期调 Kafka API（consumer group lag = LOG-END-OFFSET - CURRENT-OFFSET），和 consumer 视角一致
+  - scale-to-zero 安全吗？——无消息时缩到 0，来消息时从 0 启动（冷启动 10-30 秒）。对延迟敏感场景设 minReplicaCount=1 避免冷启动
+  - KEDA 和 Knative 区别？——Knative 是全栈 Serverless（流量/伸缩/部署），KEDA 只管伸缩（轻量）。KEDA 更专注事件驱动伸缩
+  - Java 消费者怎么配合 KEDA？——消费者用 partition 并行消费（一个 Pod 消费多个 partition），扩容后多 Pod 分摊 partition。注意：partition 数是消费并行度上限
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - KEDA = K8s 事件驱动伸缩（基于外部信号，非 CPU）
+  - ScaledObject：Deployment + 触发器（Kafka/RabbitMQ/...）+ min/max
+  - 60+ 事件源：Kafka / RabbitMQ / Redis Streams / SQS / Prometheus
+  - scale-to-zero：无消息缩到 0（省成本，冷启动有延迟）
+  - 部署为 Operator，Java 代码零改动
+  - 解决 HPA 盲区：CPU 低不代表不忙（IO 密集）
+  - 消费并行度上限 = partition 数（Kafka）
 ---
 
-# 【Java 后端架构师】KEDA 事件驱动伸缩与队列消费扩容？
+# 【Java 后端架构师】KEDA 事件驱动伸缩与队列消费扩容
 
-> 适用场景：高并发高可用。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。订单消费服务消费 Kafka（topic: orders，30 partitions），大促期间消息洪峰，积压 50 万条，HPA 因 CPU 低不扩容，消息延迟 10 分钟。架构师用 KEDA 基于 Kafka lag 自动扩容到 30 Pod，积压 5 分钟清零。
 
-## 一、先明确问题边界
+## 一、概念层：KEDA 的事件驱动伸缩模型
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**KEDA 是什么**：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+```
+Kafka Topic (orders, 30 partitions)
+   │
+   │  消息洪峰（积压 50 万）
+   ▼
+KEDA Operator（监听 ScaledObject）
+   │  定期查询 Kafka lag
+   │  lag = LOG-END-OFFSET - CURRENT-OFFSET
+   ▼
+Deployment（order-consumer）
+   │  KEDA 调 replicas
+   │  lag > 1000 → 扩容到 30 Pod
+   │  lag < 100 → 缩容到 1 Pod
+   │  lag = 0 → scale-to-zero
+   ▼
+30 个 Pod 并行消费（每个 Pod 消费 1 个 partition）
+```
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 KEDA 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**ScaledObject 结构**：
 
-## 二、推荐架构思路
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: order-consumer-scaler
+  namespace: order
+spec:
+  scaleTargetRef:
+    name: order-consumer              # 目标 Deployment
+  minReplicaCount: 1                  # 最小副本（避免冷启动）
+  maxReplicaCount: 30                 # 最大副本（= partition 数）
+  pollingInterval: 30                 # 每 30 秒查询一次 lag
+  cooldownPeriod: 300                 # 缩容冷却 5 分钟（防抖动）
+  triggers:
+  - type: kafka                       # Kafka 触发器
+    metadata:
+      bootstrapServers: kafka:9092
+      consumerGroup: order-consumer-group
+      topic: orders
+      lagThreshold: "1000"            # 每个 partition lag > 1000 触发扩容
+      offsetResetPolicy: latest
+      partitionLimitation: "0-29"     # 只看 partition 0-29
+      allowIdleConsumers: "false"     # 不允许空闲消费者（Pod > partition 无意义）
+```
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+**KEDA vs HPA vs Knative 对比**（这张表面试必问）：
 
-## 三、技术落地点
+| 维度 | HPA | KEDA | Knative |
+|------|-----|------|---------|
+| **触发信号** | CPU/内存（内置） | 外部事件（Kafka/RabbitMQ/Prometheus） | 并发请求数 |
+| **scale-to-zero** | 不支持 | 支持 | 支持 |
+| **复杂度** | 低（K8s 内建） | 中（部署 Operator） | 高（全栈 Serverless） |
+| **适用** | Web 服务（CPU 密集） | 消费者（IO 密集） | 流量驱动服务 |
+| **和 Java 关系** | 通用 | 队列消费者 | 函数式/请求驱动 |
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+**60+ 内置触发器（Scalers）**：
 
-## 四、常见坑
+| 类别 | 示例 Scaler |
+|------|------------|
+| **消息队列** | Kafka / RabbitMQ / Redis Streams / AWS SQS / Azure Service Bus / NATS |
+| **指标系统** | Prometheus / Datadog / New Relic / InfluxDB |
+| **数据库** | PostgreSQL / MySQL / MongoDB / Cassandra |
+| **云服务** | AWS CloudWatch / Azure Monitor / GCP Pub/Sub |
+| **自定义** | External（自己实现）/ CPU / Memory / Cron |
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+## 二、机制层：KEDA 部署与 Java 消费者配置
 
-## 五、面试回答模板
+**1. KEDA Operator 部署**：
 
-可以按下面结构作答：
+```bash
+# Helm 安装 KEDA
+helm repo add kedacore https://kedacore.github.io/charts
+helm install keda kedacore/keda --namespace keda-system --create-namespace
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“KEDA 事件驱动伸缩与队列消费扩容”，核心是 KEDA 与 事件驱动伸缩 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+# 验证
+kubectl get pods -n keda-system
+# keda-operator-xxx
+# keda-operator-metrics-apiserver-xxx
+```
 
-## 六、加分点
+**2. Java 消费者 Deployment**：
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-consumer
+  namespace: order
+spec:
+  replicas: 1                         # 初始副本（KEDA 会调）
+  selector:
+    matchLabels:
+      app: order-consumer
+  template:
+    metadata:
+      labels:
+        app: order-consumer
+    spec:
+      containers:
+      - name: consumer
+        image: registry.jd.com/order-consumer:latest
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+        env:
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka:9092"
+        - name: KAFKA_CONSUMER_GROUP
+          value: "order-consumer-group"
+        - name: KAFKA_TOPIC
+          value: "orders"
+        - name: SPRING_KAFKA_CONSUMER_MAX_POLL_RECORDS
+          value: "500"                # 单次拉取 500 条
+        - name: SPRING_KAFKA_CONSUMER_FETCH_MAX_BYTES
+          value: "52428800"           # 50MB
+```
 
-## 七、企业级面试定位：从“会用”到“能负责”
+**3. Java 消费者代码（Spring Kafka）**：
 
-企业级面试不会只问“KEDA 是什么”，而是看你能不能对一条真实生产链路负责。回答“KEDA 事件驱动伸缩与队列消费扩容”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+```java
+@Configuration
+@EnableKafka
+public class KafkaConsumerConfig {
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 高并发高可用 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 KEDA、事件驱动伸缩、队列扩容 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 availability_slo、failover_seconds、backup_restore_success、dependency_error_rate 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+    @Bean
+    public ConsumerFactory<String, OrderEvent> consumerFactory() {
+        Map<String, Object> props = new HashMap<>();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "kafka:9092");
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, "order-consumer-group");
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, JsonDeserializer.class);
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);   // 手动提交
+        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 500);       // 单次拉取 500
+        props.put(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, 300000); // 处理超时 5 分钟
+        props.put(ConsumerConfig.FETCH_MIN_BYTES_CONFIG, 1024 * 1024); // 最少拉 1MB（批量）
+        return new DefaultKafkaConsumerFactory<>(props);
+    }
 
-### 企业级回答骨架
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<String, OrderEvent> factory(
+            ConsumerFactory<String, OrderEvent> cf) {
+        ConcurrentKafkaListenerContainerFactory<String, OrderEvent> factory =
+            new ConcurrentKafkaListenerContainerFactory<>();
+        factory.setConsumerFactory(cf);
+        // 关键：concurrency = partition 数 / Pod 数（每个 Pod 消费多个 partition）
+        // 单 Pod 内多线程消费不同 partition
+        factory.setConcurrency(3);     // 每 Pod 3 个消费线程
+        factory.getContainerProperties().setAckMode(AckMode.MANUAL_IMMEDIATE);
+        return factory;
+    }
+}
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 KEDA 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+@Service
+public class OrderConsumer {
 
-### 面试中要主动补的生产细节
+    @KafkaListener(topics = "orders", groupId = "order-consumer-group")
+    public void consume(List<OrderEvent> events, Acknowledgment ack) {
+        try {
+            // 批量处理（提高吞吐）
+            List<Order> orders = events.stream()
+                .map(this::toOrder)
+                .collect(Collectors.toList());
+            orderService.batchCreate(orders);    // 批量入库
+            ack.acknowledge();                    // 手动提交 offset
+        } catch (Exception e) {
+            log.error("Consume failed", e);
+            // 不 ack，下次重新拉取（at-least-once）
+        }
+    }
+}
+```
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+**4. 多触发器组合（Kafka + Prometheus）**：
 
-## 八、苏格拉底式面试追问
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: order-consumer-scaler
+spec:
+  scaleTargetRef:
+    name: order-consumer
+  minReplicaCount: 1
+  maxReplicaCount: 30
+  triggers:
+  # 触发器 1：Kafka lag
+  - type: kafka
+    name: kafka-lag
+    metadata:
+      bootstrapServers: kafka:9092
+      consumerGroup: order-consumer-group
+      topic: orders
+      lagThreshold: "1000"
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+  # 触发器 2：Prometheus 下游延迟（避免下游慢导致堆积）
+  - type: prometheus
+    name: downstream-latency
+    metadata:
+      serverAddress: http://prometheus:9090
+      query: |
+        histogram_quantile(0.99,
+          rate(http_server_requests_seconds_bucket{app="inventory-service"}[5m])
+        )
+      threshold: "0.5"                 # 下游 P99 > 500ms 时也扩容
+```
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“KEDA 事件驱动伸缩与队列消费扩容”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 availability_slo、failover_seconds、backup_restore_success、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 KEDA 负责的范围，以及必须依赖 事件驱动伸缩、队列扩容 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 单 AZ 或单实例成为隐性单点，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+## 三、实战层：大促洪峰扩容案例
 
-### 现场对话示例
+**场景：大促期间 Kafka 消息洪峰**
 
-**面试官**：你说要做“KEDA 事件驱动伸缩与队列消费扩容”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 availability_slo、failover_seconds、业务失败率和事故记录。
+```
+正常：30 partitions，1 Pod 消费，lag < 100
+大促：消息洪峰，lag 涨到 50 万
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 availability_slo 没有改善，或者 failover_seconds 反而变差，就停止扩大范围，回到假设层重新复盘。
+无 KEDA（HPA 基于 CPU）：
+  - 消费者 IO 密集，CPU 低（20%）
+  - HPA 不扩容
+  - lag 持续上涨，消息延迟 10 分钟
+  - 业务投诉
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 availability_slo、failover_seconds、backup_restore_success。这样它不是个人经验，而是团队机制。
+有 KEDA：
+  1. KEDA 检测 lag > 1000（每个 partition）
+  2. 扩容 order-consumer 到 30 Pod（= partition 数上限）
+  3. 每个 Pod 消费 1 partition，并行度最大
+  4. 5 分钟后 lag 清零
+  5. lag < 100 后缩容到 1 Pod（cooldownPeriod 5 分钟）
+  6. 大促结束，lag = 0，缩到 minReplicaCount=1（或 scale-to-zero=0）
+```
 
-## 九、专项架构深挖：对象、链路、失败模式
+**扩容过程（KEDA 日志）**：
 
-这一题不要停在“知道 KEDA”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+```
+[2026-07-13 10:00:00] Kafka lag = 5000 (partition avg), scaling 1 -> 5
+[2026-07-13 10:00:30] Kafka lag = 50000 (洪峰), scaling 5 -> 20
+[2026-07-13 10:01:00] Kafka lag = 500000, scaling 20 -> 30 (max)
+[2026-07-13 10:05:00] Kafka lag = 100000 (消化中), holding at 30
+[2026-07-13 10:10:00] Kafka lag = 5000, scaling 30 -> 10
+[2026-07-13 10:15:00] Kafka lag = 100, scaling 10 -> 1
+[2026-07-13 10:20:00] Kafka lag = 0, holding at minReplicaCount=1
+```
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 多副本、健康检查、故障转移、备份恢复；RPO/RTO、演练脚本、依赖拓扑；限流降级和回滚开关 |
-| 设计主线 | 核心服务按故障域部署，依赖按重要性分级；预案必须脚本化并定期演练；把恢复时间和数据丢失窗口量化 |
-| 失败模式 | 单 AZ 或单实例成为隐性单点；备份存在但恢复不可用；故障转移后缓存或配置不一致 |
-| 验证指标 | availability_slo、failover_seconds、backup_restore_success、dependency_error_rate |
+**scale-to-zero 配置（省成本）**：
 
-**架构拆解**：
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: batch-consumer-scaler          # 批处理消费者（非实时）
+spec:
+  scaleTargetRef:
+    name: batch-consumer
+  minReplicaCount: 0                   # 允许缩到 0（scale-to-zero）
+  maxReplicaCount: 10
+  idleReplicaCount: 0                  # 空闲时缩到 0
+  cooldownPeriod: 300
+  triggers:
+  - type: kafka
+    metadata:
+      topic: batch-jobs
+      lagThreshold: "100"
+      # ...
+```
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 事件驱动伸缩 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 KEDA 事件驱动伸缩与队列消费扩容 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 队列扩容 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+## 四、底层本质：为什么是 KEDA 而非 HPA
 
-**高分回答细节**：
+回到第一性：**为什么 HPA 基于 CPU 不够，要 KEDA 基于事件？**
 
-- 不要只说“可以用 KEDA”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+- **HPA 的盲区**：HPA 基于 CPU/内存，假设"CPU 高 = 负载高 = 需要扩容"。但消费者是 IO 密集型——大部分时间等 Kafka/下游，CPU 低（20%）。即使消息积压 50 万，CPU 也低，HPA 不扩容。
+- **真实负载信号**：消费者真实负载是"待处理消息数"（Kafka lag）。lag 大 = 消费不过来 = 需要扩容。KEDA 直接基于 lag 决策，精确匹配负载。
+- **CPU 和负载脱钩的场景**：① IO 密集（等下游）；② 长任务（批处理）；③ 等待型（轮询）。这些 CPU 低但真忙。KEDA 解决这类盲区。
 
-## 十、二轮场景追问与项目表达
+**scale-to-zero 的本质**：
+- HPA 的 minReplicas 通常 ≥ 1（保底），KEDA 支持 minReplicaCount=0。
+- 无消息时 Pod 缩到 0，省 100% 资源。
+- 来消息时从 0 启动——冷启动 10-30 秒（Pod 调度 + 容器启动 + JVM 预热）。
+- 适用：批处理、非实时任务。实时任务设 minReplicaCount=1 避免冷启动。
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+**消费并行度上限的本质**：
+- Kafka 一个 partition 同时只能被一个 consumer 消费（同 consumer group）。
+- 所以 Pod 数 > partition 数无意义——多余的 Pod 空闲（allowIdleConsumkers=false 时 KEDA 不允许）。
+- maxReplicaCount 应 = partition 数（本例 30）。
+- 提高并行度要加 partition（Kafka 侧操作）。
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+**KEDA 不侵入业务的本质**：
+- KEDA 只调 Deployment 的 replicas 字段，不改业务代码。
+- Java 消费者不知道有 KEDA——它只管消费消息。
+- KEDA 通过 Kafka API 查 lag（consumer group offset），不需要 Java 应用暴露指标。
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“KEDA 事件驱动伸缩与队列消费扩容”，重点看 availability_slo、failover_seconds、backup_restore_success，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+**KEDA 和 HPA 共存的本质**：
+- KEDA 创建/管理一个 HPA（外部指标）。
+- 也可以保留原 HPA（CPU 指标），两者互补。
+- KEDA 管外部信号（lag），HPA 管 CPU（防 CPU 饱和）。
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+## 五、AI 架构师加问：5 个
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 KEDA 和 事件驱动伸缩 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+1. **AI 推理服务的 KEDA 怎么设计？**
+   触发器：GPU 队列长度（待推理任务数）。或用 Prometheus 指标（inference_queue_size）。minReplicaCount=1（避免模型冷加载），maxReplicaCount=GPU 数。scale-to-zero 慎用（模型加载慢，冷启动 1 分钟+）。配合 Triton/vLLM 的动态 batching。
 
-### 追问 3：你如何判断这个方案值得做？
+2. **AI 能预测扩容时机吗？**
+   AI 学习历史流量模式（大促/日常周期），预测未来 lag 趋势，提前扩容（避免 lag 爆炸后才扩）。结合 KEDA 的 Cron scaler（定时预扩）+ AI 预测（异常流量）。AI 输出："预测 10 分钟后 lag 将到 10 万，建议现在扩到 20 Pod"。
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 队列扩容 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+3. **大模型推理的 KEDA 触发指标？**
+   ① 待推理任务队列长度（Redis/Kafka 队列 lag）；② GPU 利用率（Prometheus 指标，GPU 满了才扩 Pod）；③ 推理 P99 延迟（延迟高扩容）。组合触发：队列 > 100 且 GPU > 80% → 扩容。
 
-### STAR 项目表达
+4. **AI Agent 链路怎么用 KEDA？**
+   每个 Agent 类型独立 Deployment + ScaledObject。触发器：用户请求数（HTTP 并发）或对话队列长度（多轮对话用队列）。minReplicaCount=1（保响应速度）。不同 Agent（如 code-agent/research-agent）按各自负载独立伸缩，避免相互影响。
 
-- **S（背景）**：原系统在 KEDA 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 KEDA 事件驱动伸缩与队列消费扩容 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 availability_slo、failover_seconds 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+5. **AI 怎么优化 KEDA 配置？**
+   AI 分析历史 lag/扩容数据，优化参数：① lagThreshold（太低频繁扩缩，太高响应慢）；② pollingInterval（太短 API 压力大，太长响应慢）；③ cooldownPeriod（太短抖动，太长资源浪费）。AI 输出推荐配置 + 模拟验证（不直接改生产）。
 
-### 二轮复盘清单
-
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
-
-## 十一、面试官 5 个企业级追问
-
-1. **你在真实项目里怎么判断“KEDA 事件驱动伸缩与队列消费扩容”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 availability_slo、failover_seconds、backup_restore_success。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
-
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，KEDA 是否真是瓶颈，事件驱动伸缩 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
-
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 单 AZ 或单实例成为隐性单点。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 availability_slo 和 failover_seconds 做分钟级观察，一旦越过阈值立即止损。
-
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 队列扩容，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
-
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“KEDA 事件驱动伸缩与队列消费扩容”，至少要沉淀 多副本、健康检查、故障转移、备份恢复 的建模规范，以及 availability_slo、failover_seconds 的验收标准。
-
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“KEDA 事件驱动伸缩与队列消费扩容”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 KEDA 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“KEDA 事件驱动伸缩与队列消费扩容”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 availability_slo、failover_seconds 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 单 AZ 或单实例成为隐性单点，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 六、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：灾备演练指挥官拿着健康检查、切流开关、备份和演练脚本，在处理“主链路突然失去一个关键节点”。
+抓 **"事件驱动、ScaledObject、60+ 触发器、scale-to-zero、partition 上限"**。
 
-- **场景**：先说明“KEDA 事件驱动伸缩与队列消费扩容”服务于什么业务目标，不要上来就堆 KEDA。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 单 AZ 或单实例成为隐性单点、备份存在但恢复不可用。
-- **验证**：最后落到 availability_slo、failover_seconds、backup_restore_success，让面试官感觉你真的上线过。
+- **事件驱动**：基于外部信号（Kafka lag/队列深度），非 CPU
+- **ScaledObject**：定义 Deployment + 触发器 + min/max replicas
+- **60+ 触发器**：Kafka / RabbitMQ / Redis Streams / SQS / Prometheus
+- **scale-to-zero**：无消息缩到 0（省成本，冷启动有延迟）
+- **partition 上限**：Kafka 消费并行度 = partition 数（maxReplicaCount = partition 数）
+- **部署为 Operator**：Java 代码零改动，KEDA 只调 replicas
+- **和 HPA 共存**：KEDA 管外部信号，HPA 管 CPU
 
 ### 拟人化理解
 
-可以把“KEDA 事件驱动伸缩与队列消费扩容”想成一个灾备演练指挥官：KEDA 是他的健康检查、切流开关、备份和演练脚本，事件驱动伸缩 是他面对的现场信号，队列扩容 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先保核心业务，再恢复非核心能力。这样记，比死背组件名更稳。
+把 KEDA 想成**餐厅的智能排班系统**。HPA 是"按厨房温度调服务员"（温度高不一定忙，可能是烤箱开太久）。KEDA 是"按门口排队人数调服务员"（排队多才真忙）。排队人数（队列 lag）是真实负载信号。KEDA 看 Kafka lag（门口排队），lag 大扩服务员（Pod），lag 小减服务员，没人排队时关门（scale-to-zero）。服务员上限 = 取餐口数（partition 数，多服务员但取餐口少没用）。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“KEDA 事件驱动伸缩与队列消费扩容”，我会这样答：我会先把故障域、RPO/RTO、切流路径和恢复演练讲清楚，高可用不是多部署几个副本就结束。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 单 AZ 或单实例成为隐性单点，所以我会提前设计灰度、监控和止损阈值，重点看 availability_slo、failover_seconds。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 availability_slo 或 failover_seconds 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> KEDA 是 K8s 的事件驱动伸缩器，基于外部信号（Kafka lag / 队列深度）而非 CPU 伸缩 Pod。解决 HPA 的盲区——消费者 IO 密集，CPU 低但消息积压，HPA 不扩容，KEDA 基于 lag 精确扩容。部署为 Operator，定义 ScaledObject CRD（Deployment + 触发器 + min/max replicas），60+ 内置触发器（Kafka/RabbitMQ/Redis Streams/SQS/Prometheus）。支持 scale-to-zero（无消息缩到 0 省成本，冷启动 10-30 秒）。Java 消费者零改动——KEDA 只调 replicas，业务代码不感知。典型场景：订单消费者 Kafka lag > 1000 扩到 30 Pod（= partition 数上限），lag 清零后缩到 1。Kafka 消费并行度上限 = partition 数，maxReplicaCount 不超过 partition 数。和 HPA 共存：KEDA 管外部信号（lag），HPA 管 CPU（防饱和）。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司消息队列是 Kafka 还是 RocketMQ？消费者现在的扩容策略是什么？这决定我聊 Kafka lag 触发还是自定义 scaler。
 
+## 七、苏格拉底式面试追问
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | HPA 已经够用，为什么还要 KEDA？ | HPA 基于 CPU，消费者 IO 密集 CPU 低，消息积压时 HPA 不扩容。KEDA 基于真实负载（Kafka lag），精确扩容。典型：消费者 CPU 20% 但积压 50 万，HPA 不动，KEDA 扩到 30 |
+| 证据追问 | 怎么证明 KEDA 有效？ | ① 扩容响应时间（lag 爆炸到 Pod 扩起来 < 1 分钟）；② 积压消化时间（lag 清零 < 5 分钟）；③ 成本节省（scale-to-zero 省资源 30%+）；④ 对比 HPA 方案（HPA 积压 10 分钟，KEDA 5 分钟清零） |
+| 边界追问 | KEDA 适用所有场景吗？ | 不适用：① CPU 密集型（用 HPA 即可）；② 实时低延迟（scale-to-zero 冷启动不可接受）；③ 非 K8s 环境（KEDA 是 K8s Operator）。最适合：消息消费者、批处理、IO 密集 |
+| 反例追问 | KEDA 有什么坑？ | ① 冷启动延迟（scale-to-zero 后首次响应慢）；② partition 上限（Pod > partition 无意义）；③ 触发器 lagThreshold 调优难（太低抖动，太高响应慢）；④ Kafka API 查询 lag 有开销（pollingInterval 太短压力大） |
+| 风险追问 | KEDA 最大风险？ | ① 扩容过度（maxReplicaCount 太大打爆下游）；② 缩容抖动（cooldownPeriod 太短频繁扩缩）；③ scale-to-zero 误用（实时场景冷启动影响 SLA）；④ lag 查询不准（Kafka rebalance 期间 lag 异常）。治法：maxReplicaCount 合理 + cooldownPeriod 5 分钟 + 实时场景 min=1 |
+| 验证追问 | 怎么验证 ScaledObject 配置合理？ | ① 压测模拟洪峰（验证扩容响应）；② 监控 lag 曲线（扩容后 lag 下降）；③ 资源利用率（不浪费不过载）；④ 多次验证（大促/日常不同场景） |
+| 沉淀追问 | 团队规范沉淀什么？ | ① ScaledObject 模板（按队列类型）；② maxReplicaCount 规范（= partition 数）；③ scale-to-zero 适用场景；④ lagThreshold 调优 SOP；⑤ 监控大盘（lag/Pod 数/扩容事件） |
+
+### 现场对话示例
+
+**面试官**：KEDA 和 HPA 能一起用吗？
+
+**候选人**：能，而且推荐一起用。KEDA 管外部信号（Kafka lag），HPA 管 CPU。两者互补：消费者消息积压时 KEDA 扩容（基于 lag），但如果单个 Pod CPU 饱和（比如处理逻辑重），HPA 也能基于 CPU 扩容。实际 KEDA 内部会创建一个 HPA（用外部指标），所以两者共存要小心配置避免冲突。最佳实践：消费者用 KEDA（lag 触发），Web 服务用 HPA（CPU 触发），各管各的。
+
+**面试官**：scale-to-zero 冷启动怎么办？
+
+**候选人**：scale-to-zero 适合批处理/非实时场景，不适合实时低延迟。冷启动：Pod 调度（秒级）+ 容器启动（秒级）+ JVM 预热（10-30 秒）+ 应用初始化（连 DB/Kafka，秒级）。总计 30-60 秒。缓解：① minReplicaCount=1（保底不缩到 0）；② Cron scaler 定时预扩（大促前 10 分钟扩起来）；③ GraalVM Native Image（启动 100ms，但有限制）；④ JVM CRaC（ checkpoint 恢复快）。
+
+**面试官**：Kafka partition 数和 Pod 数关系？
+
+**候选人**：消费并行度上限 = partition 数。一个 partition 同时只能被一个 consumer 消费（同 group），所以 Pod 数 > partition 数无意义——多余 Pod 空闲（allowIdleConsumers=false 时 KEDA 不扩）。maxReplicaCount 应 = partition 数（本例 30）。提高并行度要加 partition（Kafka 侧操作，注意 partition 增加会影响消息顺序性）。单 Pod 内可多线程（concurrency=3，消费不同 partition），但单 Pod 并行度仍受 partition 数限制。
+
+## 常见考点
+
+1. **KEDA 是什么？**——K8s 事件驱动伸缩器，基于外部信号（Kafka lag/队列深度）伸缩 Pod，解决 HPA 基于 CPU 的盲区。
+2. **ScaledObject 结构？**——Deployment + 触发器（trigger）+ min/max replicas + pollingInterval + cooldownPeriod。
+3. **KEDA 和 HPA 区别？**——HPA 基于 CPU/内存（内置指标），KEDA 基于外部事件源（60+ scaler）。可共存互补。
+4. **scale-to-zero 注意什么？**——冷启动延迟 30-60 秒，实时场景设 minReplicaCount=1，批处理可 scale-to-zero 省成本。
+5. **Kafka partition 和 Pod 关系？**——消费并行度上限 = partition 数，maxReplicaCount 不超过 partition 数（多余 Pod 空闲）。

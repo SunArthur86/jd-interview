@@ -9,259 +9,433 @@ tags:
 - JVM
 - 内存
 feynman:
-  essence: 容器化 JVM 参数与内存水位的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: 容器化 JVM 参数的核心是"让 JVM 各内存区（堆/Metaspace/线程栈/直接内存/CodeCache/GC overhead）总和与容器 cgroup memory limit 对齐"。堆用 MaxRAMPercentage 自适应，非堆各区显式设上限，总水位留 25% 安全余量。CPU 用 CFS 调度，limit 过低导致 throttle 被 JVM 误判为 STW。
+  analogy: 像往一个固定容量（容器 limit）的行李箱里装东西。堆是最大的箱子（占 75%），元空间、线程栈、直接内存、JIT cache 是小袋子，还要留缝隙（GC overhead 和安全余量）。只算大箱子不算小袋子，拉链拉不上（OOMKilled）。
+  first_principle: JVM 进程内存 ≠ 堆内存。进程内存 = 堆 + Metaspace + 线程栈×N + 直接内存 + CodeCache + GC 内部结构 + JIT。容器的 memory limit 针对整个进程，任何一区失控都可能超限。L4 难度在于要精确量化每区水位并动态调优。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - JVM 进程内存公式：堆 + Metaspace + (Xss × 线程数) + 直接内存 + CodeCache + GC overhead + 安全余量 < 容器 limit
+  - 堆：MaxRAMPercentage=75（自适应），不用 -Xmx 硬编码
+  - 非堆必须显式限制：MaxMetaspaceSize、MaxDirectMemorySize、Xss
+  - GC overhead：G1 预留 10-20%（Region 元数据、marking bitmap），ZGC 预留更多（barrier、colored pointer）
+  - 安全余量：25%（容器开销、page cache 回收缓冲）
+  - 内存水位监控：jstat + container_memory_working_set_bytes + NMT（Native Memory Tracking）
 first_principle:
-  problem: 面对“容器化 JVM 参数与内存水位”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 8G 容器跑 Java 服务，堆设 6G，但偶发 OOMKilled。如何精确量化 JVM 各内存区水位，保证容器不超限？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 容器 memory limit 是整个进程的硬上限（含堆+非堆+JVM overhead）
+  - 堆只是进程内存的一部分，非堆区（Metaspace、线程栈、直接内存）失控同样导致 OOMKilled
+  - GC 收集器自身有内存开销（G1 Region 元数据、ZGC barrier），不能忽略
+  rebuild: 三步量化——第一，用 NMT（-XX:NativeMemoryTracking=detail）看 JVM 各区实际占用。第二，堆用 MaxRAMPercentage=75，非堆各区显式设上限（Metaspace 256M、DirectMemory 512M、Xss 512k），GC overhead 预留堆的 15%。第三，总和 < limit×0.75，留 25% 给容器开销和突发。监控 container_memory_working_set_bytes 接近 limit 时告警。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - 怎么看 JVM 进程实际占了多少内存？——用 NMT（-XX:NativeMemoryTracking=detail），jcmd <pid> VM.native_memory summary 看各区分详细。或看 /proc/<pid>/status 的 VmRSS（进程实际驻留内存）
+  - 直接内存泄漏怎么排查？——jcmd <pid> VM.native_memory detail 看 Direct ByteBuffer 部分；或 unsafe.dumpMemory；或用 jemalloc heap profiling。Netty 的 directMemory 要监控 ResourceLeakDetector
+  - 线程栈占内存怎么算？——Xss（默认 1MB）× 线程数。200 线程 = 200MB。线程泄漏（线程池无上限）会让线程栈暴涨。监控 jvm_threads_live_threads，设线程池上限
+  - ZGC 比 G1 多占多少内存？——ZGC 有 barrier overhead（每个对象引用染色）和 concurrent marking 结构，额外占堆的 10-15%。64G 堆 ZGC 比 G1 多占 6-10G。小堆（<4G）ZGC 不划算
+  - -XX:ReservedCodeCacheSize 要设多少？——默认 240MB（JDK 11+），一般够用。如果 JIT 频繁（动态生成代码的框架如 Groovy），调到 512MB。CodeCache 满了会触发 deoptimization（回解释执行，性能骤降）
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 进程内存 = 堆 + Metaspace + Xss×线程数 + 直接内存 + CodeCache + GC overhead
+  - MaxRAMPercentage=75 设堆，非堆各区显式限制
+  - NMT（NativeMemoryTracking）看各区分详细
+  - GC overhead：G1 约 15%，ZGC 约 15-20%（含 barrier）
+  - 安全余量 25%，总水位 < limit×0.75
+  - 监控 container_memory_working_set_bytes，接近 limit 告警
 ---
 
-# 【Java 后端架构师】容器化 JVM 参数与内存水位？
+# 【Java 后端架构师】容器化 JVM 参数与内存水位
 
-> 适用场景：JD 核心技术。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。交易服务容器规格 4C8G，堆设 6G，但线上偶发 OOMKilled（Exit 137）。架构师必须精确量化 JVM 各内存区水位、配置自适应参数、监控内存趋势，保证容器不超限。
 
-## 一、先明确问题边界
+## 一、概念层：JVM 进程内存全画像
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**JVM 进程内存各区详解**（L4 必须能逐区量化）：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+```
+┌────────────────── 容器 memory limit = 8 GB ──────────────────┐
+│                                                              │
+│  JVM 进程 RSS（Resident Set Size）≈ 7.0-7.5 GB               │
+│                                                              │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  1. Java 堆 Heap = 6 GB（MaxRAMPercentage=75）         │   │
+│  │     - Eden + Survivor + Old（G1 Region 或 ZGC）        │   │
+│  │     - 对象实例、数组                                    │   │
+│  └──────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  2. Metaspace = 256 MB（MaxMetaspaceSize=256m）       │   │
+│  │     - Klass 元信息、常量池、方法字节码                  │   │
+│  │     - 动态生成的 Class（CGLIB、Groovy、反射 Proxy）     │   │
+│  └──────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  3. 线程栈 = Xss × 线程数 = 512KB × 400 = 200 MB      │   │
+│  │     - 每线程独立栈（局部变量、调用帧）                   │   │
+│  │     - 线程数泄漏会导致栈内存暴涨                         │   │
+│  └──────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  4. 直接内存 = 512 MB（MaxDirectMemorySize=512m）      │   │
+│  │     - DirectByteBuffer（Netty、NIO）                   │   │
+│  │     - 堆外分配，不受堆管理，容易泄漏                    │   │
+│  └──────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  5. CodeCache = 240 MB（ReservedCodeCacheSize）        │   │
+│  │     - JIT 编译后的机器码                                 │   │
+│  │     - 满了触发 deoptimization（性能骤降）               │   │
+│  └──────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  6. GC overhead ≈ 900 MB（堆的 15%，G1/ZGC）           │   │
+│  │     - G1：Region 元数据、card table、remembered set    │   │
+│  │     - ZGC：barrier、colored pointer、mark bitmap        │   │
+│  │     - 并发标记的临时结构                                │   │
+│  └──────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  7. JVM 自身 = ~100 MB（libjvm.so、C++ 堆）            │   │
+│  └──────────────────────────────────────────────────────┘   │
+│                                                              │
+│  总和：6G + 256M + 200M + 512M + 240M + 900M + 100M ≈ 8.2G   │
+│  ⚠ 超过 8G limit！需要调小堆到 5.5G（MaxRAMPercentage=70）    │
+│                                                              │
+│  安全余量公式：limit - 各区总和 > limit × 25%（= 2G）          │
+└──────────────────────────────────────────────────────────────┘
+```
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 容器 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**不同规格的推荐配比**：
 
-## 二、推荐架构思路
+| 容器规格 | 堆（MaxRAMPercentage） | Metaspace | 直接内存 | 线程栈（400线程） | GC overhead | 余量 |
+|---------|----------------------|-----------|---------|-----------------|-------------|------|
+| 4C8G | 5.5G（70%） | 256M | 512M | 200M | 800M | 750M |
+| 8C16G | 12G（75%） | 256M | 1G | 300M | 1.8G | 650M |
+| 16C32G | 24G（75%） | 512M | 2G | 400M | 3.6G | 1.5G |
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+## 二、机制层：JVM 容器参数完整配置
 
-## 三、技术落地点
+**生产级 JVM 参数模板**（逐条能解释为什么）：
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+```bash
+# ============ 容器感知 ============
+-XX:+UseContainerSupport
+#   JDK 10+ 默认开，读取 cgroup 限制
+#   JDK 8u191+ 需确认开启
 
-## 四、常见坑
+# ============ 堆配置（自适应容器内存）============
+-XX:InitialRAMPercentage=50.0
+#   初始堆 = 容器内存 × 50%，减少启动时堆扩张的 GC
+-XX:MaxRAMPercentage=70.0
+#   最大堆 = 容器内存 × 70%（8G 容器 → 5.6G 堆）
+#   不用 75% 是因为要给非堆留足余量
+#   不用 -Xmx 硬编码（换规格要改参数）
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+# ============ 非堆限制（防泄漏撑爆容器）============
+-XX:MaxMetaspaceSize=256m
+#   元空间上限，防动态 Class 生成框架（CGLIB/Groovy）泄漏
+-XX:MaxDirectMemorySize=512m
+#   直接内存上限，防 Netty DirectByteBuffer 泄漏
+-XX:ReservedCodeCacheSize=240m
+#   JIT 代码缓存，满了触发 deopt（性能骤降）
+-Xss512k
+#   线程栈 512K（默认 1M 太大），400 线程省 200M
 
-## 五、面试回答模板
+# ============ GC 配置 ============
+# 方案 A：G1（通用，JDK 17 默认）
+-XX:+UseG1GC
+-XX:MaxGCPauseMillis=100
+-XX:G1HeapRegionSize=4m
+-XX:InitiatingHeapOccupancyPercent=35
+-XX:G1ReservePercent=15
 
-可以按下面结构作答：
+# 方案 B：ZGC（超低延迟，JDK 21+）
+-XX:+UseZGC
+-XX:+ZGenerational
+#   Generational ZGC（JDK 21 GA），分代回收，吞吐更高
+#   注意：ZGC 比 G1 多占 10-15% 堆（barrier overhead）
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“容器化 JVM 参数与内存水位”，核心是 容器 与 JVM 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+# ============ 诊断 ============
+-XX:NativeMemoryTracking=detail
+#   开启 NMT，用 jcmd VM.native_memory 看各区分详细
+#   有 5-10% 性能开销，生产可只开 summary
+-XX:+HeapDumpOnOutOfMemorySeparator
+-XX:HeapDumpPath=/data/heapdump/
+#   Java OOM 时自动 dump（OOMKilled 抓不到）
+-XX:+UnlockDiagnosticVMOptions
+-XX:+PrintNMTStatistics
+#   JVM 退出时打印 NMT 统计
 
-## 六、加分点
+# ============ 容器特殊优化 ============
+-Djava.security.egd=file:/dev/./urandom
+#   加速 SecureRandom（否则 /dev/random 阻塞，启动慢）
+-XX:-UseBiasedLocking
+#   JDK 15+ 已废弃，关闭避免 safepoint 开销
+-Dfile.encoding=UTF-8
+-Duser.timezone=Asia/Shanghai
+```
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+**Dockerfile 配置**：
 
-## 七、企业级面试定位：从“会用”到“能负责”
+```dockerfile
+FROM eclipse-temurin:17-jre-alpine
 
-企业级面试不会只问“容器 是什么”，而是看你能不能对一条真实生产链路负责。回答“容器化 JVM 参数与内存水位”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+# JVM 参数通过环境变量传入，支持运行时覆盖
+ENV JAVA_OPTS="-XX:+UseContainerSupport \
+  -XX:InitialRAMPercentage=50.0 \
+  -XX:MaxRAMPercentage=70.0 \
+  -XX:MaxMetaspaceSize=256m \
+  -XX:MaxDirectMemorySize=512m \
+  -XX:+UseG1GC \
+  -XX:MaxGCPauseMillis=100 \
+  -XX:NativeMemoryTracking=summary \
+  -XX:+HeapDumpOnOutOfMemorySeparator \
+  -XX:HeapDumpPath=/data/heapdump/"
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 JD 核心技术 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 容器、JVM、内存 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 young_gc_pause_p99、old_gc_count、allocation_rate_mb_s、heap_after_gc_ratio 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+# 堆 dump 目录（挂载持久卷，容器重启不丢）
+VOLUME /data/heapdump
 
-### 企业级回答骨架
+COPY app.jar /app/app.jar
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 容器 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+# 用 exec 让 JVM 成为 PID 1（正确处理信号）
+ENTRYPOINT exec java $JAVA_OPTS -jar /app/app.jar
+```
 
-### 面试中要主动补的生产细节
+## 三、机制层：NMT 内存水位追踪
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+**Native Memory Tracking 详解**（L4 必备工具）：
 
-## 八、苏格拉底式面试追问
+```bash
+# 1. 开启 NMT（启动参数）
+-XX:NativeMemoryTracking=detail   # detail 或 summary
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+# 2. 查看各内存区基线
+jcmd <pid> VM.native_memory baseline
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“容器化 JVM 参数与内存水位”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 young_gc_pause_p99、old_gc_count、allocation_rate_mb_s、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 容器 负责的范围，以及必须依赖 JVM、内存 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 Full GC 或并发标记跟不上导致 P99 抖动，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+# 3. 查看各区分详细（summary 模式）
+jcmd <pid> VM.native_memory summary
+```
 
-### 现场对话示例
+**NMT 输出示例**（各分区，必须能读懂）：
 
-**面试官**：你说要做“容器化 JVM 参数与内存水位”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 young_gc_pause_p99、old_gc_count、业务失败率和事故记录。
+```
+Total: reserved=7800MB, committed=7200MB
+#                                 reserved（预留） committed（实际提交）
+-                            Java Heap (reserved=5600MB, committed=5600MB)
+#                            堆，MaxRAMPercentage=70 → 5.6G
+-                                Class (reserved=256MB, committed=240MB)
+#                            Metaspace，类元信息
+-                               Thread (reserved=200MB, committed=200MB)
+#                            线程栈，400 线程 × 512KB
+-                               Code (reserved=240MB, committed=180MB)
+#                            CodeCache，JIT 编译代码
+-                                 GC (reserved=900MB, committed=850MB)
+#                            GC 数据结构（G1 的 card table、remembered set）
+-                           Compiler (reserved=50MB, committed=50MB)
+#                            JIT 编译器自身
+-                           Internal (reserved=100MB, committed=100MB)
+#                            JVM 内部（C++ 堆）
+-                             Symbol (reserved=30MB, committed=30MB)
+#                            字符串常量池符号
+-    Native Memory Tracking (reserved=10MB, committed=10MB)
+#                            NMT 自身开销
+```
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 young_gc_pause_p99 没有改善，或者 old_gc_count 反而变差，就停止扩大范围，回到假设层重新复盘。
+**内存水位监控脚本**（对比 NMT 基线，定位增长）：
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 young_gc_pause_p99、old_gc_count、allocation_rate_mb_s。这样它不是个人经验，而是团队机制。
+```bash
+# 1. 建立基线（服务启动稳定后）
+jcmd <pid> VM.native_memory baseline
 
-## 九、专项架构深挖：对象、链路、失败模式
+# 2. 运行一段时间后，对比基线，看哪个区增长了
+jcmd <pid> VM.native_memory detail.diff
 
-这一题不要停在“知道 容器”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+# 输出示例：
+# Total: reserved=7800MB +200MB, committed=7200MB +150MB
+# -         Thread (reserved=200MB +150MB, committed=200MB +150MB)
+#   ↑ 线程数从 400 涨到 700（线程泄漏！）
+```
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 堆内存、线程栈、Metaspace、直接内存；GC 日志、JFR 事件、对象分配速率；容器内存限制与 JVM ergonomics |
-| 设计主线 | 按服务类型区分吞吐优先和延迟优先 GC；把堆、直接内存、线程数、连接池放到同一张容量表里；用压测和线上画像校准停顿目标 |
-| 失败模式 | Full GC 或并发标记跟不上导致 P99 抖动；容器内存被低估触发 OOMKilled；大对象和缓存无上限污染老年代 |
-| 验证指标 | young_gc_pause_p99、old_gc_count、allocation_rate_mb_s、heap_after_gc_ratio |
+**Prometheus + Micrometer 监控 JVM 内存**：
 
-**架构拆解**：
+```yaml
+# 关键指标
+- container_memory_working_set_bytes  # 容器实际使用内存（K8s 看这个）
+- container_memory_rss                # 进程 RSS
+- jvm_memory_used_bytes               # JVM 各区使用
+- jvm_memory_committed_bytes          # JVM 各区提交
+- jvm_threads_live_threads            # 线程数
+- jvm_buffer_memory_used_bytes        # 直接内存使用
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 JVM 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 容器化 JVM 参数与内存水位 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 内存 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+# 告警：容器内存接近 limit
+groups:
+  - name: jvm-container
+    rules:
+      - alert: ContainerMemoryNearLimit
+        expr: |
+          container_memory_working_set_bytes / container_spec_memory_limit_bytes > 0.85
+        for: 5m
+        annotations:
+          summary: "容器内存使用 > 85%，接近 OOMKilled"
 
-**高分回答细节**：
+      - alert: ThreadCountHigh
+        expr: jvm_threads_live_threads > 500
+        for: 5m
+        annotations:
+          summary: "线程数 > 500，可能线程池泄漏导致栈内存暴涨"
+```
 
-- 不要只说“可以用 容器”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+## 四、实战层：OOMKilled 根因分析案例
 
-## 十、二轮场景追问与项目表达
+**案例：8G 容器堆设 6G，偶发 OOMKilled**
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+```bash
+# 1. 确认 OOMKilled
+kubectl describe pod order-service-xxx
+#   Last State:
+#     Reason: OOMKilled
+#     Exit Code: 137
+#     Started: Mon, ... (运行 2 小时后被杀)
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+# 2. 看 JVM 堆是否用满（jstat 在被杀前采的样本）
+#   发现 Old 区只用了 50%（堆没满），说明不是堆 OOM
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“容器化 JVM 参数与内存水位”，重点看 young_gc_pause_p99、old_gc_count、allocation_rate_mb_s，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+# 3. 用 NMT 看各区分详细（从相似 Pod 采集）
+jcmd <pid> VM.native_memory summary
+#   Total: committed=7.8G
+#   - Heap: 5.6G（正常）
+#   - Thread: 1.2G  ← 异常！（8000 线程 × 512K = 4G，但 committed 1.2G）
+#   - Internal: 600M ← 异常！
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+# 4. 定位：线程数从 400 涨到 8000（线程池泄漏）
+#   根因：HttpClient 没设连接池上限，每次调用创建新线程
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 容器 和 JVM 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+# 5. 修复
+#   - 给所有线程池设上限（maxPoolSize）
+#   - 线程栈从 1MB 降到 512K（Xss512k）
+#   - 堆从 75% 降到 70%（给非堆留余量）
+```
 
-### 追问 3：你如何判断这个方案值得做？
+**水位预算工具**（自动计算各区是否超限）：
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 内存 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+```java
+// 内存水位预算（启动时校验）
+public class MemoryBudgetChecker {
 
-### STAR 项目表达
+    public void check(long containerLimitBytes) {
+        long heap = Runtime.getRuntime().maxMemory();
+        long metaspace = getMetaspaceLimit();     // MaxMetaspaceSize
+        long directMemory = getDirectMemoryLimit(); // MaxDirectMemorySize
+        long threadStacks = getXss() * getThreadCount();
+        long codeCache = getCodeCacheLimit();
+        long gcOverhead = (long) (heap * 0.15);   // GC 约 15%
+        long safetyMargin = (long) (containerLimitBytes * 0.25);
 
-- **S（背景）**：原系统在 容器 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 容器化 JVM 参数与内存水位 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 young_gc_pause_p99、old_gc_count 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+        long total = heap + metaspace + directMemory + threadStacks
+                   + codeCache + gcOverhead + safetyMargin;
 
-### 二轮复盘清单
+        if (total > containerLimitBytes) {
+            log.error("内存预算超限! total={}MB, limit={}MB, over={}MB",
+                total/1024/1024, containerLimitBytes/1024/1024,
+                (total-containerLimitBytes)/1024/1024);
+            // 启动时就能发现配置错误
+        }
+    }
+}
+```
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+## 五、底层本质：为什么容器化 JVM 内存这么难管
 
-## 十一、面试官 5 个企业级追问
+回到第一性：**JVM 内存模型是多维度的（堆/非堆/直接/栈/Code/GC），容器 limit 是一维的（整个进程 RSS）**。
 
-1. **你在真实项目里怎么判断“容器化 JVM 参数与内存水位”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 young_gc_pause_p99、old_gc_count、allocation_rate_mb_s。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+- **维度错位**：JVM 内部按功能分区（堆管对象、Metaspace 管类、直接内存管 IO），每个区独立增长。容器的 memory limit 是整个进程的 RSS 总和。JVM 的分区优化（如调大堆）可能让总和超限。L4 的核心是建立"分区预算"思维——每个区都设上限，总和 < limit。
+- **堆外内存不可控**：DirectByteBuffer（Netty/NIO）在堆外分配，不受 GC 直接管理。Netty 的 PooledByteBufAllocator 如果不设上限，高并发 IO 时直接内存暴涨撑爆容器。Metaspace 也类似（动态 Class 生成框架泄漏）。这些区必须显式设 MaxDirectMemorySize、MaxMetaspaceSize。
+- **GC 收集器有自身开销**：G1 的 Region 元数据（每 Region 1MB 管理开销约 1-2%）、card table（跨代引用标记）、remembered set；ZGC 的 barrier（每个引用染色）、colored pointer、mark bitmap。这些是 GC 工作的必要结构，占堆的 10-20%。大堆时（32G+）这部分绝对值很大（几 G），必须计入预算。
+- **容器内存计算有陷阱**：K8s 用 `container_memory_working_set_bytes`（含 RSS + page cache）判断 OOM，不是 `container_memory_usage_bytes`（含 cached file）。JVM 的 NIO 会用 page cache，可能让 working_set 接近 limit。监控要看对指标。
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，容器 是否真是瓶颈，JVM 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+**ZGC vs G1 的内存开销对比**（L4 必须知道）：
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 Full GC 或并发标记跟不上导致 P99 抖动。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 young_gc_pause_p99 和 old_gc_count 做分钟级观察，一旦越过阈值立即止损。
+```
+假设堆 32G：
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 内存，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+G1 overhead：
+  Region 元数据：32G / 2M × ~100B ≈ 1.6G
+  Card table、remembered set：~500M
+  并发标记结构：~300M
+  总计：~2.4G（堆的 7.5%）
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“容器化 JVM 参数与内存水位”，至少要沉淀 堆内存、线程栈、Metaspace、直接内存 的建模规范，以及 young_gc_pause_p99、old_gc_count 的验收标准。
+ZGC overhead：
+  Barrier、colored pointer：每个引用额外开销
+  Mark bitmap、forwarding table：~2G
+  并发堆重定位结构：~1G
+  总计：~4G（堆的 12.5%）
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
+结论：32G 堆，ZGC 比 G1 多占 ~1.6G。容器 limit 要额外预留。
+```
 
-1. **如果把“容器化 JVM 参数与内存水位”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 容器 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
+## 六、AI 架构师加问：5 个
 
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“容器化 JVM 参数与内存水位”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 young_gc_pause_p99、old_gc_count 对业务链路的影响。
+1. **AI 能自动推荐容器的 JVM 参数吗？**
+   能做辅助。AI 分析服务的 metrics 历史（GC 频率、线程数、直接内存使用）+ 应用画像（QPS、延迟要求），推荐 MaxRAMPercentage、GC 收集器、各区上限。但必须人工确认——AI 可能推荐过高的堆比例导致非堆超限。上线后监控 restart_count 和 OOMKilled 频率持续调优。
 
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 Full GC 或并发标记跟不上导致 P99 抖动，要能通过 trace、tool_call_id 和业务流水快速回放。
+2. **用 AI 做内存泄漏的早期发现？**
+   AI 分析 NMT 的各分区增长趋势，发现"线程数线性增长（线程泄漏）"、"Metaspace 持续增长（Class 泄漏）"、"直接内存不释放（Netty 泄漏）"等模式，在 OOMKilled 前预警。比静态阈值告警更早发现问题。
 
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
+3. **AI 推理服务（大模型）的 JVM 参数怎么配？**
+   推理服务的瓶颈在 GPU 不在 JVM，但 JVM 负责数据预处理和 API 网关。堆不宜过大（4-8G 够用，大部分数据在 GPU 显存），直接内存要大（Tensor 在 JVM 和 GPU 间传输用 DirectByteBuffer）。用 G1 而非 ZGC（推理延迟不在 GC，ZGC 的 overhead 不划算）。
 
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
+4. **GraalVM Native Image 怎么改变容器内存模型？**
+   Native Image 编译成机器码，没有 JVM 运行时——没有 JIT、没有 Metaspace、GC 极轻量（Serial GC）。容器内存主要是堆（可设很小，如 512M），启动 < 100ms。代价：不支持反射（需配置）、GC 调优受限、编译期长。适合 Serverless 和微服务，不适合需要动态性的复杂应用。
 
-## 十三、记忆口诀与面试现场表达
+5. **让 AI 动态调 MaxRAMPercentage 行不行？**
+   不建议。堆大小变化会触发 Full GC（堆收缩）或频繁 Young GC（堆太小）。堆大小应在启动时定好，运行期不变。AI 能做的是根据流量推荐"重启时的新参数"，通过滚动重启应用，而非运行时动态调。
+
+## 七、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：急诊科医生拿着听诊器和监护仪，在处理“线上延迟突然升高”。
+抓 **"七区预算、NMT 追踪、25% 余量、GC overhead"**。
 
-- **场景**：先说明“容器化 JVM 参数与内存水位”服务于什么业务目标，不要上来就堆 容器。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 Full GC 或并发标记跟不上导致 P99 抖动、容器内存被低估触发 OOMKilled。
-- **验证**：最后落到 young_gc_pause_p99、old_gc_count、allocation_rate_mb_s，让面试官感觉你真的上线过。
+- **七区**：堆 + Metaspace + 线程栈 + 直接内存 + CodeCache + GC overhead + JVM 自身
+- **堆**：MaxRAMPercentage=70-75（自适应），不用 -Xmx
+- **非堆**：MaxMetaspaceSize、MaxDirectMemorySize、Xss 显式限制
+- **NMT**：-XX:NativeMemoryTracking=detail，jcmd VM.native_memory 看各区
+- **余量**：总和 < limit×0.75，留 25% 给容器开销
+- **GC overhead**：G1 约 15%，ZGC 约 15-20%（含 barrier）
 
 ### 拟人化理解
 
-可以把“容器化 JVM 参数与内存水位”想成一个急诊科医生：容器 是他的听诊器和监护仪，JVM 是他面对的现场信号，内存 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看生命体征，再决定是降温、输液还是手术。这样记，比死背组件名更稳。
+把容器内存想成**一个固定大小的行李箱**。堆是最大的主箱（占 70%），Metaspace/直接内存/线程栈/CodeCache 是小袋子，GC overhead 是缓冲材料（防震），还要留 25% 缝隙（拉链余量）。只盯主箱不管小袋子，拉链拉不上（OOMKilled）。NMT 是装箱清单，列出每袋装了多少。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“容器化 JVM 参数与内存水位”，我会这样答：我会先把 JVM 当成线上服务的生命体征系统来看：内存、线程、GC 和容器资源必须放在一张图里判断。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 Full GC 或并发标记跟不上导致 P99 抖动，所以我会提前设计灰度、监控和止损阈值，重点看 young_gc_pause_p99、old_gc_count。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 young_gc_pause_p99 或 old_gc_count 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> 容器化 JVM 内存的核心是"七区预算"——堆、Metaspace、线程栈、直接内存、CodeCache、GC overhead、JVM 自身，总和要小于容器 limit 的 75%，留 25% 余量。堆用 MaxRAMPercentage=70 自适应（不用 -Xmx 硬编码），非堆各区必须显式限制：MaxMetaspaceSize=256m 防 Class 泄漏、MaxDirectMemorySize=512m 防 Netty 泄漏、Xss512k 控线程栈。GC overhead 不能忽略——G1 的 Region 元数据和 card table 约占堆的 15%，ZGC 的 barrier 和 bitmap 约占 15-20%。排查用 NMT（jcmd VM.native_memory summary）看各区水位，配合 container_memory_working_set_bytes 监控容器 RSS。最常见踩坑是只配堆不管非堆——堆设 75% 但直接内存泄漏 2G，总和超 limit 还是 OOMKilled。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司容器规格多大？用 G1 还是 ZGC？有没有遇到过非堆内存（直接内存/Metaspace）泄漏导致的 OOMKilled？这决定我聊内存预算还是 GC 收集器选型。
 
+## 八、苏格拉底式面试追问
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么不用 -Xmx 硬编码堆大小，要用 MaxRAMPercentage？ | 容器规格可能变（4C8G → 8C16G），硬编码要改参数。MaxRAMPercentage 按容器内存百分比自适应，换规格不用改。另外 -Xmx 只管堆，非堆要单独配，MaxRAMPercentage 配合 UseContainerSupport 更完整 |
+| 证据追问 | 怎么知道 JVM 各区实际占了多少？ | 三层证据：jcmd VM.native_memory summary（NMT，各区分详细）、/proc/<pid>/status 的 VmRSS（进程实际驻留）、container_memory_working_set_bytes（容器视角）。三者交叉验证 |
+| 边界追问 | MaxRAMPercentage 设 75% 还是 70%？ | 看非堆和 GC overhead。G1 overhead 约 15%，ZGC 约 20%。如果用 Netty（直接内存大）或线程多（栈大），非堆占比高，堆降到 65-70%。如果纯计算服务（非堆小），可以 75%。压测后看 OOMKilled 频率调 |
+| 反例追问 | 什么场景不该开 NMT？ | 性能极敏感场景。NMT 有 5-10% 开销（detail 模式更高）。生产用 summary 模式（开销小），detail 只在排查时临时开。或者用 -XX:NativeMemoryTracking=off 完全关闭，排查时用 jcmd 临时开 |
+| 风险追问 | 容器化 JVM 最大内存风险？ | ① 只配堆不管非堆，直接内存/Metaspace 泄漏 OOMKilled；② GC overhead 低估（ZGC 比 G1 多占 5-10%）；③ 线程泄漏（线程栈暴涨）；④ page cache 被算进 working_set（NIO 场景）；⑤ MaxRAMPercentage 过高（75%+ 非 heap 可能超限） |
+| 验证追问 | 怎么证明内存配比合理？ | 启动时 MemoryBudgetChecker 校验总和 < limit。压测高峰看 container_memory_working_set_bytes 不超 85%。NMT baseline + diff 看各区分增长。restart_count=0（无 OOMKilled）。长期观察 GC 日志和堆利用率 |
+| 沉淀追问 | 团队 JVM 容器规范沉淀什么？ | 按服务类型的参数模板（网关/交易/批处理）、MemoryBudgetChecker 工具（启动校验）、NMT 监控脚本、OOMKilled 排查 SOP（describe → NMT → 定位区）、堆外内存限制强制规范 |
+
+### 现场对话示例
+
+**面试官**：8G 容器，堆设 MaxRAMPercentage=75（6G），但还是 OOMKilled，可能什么原因？
+
+**候选人**：堆 6G 只占进程内存的一部分，OOMKilled 是整个进程超 8G。排查非堆：第一，线程数——如果 1000 线程 × 1MB 栈 = 1G，加上堆 6G 就 7G 了，再算 Metaspace、直接内存、GC overhead 肯定超 8G。用 jvm_threads_live_threads 看线程数。第二，直接内存——Netty 的 DirectByteBuffer 如果没设 MaxDirectMemorySize，可能用 2-3G，加上堆 6G 就超了。看 jvm_memory_used_bytes{area="nonheap"}。第三，GC overhead——G1 的 Region 元数据和 card table 在堆 6G 时约 900M，ZGC 更多。用 NMT 看各分区，committed 总和应该 < 8G。解法：堆降到 70%（5.6G），非堆各区显式限制，线程栈用 Xss512k。
+
+**面试官**：NMT 显示 Thread 区从 200M 涨到 1.2G，怎么定位是哪个线程泄漏？
+
+**候选人**：Thread 区 = Xss × 线程数，涨了说明线程数暴涨。第一步，jstack 或 jcmd Thread.print 打线程栈，看线程名分布。HTTP 处理线程（如 http-nio-8080-exec-*）过多说明 Tomcat 线程池没限或请求堆积；Dubbo 线程（DubboServerHandler-*）过多说明下游慢调用堆积；自定义线程池线程过多说明没设上限。第二步，jvm_threads_live_threads 配合业务指标看——如果线程数和 QPS 正相关但 QPS 降了线程数没降，是线程池没回收（leak）。第三步，用 Arthas 的 thread 命令实时看线程状态，定位阻塞的线程。
+
+**面试官**：ZGC 比 G1 多占内存，什么场景才该用 ZGC？
+
+**候选人**：ZGC 的核心优势是超低停顿（< 10ms，不受堆大小影响），代价是额外 10-15% 内存开销（barrier、colored pointer、mark bitmap）和 5-10% 吞吐损失。选 ZGC 的场景：堆 > 16G 且对延迟敏感（P99 < 100ms），如交易核心链路。这时 G1 的 Mixed GC 停顿可能几百毫秒，ZGC 能压到 10ms 内。不选 ZGC 的场景：小堆（< 4G，G1 够用）、批处理（吞吐优先，G1/Parallel 更高）、内存敏感（容器 limit 紧张，ZGC 的额外开销不划算）。JDK 21 的 Generational ZGC 分代回收，吞吐提升明显，但内存开销依旧。
+
+## 常见考点
+
+1. **MaxRAMPercentage 怎么算？**——按容器 memory limit 的百分比设最大堆。8G 容器 × 75% = 6G 堆。比 -Xmx 自适应（换规格不用改参数）。配合 UseContainerSupport（JDK 10+ 默认开）识别 cgroup。
+2. **OOMKilled 抓不到 dump 怎么排查？**——OOMKilled 是内核 SIGKILL（来不及 dump）。用 NMT（jcmd VM.native_memory summary）看各分区水位，定位是堆（jstat 看 O 区）还是非堆（线程栈/直接内存/Metaspace）。kubectl describe 看 Last State Reason=OOMKilled。
+3. **非堆内存怎么限制？**——MaxMetaspaceSize（元空间）、MaxDirectMemorySize（直接内存）、ReservedCodeCacheSize（JIT）、Xss（线程栈）。不限制的话 Netty 直接内存或线程泄漏会撑爆容器。
+4. **ZGC 比 G1 多占多少？**——约堆的 5-15%。ZGC 的 barrier（引用染色）、mark bitmap、forwarding table 是额外结构。32G 堆 ZGC 比 G1 多占约 1.6G。容器 limit 要额外预留。
+5. **NMT 是什么？**——Native Memory Tracking，-XX:NativeMemoryTracking=detail 开启。jcmd VM.native_memory summary 看 JVM 各分区（Heap/Class/Thread/Code/GC/Internal）的 reserved 和 committed。有 5-10% 开销，生产用 summary 模式。

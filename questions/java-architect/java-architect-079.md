@@ -9,259 +9,508 @@ tags:
 - 异步
 - 任务
 feynman:
-  essence: 图片、视频处理任务的异步架构的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: 图片视频处理是 CPU/GPU 密集型任务（转码、压缩、加水印），不能在 Web 请求线程同步做（阻塞线程、超时、OOM）。架构是"上传触发 + 消息队列 + 工作节点异步处理"。上传后立即返回 URL，处理任务入队，工作节点消费做转码，完成后回调通知。
+  analogy: 像餐厅点菜。顾客（用户）点完菜（上传）拿个取餐号（任务 ID）先回座位（不阻塞等待）。后厨（工作节点）按订单做菜（转码），做好了叫号（回调通知）或放取餐柜（CDN）。顾客不用在柜台等 30 分钟。
+  first_principle: 媒体处理的特点是"耗时长（几秒到几分钟）+ 资源重（CPU/GPU 密集）"。如果同步处理，HTTP 请求线程被占住（线程池耗尽）、用户等待超时、服务 OOM。异步化的核心是"把耗时任务从请求链路剥离，交给专用工作节点"，Web 线程只做"接收 + 入队 + 返回"。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 上传触发：文件上传后发消息到队列，立即返回 URL（原图可用）
+  - 异步处理：工作节点消费消息，做转码/压缩/水印/缩略图
+  - 任务状态：记录任务状态（pending/processing/done/failed），客户端轮询或回调
+  - 工作节点隔离：CPU 密集任务独立节点（不影响 Web 服务），按队列长度自动扩缩
+  - CDN 分发：处理后输出多规格（原图/缩略图/水印/不同分辨率），CDN 缓存
 first_principle:
-  problem: 面对“图片、视频处理任务的异步架构”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 用户上传 2G 视频后要转码成 720p/1080p/4K 三个版本，转码耗时 10 分钟。如何在 Web 服务不阻塞的前提下完成？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 转码是 CPU/GPU 密集（FFmpeg 占满 CPU），不能在 Web 线程做
+  - 用户不能等 10 分钟（HTTP 超时）
+  - 转码可能失败（源文件损坏、格式不支持），需要重试和告警
+  rebuild: 异步流水线——上传完成后发消息到 MQ（带 fileId、源文件 URL、目标规格），Web 立即返回 fileId。转码工作节点（独立部署、CPU 优化型节点）消费消息，用 FFmpeg 转码，输出多规格到 OSS。完成后发回调消息（或更新任务状态），通知客户端。客户端通过任务 ID 查询状态或接收 Webhook。工作节点按队列长度 HPA 自动扩缩。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - 视频转码用什么工具？——FFmpeg（开源、命令行、支持所有格式）。Java 用 ProcessBuilder 调用，或用 JNI 封装（javacv）。云上用云转码服务（阿里云 MTS、AWS MediaConvert）省运维
+  - 缩略图怎么快速生成？——上传后异步用 ImageMagick 或 Thumbnailator 生成多规格（100x100、500x500、原图），CDN 按需分发。也可以用 OSS 的图片处理（IMG）实时裁剪（不用预生成）
+  - 任务失败怎么重试？——消息队列的 ACK 机制：处理失败 NACK 重投（延迟队列），重试 3 次仍失败进死信队列人工处理。工作节点崩溃，消息未 ACK 会重投给其他节点
+  - 怎么知道任务进度？——工作节点定期更新任务进度（如转码进度 50%）到 Redis 或 DB，客户端轮询查。或用 SSE/WebSocket 推送进度
+  - 大量并发转码怎么扩容？——工作节点按 MQ 队列长度 HPA 扩容（队列堆积就加节点）。转码任务按优先级分队列（VIP 优先、普通排队）。限流防突发压垮
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 上传后异步：消息队列解耦，Web 不阻塞
+  - FFmpeg 转码：独立工作节点，CPU/GPU 密集型
+  - 任务状态：pending/processing/done/failed，轮询或回调
+  - 失败重试：MQ ACK + 延迟重试 + 死信队列
+  - HPA 扩缩：按队列长度扩容工作节点
+  - 输出多规格：原图/缩略图/多分辨率，CDN 分发
 ---
 
-# 【Java 后端架构师】图片、视频处理任务的异步架构？
+# 【Java 后端架构师】图片、视频处理任务的异步架构
 
-> 适用场景：高并发高可用。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。商家上传商品视频要转码成多分辨率（720p/1080p/4K），商品图片要生成缩略图和加水印。转码耗时几分钟，架构师必须设计异步处理流水线，保证 Web 服务不阻塞、任务可靠执行、失败可重试。
 
-## 一、先明确问题边界
+## 一、概念层：异步处理流水线全景
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**同步 vs 异步对比**：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+| 维度 | 同步处理（错误做法） | 异步处理（正确做法） |
+|------|---------------------|---------------------|
+| 用户体验 | 等 10 分钟才返回（超时） | 立即返回 fileId，后台处理 |
+| Web 线程 | 被转码占住（线程池耗尽） | 只做入队，毫秒级释放 |
+| 资源 | Web 节点 CPU 被占满 | 转码节点独立扩缩 |
+| 可靠性 | 转码失败请求失败 | 失败重试，不影响用户 |
+| 扩展性 | 加 Web 节点（浪费） | 加转码节点（精准） |
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 媒体处理 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**异步处理完整链路**（面试必画）：
 
-## 二、推荐架构思路
+```
+┌──────┐    1.上传文件     ┌──────────┐  2.存OSS + 发消息  ┌───────┐
+│ 用户  │────────────────> │ Web 服务  │─────────────────> │  MQ   │
+└──────┘                  └────┬─────┘                   └───┬───┘
+                               │                             │
+                          3.立即返回 fileId                    │ 4.消费消息
+                               │                             ▼
+                               │                      ┌──────────────┐
+                               │                      │ 转码工作节点  │
+                               │                      │  (CPU 型 Pod) │
+                               │                      └──────┬───────┘
+                               │                             │
+                               │                    5.FFmpeg 转码
+                               │                    生成 720p/1080p/4K
+                               │                             │
+                               │                    6.输出到 OSS + CDN
+                               │                             │
+                               │                    7.更新任务状态 / 回调
+                               │                             ▼
+                               │<─────────────────────────────┤
+                               │                      ┌──────────────┐
+                               │                      │  任务状态 DB  │
+                               │                      │ (Redis/MySQL)│
+                               │                      └──────────────┘
+                               │
+                          8.用户查询进度/收通知
+```
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+**任务状态机**（核心设计）：
 
-## 三、技术落地点
+```
+PENDING → PROCESSING → DONE
+              │
+              ├─→ RETRYING → PROCESSING（重试中）
+              │
+              └─→ FAILED（重试耗尽，进死信）
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+状态流转：
+  PENDING：消息已入队，等待处理
+  PROCESSING：工作节点正在转码
+  DONE：转码完成，输出可用
+  RETRYING：处理失败，重试中（最多 3 次）
+  FAILED：重试耗尽，进死信队列人工处理
+```
 
-## 四、常见坑
+## 二、机制层：消息驱动异步处理代码
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+**上传服务：发消息触发转码**：
 
-## 五、面试回答模板
+```java
+@Service
+public class MediaUploadService {
 
-可以按下面结构作答：
+    @Autowired private OSSClient ossClient;
+    @Autowired private RocketMQTemplate mqTemplate;
+    @Autowired private TaskStatusMapper taskStatusMapper;
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“图片、视频处理任务的异步架构”，核心是 媒体处理 与 异步 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+    public UploadResult upload(MultipartFile file, String userId) {
+        // 1. 存源文件到 OSS
+        String fileId = UUID.randomUUID().toString();
+        String sourceKey = "media/source/" + fileId + "/" + file.getOriginalFilename();
+        ossClient.putObject(bucketName, sourceKey, new ByteArrayInputStream(file.getBytes()));
 
-## 六、加分点
+        // 2. 创建任务记录（PENDING）
+        TaskStatus task = TaskStatus.builder()
+            .taskId(fileId)
+            .userId(userId)
+            .sourceUrl(ossClient.getUrl(bucketName, sourceKey).toString())
+            .status("PENDING")
+            .targetProfiles(Arrays.asList("720p", "1080p", "4K"))
+            .createTime(new Date())
+            .build();
+        taskStatusMapper.insert(task);
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+        // 3. 发消息到转码队列（立即返回，不等待转码）
+        TranscodeMessage msg = TranscodeMessage.builder()
+            .taskId(fileId)
+            .sourceUrl(task.getSourceUrl())
+            .targetProfiles(task.getTargetProfiles())
+            .build();
+        mqTemplate.asyncSend("transcode-topic", msg, new SendCallback() {
+            @Override public void onSuccess(SendResult r) { log.info("任务入队: {}", fileId); }
+            @Override public void onException(Throwable e) {
+                // 发送失败，标记任务 FAILED，稍后补偿
+                taskStatusMapper.updateStatus(fileId, "FAILED", "MQ 发送失败");
+            }
+        });
 
-## 七、企业级面试定位：从“会用”到“能负责”
+        // 4. 立即返回（用户不等转码）
+        return UploadResult.builder()
+            .fileId(fileId)
+            .sourceUrl(task.getSourceUrl())  // 原图/原视频立即可用
+            .status("PENDING")
+            .build();
+    }
+}
+```
 
-企业级面试不会只问“媒体处理 是什么”，而是看你能不能对一条真实生产链路负责。回答“图片、视频处理任务的异步架构”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+**转码工作节点：FFmpeg 处理**：
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 高并发高可用 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 媒体处理、异步、任务 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 success_rate、latency_p99、error_rate、backlog_size 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+```java
+@Component
+@RocketMQMessageListener(
+    topic = "transcode-topic",
+    consumerGroup = "transcode-worker",
+    consumeMode = ConsumeMode.CONCURRENTLY
+)
+public class TranscodeWorker implements RocketMQListener<TranscodeMessage> {
 
-### 企业级回答骨架
+    @Override
+    public void onMessage(TranscodeMessage msg) {
+        String taskId = msg.getTaskId();
+        try {
+            // 1. 更新状态为 PROCESSING
+            taskStatusMapper.updateStatus(taskId, "PROCESSING", null);
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 媒体处理 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+            // 2. 下载源文件到本地临时目录
+            File sourceFile = downloadFromOSS(msg.getSourceUrl(), "/tmp/" + taskId);
 
-### 面试中要主动补的生产细节
+            // 3. 按目标规格转码（FFmpeg）
+            Map<String, String> outputs = new HashMap<>();
+            for (String profile : msg.getTargetProfiles()) {
+                String outputKey = "media/output/" + taskId + "/" + profile + ".mp4";
+                File outputFile = new File("/tmp/" + taskId + "_" + profile + ".mp4");
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+                // FFmpeg 转码（不同 profile 不同参数）
+                ffmpegTranscode(sourceFile, outputFile, profile);
 
-## 八、苏格拉底式面试追问
+                // 上传转码结果到 OSS
+                ossClient.putObject(bucketName, outputKey, outputFile);
+                outputs.put(profile, ossClient.getUrl(bucketName, outputKey).toString());
+            }
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+            // 4. 更新状态为 DONE
+            taskStatusMapper.updateResult(taskId, "DONE", outputs);
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“图片、视频处理任务的异步架构”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 success_rate、latency_p99、error_rate、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 媒体处理 负责的范围，以及必须依赖 异步、任务 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 边界不清导致跨服务强耦合，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+            // 5. 发回调通知（可选）
+            notifyCallback(taskId, "DONE", outputs);
 
-### 现场对话示例
+        } catch (Exception e) {
+            log.error("转码失败 taskId={}", taskId, e);
+            handleFailure(msg, e);
+        }
+    }
 
-**面试官**：你说要做“图片、视频处理任务的异步架构”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 success_rate、latency_p99、业务失败率和事故记录。
+    // FFmpeg 转码（ProcessBuilder 调用）
+    private void ffmpegTranscode(File input, File output, String profile) throws IOException, InterruptedException {
+        List<String> cmd = new ArrayList<>();
+        cmd.add("ffmpeg");
+        cmd.add("-i"); cmd.add(input.getAbsolutePath());
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 success_rate 没有改善，或者 latency_p99 反而变差，就停止扩大范围，回到假设层重新复盘。
+        // 按目标规格设置参数
+        switch (profile) {
+            case "720p":
+                cmd.add("-vf"); cmd.add("scale=1280:720");
+                cmd.add("-b:v"); cmd.add("2M");        // 码率 2Mbps
+                break;
+            case "1080p":
+                cmd.add("-vf"); cmd.add("scale=1920:1080");
+                cmd.add("-b:v"); cmd.add("5M");
+                break;
+            case "4K":
+                cmd.add("-vf"); cmd.add("scale=3840:2160");
+                cmd.add("-b:v"); cmd.add("15M");
+                cmd.add("-preset"); cmd.add("slow");   // 4K 用慢速压缩
+                break;
+        }
+        cmd.add("-c:a"); cmd.add("aac");              // 音频 AAC
+        cmd.add("-movflags"); cmd.add("+faststart");   // 支持流式播放
+        cmd.add(output.getAbsolutePath());
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 success_rate、latency_p99、error_rate。这样它不是个人经验，而是团队机制。
+        ProcessBuilder pb = new ProcessBuilder(cmd);
+        pb.redirectErrorStream(true);
+        Process process = pb.start();
 
-## 九、专项架构深挖：对象、链路、失败模式
+        // 读取 FFmpeg 输出（进度解析）
+        try (BufferedReader reader = new BufferedReader(
+            new InputStreamReader(process.getInputStream()))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                // 解析 frame= 时间= 估算进度
+                updateProgress(taskId, parseProgress(line));
+            }
+        }
 
-这一题不要停在“知道 媒体处理”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+        int exitCode = process.waitFor();
+        if (exitCode != 0) {
+            throw new RuntimeException("FFmpeg 失败: " + exitCode);
+        }
+    }
+}
+```
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 核心业务对象、状态机、读写链路、依赖拓扑；幂等键、版本号、审计流水、补偿任务；监控指标、压测模型、灰度开关 |
-| 设计主线 | 主链路保持简单可靠，非核心能力异步解耦；状态变化必须有唯一约束、版本控制和补偿兜底；所有关键方案都要能灰度、观测和回滚 |
-| 失败模式 | 边界不清导致跨服务强耦合；异常链路没有补偿和告警；只优化技术指标但遗漏业务正确性 |
-| 验证指标 | success_rate、latency_p99、error_rate、backlog_size |
+**失败重试与死信处理**：
 
-**架构拆解**：
+```java
+private void handleFailure(TranscodeMessage msg, Exception e) {
+    int retryCount = msg.getRetryCount() + 1;
+    if (retryCount <= 3) {
+        // 重试：发延迟消息（30 秒后重试）
+        msg.setRetryCount(retryCount);
+        mqTemplate.syncSend("transcode-topic", msg, 3000, 3);  // delayLevel=3
+        taskStatusMapper.updateStatus(msg.getTaskId(), "RETRYING",
+            "第 " + retryCount + " 次重试");
+    } else {
+        // 重试耗尽，进死信队列
+        taskStatusMapper.updateStatus(msg.getTaskId(), "FAILED", e.getMessage());
+        mqTemplate.sendOneWay("transcode-dlq-topic", msg);  // 死信
+        alertService.sendAlert("转码失败 taskId=" + msg.getTaskId());
+    }
+}
+```
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 异步 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 图片、视频处理任务的异步架构 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 任务 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+## 三、机制层：进度查询与回调通知
 
-**高分回答细节**：
+**客户端进度查询**：
 
-- 不要只说“可以用 媒体处理”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+```java
+@RestController
+@RequestMapping("/api/media")
+public class MediaQueryController {
 
-## 十、二轮场景追问与项目表达
+    @GetMapping("/task/{taskId}")
+    public TaskStatus queryTask(@PathVariable String taskId) {
+        return taskStatusMapper.findById(taskId);
+        // 返回 { status: "PROCESSING", progress: 65, outputs: null }
+    }
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+    // SSE 推送进度（比轮询实时）
+    @GetMapping(value = "/task/{taskId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter streamProgress(@PathVariable String taskId) {
+        SseEmitter emitter = new SseEmitter(600000L);  // 10 分钟超时
+        // 定期推送进度
+        scheduledExecutor.scheduleAtFixedRate(() -> {
+            TaskStatus task = taskStatusMapper.findById(taskId);
+            try {
+                emitter.send(SseEmitter.event().data(task));
+                if ("DONE".equals(task.getStatus()) || "FAILED".equals(task.getStatus())) {
+                    emitter.complete();
+                }
+            } catch (IOException ex) {
+                emitter.completeWithError(ex);
+            }
+        }, 0, 2, TimeUnit.SECONDS);
+        return emitter;
+    }
+}
+```
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+**Webhook 回调通知**（转码完成通知业务系统）：
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“图片、视频处理任务的异步架构”，重点看 success_rate、latency_p99、error_rate，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+```java
+@Service
+public class CallbackService {
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+    public void notifyCallback(String taskId, String status, Map<String, String> outputs) {
+        TaskStatus task = taskStatusMapper.findById(taskId);
+        if (task.getCallbackUrl() == null) return;
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 媒体处理 和 异步 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+        CallbackPayload payload = CallbackPayload.builder()
+            .taskId(taskId)
+            .status(status)
+            .outputs(outputs)
+            .timestamp(System.currentTimeMillis())
+            .build();
 
-### 追问 3：你如何判断这个方案值得做？
+        // HTTP 回调（带重试）
+        webClient.post().uri(task.getCallbackUrl())
+            .bodyValue(payload)
+            .retrieve()
+            .bodyToMono(String.class)
+            .retryWhen(Retry.fixedDelay(3, Duration.ofSeconds(5)))  // 失败重试 3 次
+            .doOnError(e -> log.error("回调失败 taskId={}", taskId, e))
+            .subscribe();
+    }
+}
+```
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 任务 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+## 四、实战层：工作节点扩缩与资源治理
 
-### STAR 项目表达
+**工作节点 K8s 部署**（独立于 Web 服务）：
 
-- **S（背景）**：原系统在 媒体处理 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 图片、视频处理任务的异步架构 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 success_rate、latency_p99 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transcode-worker
+spec:
+  replicas: 5    # 基础副本
+  template:
+    spec:
+      containers:
+        - name: worker
+          image: registry.jd.com/transcode-worker:1.0.0
+          resources:
+            requests:
+              cpu: "4000m"     # 4 核（转码 CPU 密集）
+              memory: "8Gi"
+            limits:
+              cpu: "8000m"     # 8 核
+              memory: "16Gi"
+          env:
+            - name: JAVA_OPTS
+              value: >-
+                -XX:+UseG1GC
+                -XX:MaxRAMPercentage=70
+                -XX:+UseContainerSupport
+---
+# HPA：按 MQ 队列长度自动扩缩
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: transcode-worker-hpa
+spec:
+  scaleTargetRef:
+    kind: Deployment
+    name: transcode-worker
+  minReplicas: 5
+  maxReplicas: 50          # 高峰扩到 50 个转码节点
+  metrics:
+    - type: External
+      external:
+        metric:
+          name: rocketmq_queue_depth    # MQ 队列堆积量
+          selector:
+            matchLabels:
+              topic: transcode-topic
+        target:
+          type: AverageValue
+          averageValue: "10"    # 每副本处理 10 条消息，堆积就扩容
+```
 
-### 二轮复盘清单
+**图片处理（Thumbnailator）**：
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+```java
+// 图片缩略图生成（比视频转码快，但仍异步）
+@Component
+@RocketMQMessageListener(topic = "image-process-topic", consumerGroup = "image-worker")
+public class ImageProcessWorker implements RocketMQListener<ImageMessage> {
 
-## 十一、面试官 5 个企业级追问
+    @Override
+    public void onMessage(ImageMessage msg) {
+        try {
+            BufferedImage source = readFromOSS(msg.getSourceUrl());
 
-1. **你在真实项目里怎么判断“图片、视频处理任务的异步架构”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 success_rate、latency_p99、error_rate。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+            // 生成多规格缩略图
+            Map<String, String> thumbnails = new HashMap<>();
+            for (String size : Arrays.asList("100x100", "300x300", "800x800")) {
+                BufferedImage thumb = Thumbnailator.of(source)
+                    .scale(Thumbnailator.scaleForSize(size))
+                    .asBufferedImage();
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，媒体处理 是否真是瓶颈，异步 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+                String key = "media/thumb/" + msg.getImageId() + "/" + size + ".jpg";
+                ossClient.putObject(bucketName, key, imageToInputStream(thumb));
+                thumbnails.put(size, ossClient.getUrl(bucketName, key).toString());
+            }
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 边界不清导致跨服务强耦合。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 success_rate 和 latency_p99 做分钟级观察，一旦越过阈值立即止损。
+            // 加水印（大图才加）
+            if (msg.isWatermark()) {
+                BufferedImage watermarked = addWatermark(source, msg.getWatermarkText());
+                uploadToOSS(watermarked, "media/watermark/" + msg.getImageId() + ".jpg");
+            }
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 任务，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+            taskStatusMapper.updateResult(msg.getImageId(), "DONE", thumbnails);
+        } catch (Exception e) {
+            handleFailure(msg, e);
+        }
+    }
+}
+```
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“图片、视频处理任务的异步架构”，至少要沉淀 核心业务对象、状态机、读写链路、依赖拓扑 的建模规范，以及 success_rate、latency_p99 的验收标准。
+## 五、底层本质：为什么媒体处理必须异步
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
+回到第一性：**媒体处理是"长耗时 + 重资源"任务，与 Web 请求的"短耗时 + 轻资源"模型根本冲突**。
 
-1. **如果把“图片、视频处理任务的异步架构”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 媒体处理 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
+- **线程模型冲突**：Web 服务用线程池处理请求（如 200 线程），每个请求几毫秒到几百毫秒。转码一个视频要几分钟到几十分钟，如果一个转码占一个线程 10 分钟，200 个并发转码就耗尽线程池，Web 服务对外不可用。异步化把转码从 Web 线程剥离，Web 只做"入队 + 返回"（毫秒级）。
+- **资源模型冲突**：Web 服务是 IO 密集（等数据库、等下游），CPU 利用率低（10-30%）。转码是 CPU 密集（FFmpeg 占满 CPU）。把转码放 Web 节点，CPU 被占满影响所有请求的响应时间。独立转码节点（CPU 优化型）隔离资源，互不影响。
+- **可靠性冲突**：转码可能失败（源文件损坏、格式不支持、OOM）。同步处理失败会导致 HTTP 请求失败（用户重试又转一次）。异步化用 MQ 的重试 + 死信机制保证可靠——失败自动重试 3 次，重试耗尽进死信人工处理，用户感知的是"处理中"而非"失败"。
+- **扩缩模型冲突**：Web 流量按 QPS 扩缩（HPA 基于 CPU/QPS）。转码按任务量扩缩（HPA 基于 MQ 队列长度）。混在一起扩缩不准——Web QPS 低但转码任务堆积时，按 QPS 扩容不够。独立工作节点按队列长度扩缩，精准匹配。
 
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“图片、视频处理任务的异步架构”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 success_rate、latency_p99 对业务链路的影响。
+**为什么用 MQ 而不是线程池**：线程池内的任务在进程内（进程崩溃任务丢失），MQ 做持久化（消息不丢），工作节点崩溃消息重投给其他节点。MQ 还天然支持削峰（突发上传高峰，消息排队不压垮工作节点）、优先级（VIP 用户优先）、重试和死信。
 
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 边界不清导致跨服务强耦合，要能通过 trace、tool_call_id 和业务流水快速回放。
+## 六、AI 架构师加问：5 个
 
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
+1. **AI 能自动选视频转码参数吗？**
+   能。AI 分析视频内容（运动场景用高码率、静态画面用低码率）、分辨率、时长，推荐最优转码参数（码率、帧率、preset）。比固定参数省 30-50% 存储和带宽。VMAF 评分保证质量。
 
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
+2. **AI 辅助媒体内容审核怎么做？**
+   上传后异步触发 AI 审核——图片识别违禁内容（色情、暴力、政治敏感）、视频关键帧分析、OCR 文字审核、音频转文字审核。不合格标记删除或人工复审。审核是异步流水线的一环，不阻塞上传返回。
 
-## 十三、记忆口诀与面试现场表达
+3. **AI 生成缩略图（智能裁剪）怎么做？**
+   AI 识别图片主体（人脸、商品、关键区域），智能裁剪保留主体。比固定居中裁剪质量高（人脸不会裁掉）。用 salience map 或人脸检测确定裁剪区域。电商场景特别有用（商品主体居中）。
+
+4. **AI 推理服务的模型上传后怎么处理？**
+   模型文件（.pt/.onnx）上传后验证完整性（SHA256）、转换格式（PyTorch→ONNX→TensorRT）、量化（FP32→INT8）。这些是异步处理任务，和视频转码架构一样（MQ + 工作节点）。完成后部署到推理服务。
+
+5. **让 AI 管理转码任务的调度，风险在哪？**
+   AI 能做任务优先级调整（VIP 任务插队）、资源预测（高峰前预热扩容）。但调度决策（哪个任务先跑）影响 SLA，AI 误判会让低优先级任务饿死。解法：AI 建议优先级，确定性规则兜底（超时任务强制提升优先级）。
+
+## 七、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：经验丰富的值班负责人拿着工具箱、调度台和应急预案，在处理“业务流量和系统风险同时出现”。
+抓 **"上传入队、异步转码、状态轮询、失败重试、HPA 扩缩"**。
 
-- **场景**：先说明“图片、视频处理任务的异步架构”服务于什么业务目标，不要上来就堆 媒体处理。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 边界不清导致跨服务强耦合、异常链路没有补偿和告警。
-- **验证**：最后落到 success_rate、latency_p99、error_rate，让面试官感觉你真的上线过。
+- **入队**：上传后发 MQ 消息，立即返回 fileId（不阻塞 Web）
+- **转码**：独立工作节点用 FFmpeg，CPU 优化型 Pod
+- **状态**：PENDING→PROCESSING→DONE/FAILED，客户端轮询或 SSE 推送
+- **重试**：MQ ACK + 延迟重试 3 次 + 死信队列
+- **扩缩**：HPA 按 MQ 队列长度扩缩工作节点
 
 ### 拟人化理解
 
-可以把“图片、视频处理任务的异步架构”想成一个经验丰富的值班负责人：媒体处理 是他的工具箱、调度台和应急预案，异步 是他面对的现场信号，任务 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看指标，再控风险，最后谈优化。这样记，比死背组件名更稳。
+把媒体处理想成**餐厅点菜**。顾客（用户）点完菜（上传）拿取餐号（fileId）先回座位（不等）。后厨（转码节点）按订单做菜（FFmpeg 转码），做好了叫号（回调）或放取餐柜（CDN）。高峰期排队（MQ 削峰），后厨忙不过来加人（HPA 扩容）。菜做坏了重做（重试），重做几次还坏报经理（死信告警）。
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“图片、视频处理任务的异步架构”，我会这样答：我会先确认业务目标、规模、SLA 和一致性要求，再选择合适的架构手段。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 边界不清导致跨服务强耦合，所以我会提前设计灰度、监控和止损阈值，重点看 success_rate、latency_p99。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
-
-### 被追问时的转场话术
-
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 success_rate 或 latency_p99 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+> 媒体处理必须异步——转码是 CPU 密集（FFmpeg 占满 CPU），同步处理会耗尽 Web 线程池、用户等超时。架构是上传触发 + MQ + 工作节点。用户上传后 Web 服务存 OSS、发 MQ 消息、立即返回 fileId（原图立即可用）。转码工作节点（独立 CPU 型 Pod）消费消息，用 FFmpeg 按目标规格（720p/1080p/4K）转码，输出多版本到 OSS + CDN。任务状态机 PENDING→PROCESSING→DONE，客户端轮询查询或 SSE 推送进度。失败用 MQ 的 ACK + 延迟重试（3 次），重试耗尽进死信队列人工处理。工作节点用 HPA 按 MQ 队列长度自动扩缩（堆积就加节点，高峰扩到 50 副本）。转码节点和 Web 服务隔离部署，互不影响资源。
 
 ### 反问面试官
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+> 贵司转码是自建 FFmpeg 还是用云服务（阿里 MTS/AWS MediaConvert）？峰值转码并发多大？有没有 GPU 加速？这决定我聊工作节点架构还是云服务集成。
 
+## 八、苏格拉底式面试追问
+
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么不用更大的 Web 线程池同步转码？ | 用资源说话：转码占满 CPU，Web 节点 CPU 被转码占满后所有请求变慢。加 Web 节点成本高（Web 节点通常内存型，转码要 CPU 型）。异步分离让 Web 和转码各自按需扩缩，成本最优 |
+| 证据追问 | 怎么证明异步比同步好？ | 对比 Web 服务的 P99（异步不阻塞，同步转码时 P99 飙升）、线程池利用率（异步低，同步被占满）、转码吞吐（独立节点按队列扩缩，吞吐高 5-10 倍）。监控 transcode_queue_depth（队列堆积）、transcode_success_rate |
+| 边界追问 | 异步处理能保证转码一定成功吗？ | 不能。源文件损坏、格式不支持、OOM 等会导致转码失败。异步保证的是"失败可重试、可追溯、不影响用户"。重试耗尽进死信，人工介入。关键场景（如付费视频）有 SLA，失败要告警 |
+| 反例追问 | 什么场景适合同步处理？ | 小图片缩略图（几十毫秒，值得同步做省 MQ 开销）、实时滤镜（用户等结果）、OCR 文字识别（API 调用快）。判断标准：处理时间 < 1 秒且资源轻，可以同步 |
+| 风险追问 | 异步处理最大风险？ | ① 工作节点全挂（MQ 堆积，用户等不到结果，要有容量预案）；② MQ 消息丢失（消息没持久化，用 RocketMQ 同步刷盘）；③ 任务状态不一致（DB 说 DONE 但 OSS 没文件，要分布式事务或对账）；④ 死信积压（失败任务无人处理） |
+| 验证追问 | 怎么证明转码质量没问题？ | 抽检：随机下载转码后视频，用 VMAF 评分（> 7 为合格）。自动化：CI 里跑转码测试用例（各种格式输入，验证输出）。监控 transcode_quality_score、transcode_failure_rate（按失败原因聚类） |
+| 沉淀追问 | 团队媒体处理规范沉淀什么？ | 转码规格标准（720p/1080p/4K 参数模板）、工作节点部署模板（CPU 型 + HPA）、任务状态机设计规范、死信处理 SOP、转码质量监控大盘、FFmpeg 命令行最佳实践 |
+
+### 现场对话示例
+
+**面试官**：转码工作节点怎么扩容？
+
+**候选人**：按 MQ 队列长度 HPA 扩缩。监控 transcode-topic 的队列深度（rocketmq_queue_depth），当堆积超过阈值（如每副本 10 条）就扩容。基础 5 副本，高峰扩到 50。缩容要慢（stabilizationWindow 10 分钟），防止抖动——转码任务可能几分钟，缩容太快把正在转码的节点杀了导致任务重试。转码节点是 CPU 型（8 核 16G），和 Web 服务（内存型 4 核 8G）规格不同，独立节点池部署。FFmpeg 是 CPU 密集，8 核节点并行转 2-3 个任务（每任务占 2-3 核）。GPU 加速（NVENC）能快 5-10 倍但成本高，只给 VIP 或 4K 任务用。
+
+**面试官**：转码到一半工作节点挂了，任务怎么办？
+
+**候选人**：RocketMQ 的 ACK 机制保证——工作节点消费消息但没 ACK（还没转完），节点挂了消息会重投给其他节点。重投的消息从头开始转码（没有断点续转，因为 FFmpeg 中间状态难保存）。重试次数累加，超过 3 次进死信队列。为了减少重试浪费，工作节点收到消息后先更新状态为 PROCESSING，转码中定期写进度。如果同一个 taskId 被重复消费（如重投），工作节点检查状态——如果已经在 PROCESSING（说明上次还没超时），可以拒绝重复处理（幂等）。关键设计：转码输出用临时文件，完成后原子 rename，避免半成品被当成成品。
+
+**面试官**：用户怎么知道转码进度？
+
+**候选人**：两种方式。轮询——客户端每 2-3 秒查一次 /task/{taskId} 接口，返回状态和进度百分比。简单但有延迟和轮询开销。SSE 推送——客户端建立 SSE 长连接，服务端每 2 秒推送进度更新，实时性好。工作节点转码时解析 FFmpeg 输出（frame= time=），估算进度（已处理时长 / 总时长），更新到 Redis。查询接口或 SSE 从 Redis 读进度。进度不是精确的（FFmpeg 输出只有已处理帧数），但对用户足够（看到进度条在动）。转码完成后推送 DONE 事件，客户端拿到多分辨率 URL 播放。
+
+## 常见考点
+
+1. **为什么媒体处理要异步？**——转码 CPU 密集且耗时长（几分钟），同步处理阻塞 Web 线程池、用户等超时。异步用 MQ 解耦，Web 只入队，工作节点独立处理。
+2. **FFmpeg 怎么用？**——Java 用 ProcessBuilder 调 FFmpeg 命令行，设置分辨率（-vf scale）、码率（-b:v）、preset。或用云转码服务（阿里 MTS/AWS MediaConvert）。GPU 加速用 NVENC。
+3. **转码失败怎么重试？**——RocketMQ ACK 机制：消费失败 NACK 重投（延迟队列），重试 3 次进死信队列。工作节点崩溃，未 ACK 消息重投给其他节点。
+4. **工作节点怎么扩缩？**——HPA 按 MQ 队列长度（rocketmq_queue_depth）扩缩。转码节点是 CPU 型（8 核+），独立于 Web 服务。缩容要慢（防抖动）。
+5. **进度怎么通知用户？**——轮询（客户端定时查 /task/{taskId}）或 SSE 推送（长连接实时推送）。工作节点解析 FFmpeg 输出估算进度，写 Redis。

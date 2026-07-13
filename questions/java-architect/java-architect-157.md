@@ -9,259 +9,394 @@ tags:
 - 异常拦截
 - 治理
 feynman:
-  essence: 数据质量平台与异常数据拦截的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: 数据质量平台的核心是把"脏数据进、净数据出"做成一条可量化、可拦截、可回溯的流水线。用规则引擎（Drools/自研 DSL）声明字段约束（非空/枚举/范围/正则/跨表一致），在写入前做同步校验、写入后做异步巡检，异常数据进隔离区（quarantine）人工或规则兜底。本质是用"事前拦截 + 事后对账 + 指标看板"把数据可信度从"靠人盯"变成"靠系统保证"。
+  analogy: 像一个机场安检流水线——行李先过 X 光（规则校验），可疑的开箱检查（隔离区），通过的贴标签放行（标记可信），全程录像（数据血缘），最后统计违禁品率（质量看板）。
+  first_principle: 数据为什么会有质量问题？因为数据来自多源（人工录入/外部接口/日志采集）、多格式、多时点，每个源头都可能有缺失、错误、重复、延迟。数据质量平台的本质是"在数据流转的关键节点插入校验关卡"，把质量问题拦截在扩散之前，而不是等下游报表算错了才发现。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 六大质量维度：完整性（非空）、准确性（值正确）、一致性（跨表/跨系统）、唯一性（无重复）、及时性（延迟可控）、有效性（格式合规）
+  - 三层拦截：事前（写入前同步校验，失败拒绝）、事中（Flink 流式实时校验）、事后（离线批量巡检对账）
+  - 规则引擎：DQL（Data Quality Language）声明规则，规则可版本化、可灰度、可热更
+  - 隔离区机制：异常数据进 quarantine 表，标记 exception_code，不影响主链路
+  - 核心指标：data_valid_rate（校验通过率）、quarantine_count（隔离量）、reconcile_diff_rate（对账差异率）
 first_principle:
-  problem: 面对“数据质量平台与异常数据拦截”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: 海量数据从多源汇入数据中台/业务库，如何系统性拦截脏数据、保证下游消费的数据可信？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 脏数据一旦进入下游报表/决策，纠错成本指数级上升（GIGO 原则）
+  - 校验规则会随业务演进（新字段、新枚举、新约束），规则必须可配置可热更
+  - 强校验（拒绝写入）影响主链路可用性，弱校验（放行但标记）可能漏过脏数据
+  - 质量问题不可完全避免，核心是"早发现、快定位、可回滚"
+  rebuild: 建三层校验体系——事前用规则引擎在 API/ETL 入口同步校验关键字段，失败拒绝或隔离；事中用 Flink 流式实时监测异常模式（如突增、突降）；事后离线跑对账任务（主数据 vs 副本、业务库 vs 数仓）发现一致性偏差。所有规则版本化管理，所有异常进隔离区并告警，核心指标上看板。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - 规则引擎选 Drools 还是自研？——简单字段校验（非空/范围）自研注解即可（@NotNull/@Range）；复杂跨表/跨字段逻辑用 Drools 或自研 DSL。JD 实践：字段级用 Hibernate Validator，业务级用自研 DQL（类似 SQL 语法，数据分析师可写）。
+  - 隔离区的数据怎么处理？——三类：自动修复（有明确修复规则，如缺失默认值）、人工审核（进工单系统）、退回源头（通知上游修复重推）。隔离超过 24h 未处理升级。
+  - 强校验拒绝写入影响主链路怎么办？——关键交易链路用强校验（必须正确），非关键链路用弱校验（标记但放行）。强校验失败要有降级路径（如缓存上次有效值）。
+  - 对账怎么做？——T+1 批量对账（主表 count/sum 与下游汇总比对）+ 实时对账（Flink 双流 JOIN 检测差异）。差异超阈值告警，自动触发补偿任务。
+  - 怎么量化数据质量？——六维评分卡：每维度 0-100 分，加权汇总成 data_quality_score。日报推送，低于 80 分触发治理任务。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 六维度：完整性、准确性、一致性、唯一性、及时性、有效性
+  - 三层拦截：事前同步校验（拒绝/隔离）、事中 Flink 实时、事后 T+1 对账
+  - 规则引擎：字段级 Hibernate Validator，业务级 Drools/自研 DQL，版本化热更
+  - 隔离区：异常数据 quarantine 表 + exception_code，自动修复/人工审核/退回源头
+  - 核心指标：data_valid_rate、quarantine_count、reconcile_diff_rate、data_quality_score
 ---
 
-# 【Java 后端架构师】数据质量平台与异常数据拦截？
+# 【Java 后端架构师】数据质量平台与异常数据拦截
 
-> 适用场景：架构设计。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。商品库千万级 SKU、订单日亿级、价格每日变更百万次——脏数据（价格为负、库存为空、SKU 编码重复）一旦漏过，下游推荐/结算/履约全线出错。架构师要设计的是一条"脏数据进不来、漏过的能发现、发现的能修复"的可信数据链路。
 
-## 一、先明确问题边界
+## 一、概念层：数据质量六大维度
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+| 维度 | 定义 | 典型规则 | 违反后果 |
+|------|------|---------|---------|
+| **完整性** | 字段非空、记录不缺失 | `price IS NOT NULL` | 推荐算不出分、结算报错 |
+| **准确性** | 值符合业务真实情况 | `price > 0 AND price < 1000000` | 价格标错（0 元购事故） |
+| **一致性** | 跨表/跨系统数据相同 | 主库库存 = ES 索引库存 | 超卖或库存幻觉 |
+| **唯一性** | 无重复记录 | `COUNT(DISTINCT sku_id) = COUNT(*)` | SKU 重复导致展示错乱 |
+| **及时性** | 数据延迟可控 | `update_time > NOW() - INTERVAL 1 HOUR` | 商品下架了还在推荐 |
+| **有效性** | 格式合规 | `sku_id REGEXP '^JD[0-9]{10}$'` | 下游正则解析失败 |
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+**核心架构原则**：数据质量不是"加几个 if 校验"，而是建一条"规则声明 - 多层拦截 - 隔离修复 - 对账度量"的闭环流水线。
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 数据质量 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+## 二、机制层：规则引擎与三层拦截
 
-## 二、推荐架构思路
+### 2.1 字段级校验（Hibernate Validator 注解）
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+```java
+@Data
+public class SkuDTO {
+    @NotBlank(message = "SKU 编码不能为空")
+    @Pattern(regexp = "^JD[0-9]{10}$", message = "SKU 编码格式错误")
+    private String skuId;
 
-## 三、技术落地点
+    @NotNull
+    @DecimalMin(value = "0.01", message = "价格必须大于 0")
+    @DecimalMax(value = "999999.99", message = "价格超出上限")
+    private BigDecimal price;
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+    @NotNull
+    @Min(value = 0, message = "库存不能为负")
+    private Integer stock;
 
-## 四、常见坑
+    @NotBlank
+    @Size(max = 200)
+    private String title;
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+    @NotNull
+    private Integer categoryId;
+}
 
-## 五、面试回答模板
+// 统一校验入口
+@Service
+public class SkuValidationService {
+    private final Validator validator = Validation.buildDefaultValidatorFactory().getValidator();
 
-可以按下面结构作答：
+    public ValidationResult validate(SkuDTO sku) {
+        Set<ConstraintViolation<SkuDTO>> violations = validator.validate(sku);
+        if (violations.isEmpty()) return ValidationResult.ok();
+        Map<String, String> errors = violations.stream()
+            .collect(toMap(
+                v -> v.getPropertyPath().toString(),
+                ConstraintViolation::getMessage));
+        return ValidationResult.fail(errors);
+    }
+}
+```
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“数据质量平台与异常数据拦截”，核心是 数据质量 与 异常拦截 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+### 2.2 业务级规则（自研 DQL + Drools）
 
-## 六、加分点
+复杂跨字段/跨表规则用规则引擎。JD 实践：自研 DQL（Data Quality Language），数据分析师可写，编译成 Drools DRL 执行。
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+```java
+// DQL 规则示例（配置化，无需发版）
+// RULE "价格与成本约束"
+//   WHEN sku.price < sku.cost * 1.1  // 售价不得低于成本 1.1 倍
+//   THEN quarantine(sku, "PRICE_BELOW_COST")
 
-## 七、企业级面试定位：从“会用”到“能负责”
+// Drools 规则文件（drl）
+@Service
+public class BusinessRuleEngine {
+    private final KieContainer kieContainer;  // 规则容器，支持热更
 
-企业级面试不会只问“数据质量 是什么”，而是看你能不能对一条真实生产链路负责。回答“数据质量平台与异常数据拦截”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+    public List<RuleViolation> check(SkuDTO sku) {
+        KieSession session = kieContainer.newKieSession();
+        List<RuleViolation> violations = new ArrayList<>();
+        session.setGlobal("violations", violations);
+        session.insert(sku);
+        session.insert(new MarketContext(LocalDate.now()));  // 促销上下文
+        session.fireAllRules();
+        session.dispose();
+        return violations;
+    }
+}
+```
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 架构设计 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 数据质量、异常拦截、治理 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 platform_reuse_rate、api_compat_breaks、domain_change_lead_time、tenant_customization_count 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+**规则版本化与灰度**：
 
-### 企业级回答骨架
+```java
+// 规则表（数据库存储，支持版本和灰度）
+CREATE TABLE t_dq_rule (
+    id BIGINT PRIMARY KEY,
+    rule_name VARCHAR(100),
+    rule_type VARCHAR(20),          -- FIELD / BUSINESS / CROSS_TABLE
+    rule_dql TEXT,                  -- DQL 表达式
+    severity VARCHAR(10),           -- BLOCK(拦截) / WARN(告警) / QUARANTINE(隔离)
+    version INT,
+    gray_percent INT,               -- 灰度比例 0-100
+    enabled TINYINT,
+    INDEX idx_type_version (rule_type, version)
+);
+```
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 数据质量 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+### 2.3 三层拦截链路
 
-### 面试中要主动补的生产细节
+```java
+@Service
+@Slf4j
+public class DataQualityGateway {
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+    private final SkuValidationService fieldValidator;
+    private final BusinessRuleEngine ruleEngine;
+    private final QuarantineRepository quarantineRepo;
+    private final MeterRegistry metrics;
 
-## 八、苏格拉底式面试追问
+    /**
+     * 事前拦截：同步校验，在写入主库前执行
+     * 返回 false 表示拒绝写入
+     */
+    public QualityResult preCheck(SkuDTO sku, String source) {
+        // 第一层：字段级校验（Hibernate Validator）
+        ValidationResult fieldResult = fieldValidator.validate(sku);
+        if (fieldResult.hasErrors()) {
+            metrics.counter("dq.field_violation", "source", source).increment();
+            return handleViolation(sku, fieldResult.getErrors(), Severity.BLOCK);
+        }
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+        // 第二层：业务规则校验（Drools）
+        List<RuleViolation> ruleViolations = ruleEngine.check(sku);
+        if (!ruleViolations.isEmpty()) {
+            RuleViolation v = ruleViolations.get(0);
+            metrics.counter("dq.rule_violation", "rule", v.getRuleName()).increment();
+            return handleViolation(sku, v.getErrors(), v.getSeverity());
+        }
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“数据质量平台与异常数据拦截”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 platform_reuse_rate、api_compat_breaks、domain_change_lead_time、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 数据质量 负责的范围，以及必须依赖 异常拦截、治理 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 把所有需求都塞进中台导致大泥球，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+        return QualityResult.pass();
+    }
 
-### 现场对话示例
+    private QualityResult handleViolation(SkuDTO sku, Map<String,String> errors, Severity sev) {
+        switch (sev) {
+            case BLOCK:                            // 强拦截：拒绝写入
+                throw new DataQualityBlockException(errors.toString());
+            case QUARANTINE:                        // 隔离：进隔离区
+                quarantineRepo.save(buildQuarantine(sku, errors));
+                metrics.gauge("dq.quarantine_count", quarantineRepo.countPending());
+                return QualityResult.quarantined();
+            case WARN:                              // 告警：放行但告警
+                log.warn("数据质量告警 sku={} errors={}", sku.getSkuId(), errors);
+                return QualityResult.warn(errors);
+            default:
+                return QualityResult.pass();
+        }
+    }
+}
+```
 
-**面试官**：你说要做“数据质量平台与异常数据拦截”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 platform_reuse_rate、api_compat_breaks、业务失败率和事故记录。
+### 2.4 隔离区机制
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 platform_reuse_rate 没有改善，或者 api_compat_breaks 反而变差，就停止扩大范围，回到假设层重新复盘。
+```sql
+CREATE TABLE t_data_quarantine (
+    id BIGINT PRIMARY KEY,
+    entity_type VARCHAR(20),           -- SKU / ORDER / PRICE
+    entity_id VARCHAR(32),
+    entity_snapshot JSON,              -- 原始数据快照
+    exception_code VARCHAR(50),        -- 违反的规则
+    exception_detail TEXT,
+    source VARCHAR(50),                -- 数据来源
+    status VARCHAR(20),                -- PENDING / AUTO_FIXED / MANUAL_FIXED / REJECTED
+    handler VARCHAR(50),               -- 处理人
+    handle_time DATETIME,
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_status_create (status, create_time),
+    INDEX idx_entity (entity_type, entity_id)
+) COMMENT='数据质量隔离区';
+```
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 platform_reuse_rate、api_compat_breaks、domain_change_lead_time。这样它不是个人经验，而是团队机制。
+```java
+// 隔离数据自动修复策略
+@Service
+public class QuarantineAutoFixer {
 
-## 九、专项架构深挖：对象、链路、失败模式
+    @Scheduled(fixedDelay = 60_000)
+    public void autoFix() {
+        List<QuarantineRecord> pendings = quarantineRepo.findPending();
+        for (QuarantineRecord r : pendings) {
+            FixStrategy strategy = strategyFactory.get(r.getExceptionCode());
+            if (strategy != null && strategy.canAutoFix(r)) {
+                SkuDTO fixed = strategy.fix(r);
+                try {
+                    dataQualityGateway.preCheck(fixed, "AUTO_FIX");
+                    skuRepo.upsert(fixed);
+                    quarantineRepo.markFixed(r.getId(), "AUTO_FIX");
+                } catch (Exception e) {
+                    quarantineRepo.escalate(r.getId());  // 升级人工
+                }
+            } else {
+                quarantineRepo.escalate(r.getId());      // 24h 未处理升级
+            }
+        }
+    }
+}
+```
 
-这一题不要停在“知道 数据质量”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+## 三、实战层：事后对账与质量看板
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 领域模型、聚合、应用服务、领域事件；能力目录、租户/业务线差异、版本策略；平台 SLA 和接入规范 |
-| 设计主线 | 中台沉淀稳定能力，差异化编排留在业务层；领域边界通过数据所有权和变更频率划分；平台接口要版本化、可观测、可治理 |
-| 失败模式 | 把所有需求都塞进中台导致大泥球；公共模型过度抽象不贴业务；平台升级缺少兼容策略 |
-| 验证指标 | platform_reuse_rate、api_compat_breaks、domain_change_lead_time、tenant_customization_count |
+### 3.1 T+1 离线对账（一致性维度核心）
 
-**架构拆解**：
+```java
+@Service
+public class ReconciliationJob {
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 异常拦截 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 数据质量平台与异常数据拦截 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 治理 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+    /**
+     * 对账：主库 vs ES 索引（库存一致性）
+     * 差异超阈值告警并触发补偿
+     */
+    @Scheduled(cron = "0 0 2 * * ?")   // 每天凌晨 2 点
+    public void reconcileStock() {
+        long total = skuRepo.count();
+        long diff = 0;
+        int pageSize = 5000;
+        for (int offset = 0; offset < total; offset += pageSize) {
+            List<SkuDTO> dbBatch = skuRepo.findBatch(offset, pageSize);
+            Map<String, Integer> esStock = esClient.mgetStock(
+                dbBatch.stream().map(SkuDTO::getSkuId).collect(toList()));
+            for (SkuDTO sku : dbBatch) {
+                Integer esVal = esStock.get(sku.getSkuId());
+                if (esVal == null || !esVal.equals(sku.getStock())) {
+                    diff++;
+                    // 自动补偿：把主库值同步到 ES
+                    esClient.updateStock(sku.getSkuId(), sku.getStock());
+                    metrics.counter("dq.reconcile_diff", "type", "STOCK").increment();
+                }
+            }
+        }
+        double diffRate = (double) diff / total;
+        metrics.gauge("dq.reconcile_diff_rate", diffRate);
+        if (diffRate > 0.001) {   // 差异率超 0.1% 告警
+            alertService.send("库存对账差异率 " + df.format(diffRate * 100) + "%");
+        }
+    }
+}
+```
 
-**高分回答细节**：
+### 3.2 实时流式校验（及时性 + 异常模式检测）
 
-- 不要只说“可以用 数据质量”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+```java
+// Flink 流式：监测价格突增突降（疑似标错）
+// 数据流：CDC binlog -> Kafka -> Flink -> 告警
+public class PriceAnomalyDetector extends KeyedProcessFunction<String, PriceChange, Alert> {
 
-## 十、二轮场景追问与项目表达
+    @Override
+    public void processElement(PriceChange change, Context ctx, Collector<Alert> out) {
+        PriceState state = getState(change.getSkuId());
+        double prevPrice = state.getLastPrice();
+        double ratio = change.getNewPrice() / prevPrice;
+        // 价格变动超过 5 倍（涨或跌）判定为异常
+        if (ratio > 5.0 || ratio < 0.2) {
+            out.collect(new Alert("PRICE_ANOMALY",
+                change.getSkuId() + " 价格从 " + prevPrice + " 变为 " + change.getNewPrice()));
+        }
+        state.update(change.getNewPrice());
+    }
+}
+```
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+### 3.3 数据质量评分看板
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+```java
+// 六维评分，加权汇总
+public class DataQualityScoreCalculator {
+    public QualityScore calculate(String domain) {
+        return QualityScore.builder()
+            .completeness(calcCompleteness(domain))     // 非空率
+            .accuracy(calcAccuracy(domain))             // 规则通过率
+            .consistency(1 - reconcileDiffRate(domain)) // 1 - 对账差异率
+            .uniqueness(calcUniqueness(domain))         // 去重率
+            .timeliness(calcTimeliness(domain))         // 新鲜度达标率
+            .validity(calcValidity(domain))             // 格式合规率
+            .build()
+            .weightedScore(                             // 加权
+                w(0.25), w(0.25), w(0.20), w(0.10), w(0.10), w(0.10));
+    }
+}
+// data_quality_score < 80 触发治理任务工单
+```
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“数据质量平台与异常数据拦截”，重点看 platform_reuse_rate、api_compat_breaks、domain_change_lead_time，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+## 四、底层本质：拦截强度 vs 可用性的权衡
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+数据质量的核心矛盾是"强拦截 vs 高可用"。强校验（BLOCK）能保证脏数据进不来，但一旦规则配错（误判合法数据为脏），会阻断正常业务写入。解法是**按链路重要性分级**：
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 数据质量 和 异常拦截 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+- **核心交易链路**（下单、支付）：强校验，但规则必须充分测试，失败有降级路径
+- **数据中台/数仓 ETL**：中等校验，隔离可疑数据但不阻断整批
+- **日志/监控数据**：弱校验，标记异常但不拒绝
 
-### 追问 3：你如何判断这个方案值得做？
+**对账是最后的兜底**：即使事前拦截漏过脏数据，T+1 对账能发现一致性偏差并自动补偿。这是"防御纵深"思想在数据领域的应用——不依赖单点拦截。
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 治理 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+## 五、AI 工程化深挖
 
-### STAR 项目表达
+1. **用 AI 自动发现数据质量规则怎么做？**
+   AI 扫描历史数据学习字段分布（price 字段 95% 在 1-9999 元），自动生成候选规则（price BETWEEN 0.01 AND 99999）。异常值（price=999999）标记为疑似规则违反。规则经数据分析师确认后入库，避免 AI 生成的规则误判正常边缘值。
 
-- **S（背景）**：原系统在 数据质量 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 数据质量平台与异常数据拦截 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 platform_reuse_rate、api_compat_breaks 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+2. **AI 自动修复隔离数据怎么保证不修错？**
+   AI 只对"有明确修复规则"的低风险场景介入（如缺失默认值填充）。修复前做 dry-run，修复后重新跑校验。高风险修复（改价格、改库存）必须人工确认。监控 auto_fix_acceptance_rate（AI 修复被采纳率），低于阈值回退到全人工。
 
-### 二轮复盘清单
+3. **怎么用 LLM 做数据质量的自然语言查询？**
+   用户问"昨天哪些类目的数据质量最差"，LLM 翻译成 SQL 查 dq_score 表。但 LLM 生成的 SQL 必须走白名单（只读账号、限定表），防止注入。结果用图表展示并附置信度。
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+4. **数据血缘怎么辅助质量追溯？**
+   记录每个字段的来源（source system）、变换链路（ETL pipeline）、消费方。一旦发现质量问题，沿血缘回溯到根因源头（是上游接口传错了，还是 ETL 算错了），并通知下游受影响方。血缘用图数据库（Neo4j）存储。
 
-## 十一、面试官 5 个企业级追问
+5. **RAG 知识库的数据质量怎么保证？**
+   RAG 是数据质量的高阶场景：文档切片的完整性、embedding 的新鲜度、引用的准确性都要校验。建 dq_rag 专属规则：chunk 长度分布、index_freshness_seconds、answer_citation_rate。回答前对检索文档跑一次质量校验，隔离过期或损坏的 chunk。
 
-1. **你在真实项目里怎么判断“数据质量平台与异常数据拦截”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 platform_reuse_rate、api_compat_breaks、domain_change_lead_time。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
-
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，数据质量 是否真是瓶颈，异常拦截 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
-
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 把所有需求都塞进中台导致大泥球。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 platform_reuse_rate 和 api_compat_breaks 做分钟级观察，一旦越过阈值立即止损。
-
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 治理，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
-
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“数据质量平台与异常数据拦截”，至少要沉淀 领域模型、聚合、应用服务、领域事件 的建模规范，以及 platform_reuse_rate、api_compat_breaks 的验收标准。
-
-## 十二、AI 架构师加问：5 个 AI 相关问题
-
-1. **如果把“数据质量平台与异常数据拦截”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 数据质量 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
-
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“数据质量平台与异常数据拦截”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 platform_reuse_rate、api_compat_breaks 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 把所有需求都塞进中台导致大泥球，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 六、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：经验丰富的值班负责人拿着工具箱、调度台和应急预案，在处理“业务流量和系统风险同时出现”。
+抓 **"六维度、三层拦截、隔离区、对账兜底"** 四个词。
 
-- **场景**：先说明“数据质量平台与异常数据拦截”服务于什么业务目标，不要上来就堆 数据质量。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 把所有需求都塞进中台导致大泥球、公共模型过度抽象不贴业务。
-- **验证**：最后落到 platform_reuse_rate、api_compat_breaks、domain_change_lead_time，让面试官感觉你真的上线过。
-
-### 拟人化理解
-
-可以把“数据质量平台与异常数据拦截”想成一个经验丰富的值班负责人：数据质量 是他的工具箱、调度台和应急预案，异常拦截 是他面对的现场信号，治理 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看指标，再控风险，最后谈优化。这样记，比死背组件名更稳。
+- **六维度**：完整性、准确性、一致性、唯一性、及时性、有效性
+- **三层拦截**：事前同步校验（字段 Validator + 业务 Drools）、事中 Flink 实时、事后 T+1 对账
+- **隔离区**：quarantine 表 + exception_code，自动修复/人工审核/退回源头
+- **对账兜底**：主库 vs ES/数仓，diff_rate > 0.1% 告警并补偿
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“数据质量平台与异常数据拦截”，我会这样答：我会先确认业务目标、规模、SLA 和一致性要求，再选择合适的架构手段。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 把所有需求都塞进中台导致大泥球，所以我会提前设计灰度、监控和止损阈值，重点看 platform_reuse_rate、api_compat_breaks。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
+> 数据质量平台我按六维度（完整性/准确性/一致性/唯一性/及时性/有效性）建三层拦截。事前用 Hibernate Validator 做字段校验，复杂业务规则用 Drools（配置化、版本化、可灰度），严重性分 BLOCK（拒绝）/QUARANTINE（隔离）/WARN（告警）三档。脏数据进 quarantine 表，走自动修复（低风险）或人工审核（高风险）。事中用 Flink 流式监测异常模式（价格突增 5 倍告警）。事后 T+1 跑对账（主库 vs ES 索引库存），diff_rate > 0.1% 触发补偿。核心指标 data_valid_rate（校验通过率）、quarantine_count（隔离量）、reconcile_diff_rate（对账差异率）、data_quality_score（六维加权评分），低于 80 分触发治理工单。最容易翻车的是强校验误判合法数据阻断主链路——所以规则要灰度，BLOCK 只用在核心链路且有降级路径。
 
-### 被追问时的转场话术
+## 七、苏格拉底式面试追问
 
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 platform_reuse_rate 或 api_compat_breaks 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么不直接让上游保证数据质量，要建中台校验？ | 上游多且不可控（外部接口/人工录入），中台是最后防线。但中台发现质量问题要回流上游（退回+告警），形成闭环。用 upstream_defect_rate 衡量上游质量 |
+| 证据追问 | 怎么证明数据质量平台有效？ | 对比上线前后：quarantine_count 应该下降（上游被规则倒逼改善）、reconcile_diff_rate 应该趋近 0、下游报表错误工单数下降 |
+| 边界追问 | 数据质量平台解决不了什么？ | 解决不了业务规则错误（规则本身写错）、解决不了实时性要求 < 秒级的强一致（对账是 T+1）、解决不了数据语义错误（值合法但含义错） |
+| 反例追问 | 什么场景不上数据质量平台？ | 数据量小（< 万级）人工抽检足够、原型验证阶段、数据只写不读的临时表。这些过度设计 |
+| 风险追问 | 强校验 BLOCK 阻断主链路怎么办？ | 规则充分测试 + 灰度发布（先 WARN 跑一周看误判率）+ 降级开关（规则异常时临时降级为 WARN）+ 监控 dq_false_block_rate（误拦截率） |
+| 验证追问 | 怎么验证校验规则正确？ | 规则测试集：正例（合法数据必须 pass）+ 反例（脏数据必须 fail）。每次规则变更跑回归测试。线上采样人工复核 dq_false_block_rate |
+| 沉淀追问 | 团队数据质量规范沉淀什么？ | 字段约束注解规范、Drools 规则模板、quarantine 处理 SOP、六维评分看板、对账任务模板、Code Review 检查项（必查字段校验） |
 
-### 反问面试官
+### 现场对话示例
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+**面试官**：你说规则用 Drools 配置化，但规则改错了线上崩了怎么办？
 
+**候选人**：规则走版本化和灰度。新规则先以 WARN 模式灰度 10% 流量跑一周，看 dq_false_block_rate（误拦截率）和 quarantine 增量。误拦截率 < 0.01% 才升到 QUARANTINE/BLOCK 全量。规则表带 version 和 gray_percent 字段，可秒级回滚到上一版本。极端情况有全局降级开关——所有 BLOCK 临时降为 WARN，保证主链路可用。
+
+**面试官**：对账发现 ES 和主库库存不一致，怎么处理？
+
+**候选人**：先看不一致的规模和方向。如果 ES 比 DB 少（消费者看到库存偏低，保守），自动补偿把 DB 值同步到 ES 即可。如果 ES 比 DB 多（可能超卖），不能直接覆盖 ES（可能正在下单），要先冻结相关 SKU 的下单，确认无在途订单后再同步，同步后解冻。所有补偿记录到 reconcile_log 表，可审计。diff_rate > 1% 不自动补偿，告警人工介入排查根因（是同步链路断了还是数据被恶意篡改）。
+
+## 常见考点
+
+1. **数据质量六维度怎么记？**——完整性（非空）、准确性（值对）、一致性（跨系统同）、唯一性（不重复）、及时性（延迟可控）、有效性（格式合规）。口诀"完准一唯及有"。
+2. **强校验和弱校验怎么选？**——核心交易链路用强校验（BLOCK 拒绝），但有降级路径；非核心用弱校验（WARN/QUARANTINE）。判断依据是"脏数据漏过的业务损失"vs"误拦截的可用性损失"。
+3. **对账为什么是 T+1 不是实时？**——实时对账成本高（双流 JOIN），T+1 批量对账覆盖大部分场景。资金级强一致用实时对账（Flink 双流），一般数据用 T+1。
+4. **数据血缘有什么用？**——质量追溯（发现问题回溯根因）、影响分析（源头改动评估下游影响）、合规审计（GDPR 数据删除要追溯所有副本）。

@@ -9,259 +9,414 @@ tags:
 - 隔离
 - 安全
 feynman:
-  essence: 多租户架构与数据隔离策略的核心不是背概念，而是在企业级生产系统里识别业务目标、流量形态、失败模式、责任边界和一致性要求，再用可观测、可回滚、可扩展的工程手段落地。
-  analogy: 像设计一座繁忙车站：入口要限流，站台要隔离，调度要有预案，监控要能第一时间看见拥堵点。
-  first_principle: 架构设计的本质是在约束下分配资源与风险；任何方案都要回答正确性、性能、成本、复杂度和演进性五个问题。
+  essence: 多租户隔离有三种物理形态：独立数据库（隔离最强成本最高）、共享数据库独立 Schema（中间态）、共享数据库共享 Schema（在表里加 tenant_id 字段，成本最低但隔离最弱）。SaaS 系统通常混合用——大客户独立库，中小客户共享库加 tenant_id。核心机制是"路由层 + 数据层"：路由层根据请求识别租户，数据层保证租户间数据物理或逻辑隔离。
+  analogy: 像写字楼出租。独立数据库是"独栋别墅"（一个租户一栋，私密最强但贵）；独立 Schema 是"同楼不同层"（一栋楼里租一层，电梯分卡）；共享 Schema 是"开放式工位"（同一层不同工位，靠工位号区分）。小公司租工位（共享 Schema），大公司包一层（独立 Schema），超大户买独栋（独立数据库）。
+  first_principle: 为什么要多租户？因为 SaaS 服务的多个客户共享同一套代码，但数据必须隔离。独立数据库的隔离成本是"每个租户一套 DB 实例"（贵但安全），共享 Schema 的成本是"每条数据带 tenant_id 且查询必须过滤"（便宜但隔离弱）。选型本质是在"隔离强度"和"成本"之间权衡。
   key_points:
-  - 先讲场景和指标，再讲技术方案
-  - 区分强一致、最终一致、可补偿三类链路
-  - 用隔离、限流、降级、重试、幂等控制失败扩散
-  - 用监控、压测、灰度、回滚保证方案可验证
-  - 面试回答要给出取舍、证据和落地路径，不要只罗列组件
+  - 三种隔离模式：DB-per-tenant / Schema-per-tenant / Shared-DB-with-tenant_id
+  - 租户识别：域名（acme.saas.com）/ 请求头（X-Tenant-Id）/ JWT 中的 tenant claim
+  - 数据层隔离：MyBatis 拦截器自动追加 WHERE tenant_id=?，或动态数据源路由
+  - 资源配额：每个租户的存储/请求/算力上限，防止大租户挤占小租户
+  - 邻居噪音问题（Noisy Neighbor）：共享资源下一个租户的高负载影响其他租户
 first_principle:
-  problem: 面对“多租户架构与数据隔离策略”这类开放题，如何从架构师视角给出可落地、可追问的答案？
+  problem: SaaS 服务 N 个租户，如何用最低成本保证租户间数据绝对隔离？
   axioms:
-  - 业务目标决定架构边界，技术选型不能脱离 SLA、数据规模和团队能力
-  - 分布式系统默认会出现超时、重复、乱序、部分失败和数据延迟
-  - 架构方案必须能被观测、压测、灰度和回滚，否则线上风险不可控
-  rebuild: 从场景、指标和生产证据出发，拆出核心对象、读写链路、状态变化和失败模式；对核心链路做一致性与容量设计，对非核心链路做异步化和降级；最后补齐监控告警、压测验收、灰度回滚、事故预案和团队沉淀。
+  - 租户数据隔离是合规底线（GDPR/等保要求），泄露是严重事故
+  - 独立 DB 隔离最强但成本随租户线性增长（万级租户不可行）
+  - 共享 DB + tenant_id 成本最低但隔离靠应用层保证（拦截器不能漏）
+  rebuild: 分层隔离。大客户（KA，< 5%）用独立数据库，合规要求高且付费得起；腰部客户（20%）用独立 Schema，同库不同 Schema 隔离；长尾客户（75%）共享 Schema + tenant_id 字段，成本最优。租户识别在网关层（从域名/JWT 解析 tenant_id 放入上下文），数据隔离在 MyBatis 拦截器（自动 WHERE tenant_id），资源隔离在中间件（每租户限流配额）。
 follow_up:
-- 如果流量扩大 10 倍，你会先扩哪里？——先看瓶颈指标：CPU、连接池、数据库 QPS、缓存命中率、队列堆积和 P99，再决定水平扩容、缓存、分片或异步化。
-- 如果下游依赖不稳定，你怎么保护主链路？——设置超时、熔断、限流、隔离线程池、降级结果和补偿任务，避免重试风暴。
-- 如何证明方案有效？——用容量压测、故障演练、灰度指标、告警看板和回滚预案闭环验证。
-- 如果面试官连续追问“为什么”？——每一层都回到业务目标、生产证据、边界取舍、风险兜底和验证指标。
+  - tenant_id 泄露（跨租户访问）怎么防？——MyBatis 拦截器强制注入 WHERE tenant_id，所有 SQL 必须经过拦截器。定期扫描"没有 tenant_id 条件的查询"（用 SQL 审计）。测试用"租户 A 的 token 查租户 B 的数据"必须返回空。
+  - 独立 Schema 怎么做动态切换？——动态数据源（AbstractRoutingDataSource），每次请求根据 tenant_id 路由到对应的 DataSource。或用 Schema 切换（SET search_path TO tenant_acme）。
+  - 多租户的备份和恢复怎么做？——共享 Schema 按 tenant_id 条件导出（SELECT * FROM order WHERE tenant_id=?）；独立 Schema 直接备份 Schema。恢复时不能覆盖其他租户数据。
+  - 租户迁移（从共享迁到独立）怎么做？——双写期（新老都写）→ 数据同步（历史迁移）→ 切读（读新库）→ 停老。中间做数据校验。
+  - 多租户和分库分表怎么结合？——分片键通常用 tenant_id（大租户独占分片），或 tenant_id + 业务 ID 复合分片。保证同一租户数据在同一分片，跨租户查询（平台运营）走专用通道。
 memory_points:
-- 架构题先讲约束：规模、SLA、一致性、成本、团队能力
-- 技术方案要覆盖读写链路、异常链路和演进路径
-- 稳定性“四件套”：限流、降级、隔离、可观测
-- 一致性“三板斧”：事务边界、幂等去重、补偿对账
-- 企业级表达公式：场景 -> 目标 -> 证据 -> 方案 -> 取舍 -> 风险 -> 验证 -> 沉淀
+  - 三种隔离：独立 DB（最强贵）/ 独立 Schema（中间）/ 共享 Schema+tenant_id（便宜弱）
+  - 租户识别：域名 / 请求头 / JWT claim
+  - 数据隔离：MyBatis 拦截器自动 WHERE tenant_id
+  - 资源隔离：每租户限流配额，防 Noisy Neighbor
+  - 混合策略：KA 独立库，长尾共享库
 ---
 
-# 【Java 后端架构师】多租户架构与数据隔离策略？
+# 【Java 后端架构师】多租户架构与数据隔离策略
 
-> 适用场景：高并发高可用。这类题按企业级架构师面试标准整理：既考察技术深度，也考察生产证据、风险取舍、跨团队落地和被连续追问时的表达稳定性。
+> 适用场景：JD 核心技术。京东云上的 SaaS 服务（如商家开放平台）服务百万商家，每个商家是一个租户。A 商家的订单数据绝不能泄露给 B 商家——这不仅是技术问题，是法律底线（数据安全法）。多租户隔离的核心是"成本 vs 隔离强度"的权衡。
 
-## 一、先明确问题边界
+## 一、概念层：三种隔离模式对比
 
-回答时先补齐五个上下文。企业级面试里，边界说不清，后面的方案通常都会被继续追问。
+**隔离模式全景**（面试必考选型）：
 
-| 维度 | 面试中要主动说明 |
-|------|------------------|
-| 业务目标 | 是提升吞吐、降低延迟、保证一致性，还是支撑快速迭代 |
-| 数据规模 | QPS、数据量、热点比例、读写比、峰谷差 |
-| 正确性要求 | 强一致、最终一致、可人工修复，还是资金级零差错 |
-| 运维约束 | 部署环境、团队熟悉度、成本预算、可观测能力 |
-| 生产证据 | 当前有哪些日志、指标、trace、压测、告警或事故记录能证明问题存在 |
+| 模式 | 隔离强度 | 成本 | 运维复杂度 | 适用场景 |
+|------|---------|------|-----------|---------|
+| **独立数据库** | 最强 | 高（每租户一实例） | 高（万级实例难管） | KA 客户、金融、政务 |
+| **独立 Schema** | 中 | 中（共享实例） | 中（Schema 管理） | 腰部客户、中型企业 |
+| **共享 Schema + tenant_id** | 弱（靠应用层） | 低 | 低 | 长尾客户、小微企业 |
 
-没有这些边界，任何“最佳实践”都可能是错的。例如 多租户 方案在低 QPS 单体里可能过度设计，但在核心交易或风控链路里可能是底线能力。
+**成本对比示例**（1 万租户）：
 
-## 二、推荐架构思路
+```
+独立数据库：1 万个 MySQL 实例 × 200 元/月 = 200 万/月（不可行）
+独立 Schema：100 个实例 × 1 万 Schema/实例 × 200 元 = 2 万/月（可行）
+共享 Schema：10 个实例 × 200 元 = 2000 元/月（最省）
 
-1. **核心链路先保证正确性**：把状态机、幂等键、唯一约束、事务边界和补偿任务设计清楚，避免用缓存或异步消息掩盖一致性问题。
-2. **高并发链路做分层保护**：入口限流，服务隔离，热点缓存，队列削峰，下游熔断，必要时给非核心能力返回降级结果。
-3. **数据链路做可追溯**：关键事件要有业务流水号、traceId、版本号和审计日志，方便排查重复、乱序和补偿。
-4. **演进上避免一次性大改**：优先通过旁路、双写、影子读、灰度切流推进，保留快速回滚路径。
+京东商家开放平台的实践：
+  - KA 商家（Top 100，如联想、华为）：独立数据库
+  - 腰部商家（Top 1 万）：独立 Schema（共享实例）
+  - 长尾商家（100 万+）：共享 Schema + tenant_id
+```
 
-## 三、技术落地点
+## 二、机制层：租户识别与上下文传递
 
-- **Java 层**：合理使用线程池、连接池、异步编排、上下文透传和异常分类；线程池必须按业务隔离，避免一个慢依赖拖垮全站。
-- **存储层**：MySQL 负责强约束和核心状态，Redis 负责热点与加速，ES/向量库负责搜索召回，消息队列负责异步解耦。
-- **服务治理层**：统一超时、重试、限流、熔断、灰度、配置中心和服务发现，不把治理逻辑散落在业务代码里。
-- **可观测层**：指标看吞吐与错误，日志看业务事实，链路追踪看调用路径；三者必须能通过 traceId 串起来。
+**租户识别的三种方式**：
 
-## 四、常见坑
+```java
+// 方式 1：域名解析（acme.saas.com → tenant=acme）
+@Component
+public class DomainTenantResolver implements TenantResolver {
+    @Override
+    public String resolve(HttpServletRequest request) {
+        String host = request.getServerName();   // acme.saas.com
+        String subdomain = host.split("\\.")[0]; // acme
+        return tenantMappingService.getTenantId(subdomain);
+    }
+}
 
-1. **只讲组件，不讲约束**：比如直接说“加 Redis、上 MQ、做分库分表”，但没有解释为什么需要、怎么保证一致性。
-2. **重试没有幂等**：超时后客户端或上游重试，如果没有业务幂等键，会导致重复扣款、重复发券、重复创建订单。
-3. **异步化后无人兜底**：消息发送失败、消费失败、顺序错乱、积压超时都需要补偿和告警。
-4. **监控只看机器不看业务**：CPU 正常不代表订单正常，架构师必须设计业务成功率、库存差异、对账差错等指标。
+// 方式 2：请求头（X-Tenant-Id: 12345）
+@Component
+public class HeaderTenantResolver implements TenantResolver {
+    @Override
+    public String resolve(HttpServletRequest request) {
+        String tenantId = request.getHeader("X-Tenant-Id");
+        if (tenantId == null) throw new TenantNotFoundException("缺少租户标识");
+        return tenantId;
+    }
+}
 
-## 五、面试回答模板
+// 方式 3：JWT Claim（token 里带 tenant_id）
+@Component
+public class JwtTenantResolver implements TenantResolver {
+    @Override
+    public String resolve(HttpServletRequest request) {
+        String token = extractToken(request);
+        Claims claims = jwtParser.parse(token).getBody();
+        return claims.get("tenant_id", String.class);   // 从 JWT 解析
+    }
+}
+```
 
-可以按下面结构作答：
+**租户上下文透传**（ThreadLocal + RPC 透传）：
 
-> 我会先确认业务目标、SLA 和已有生产证据。对于“多租户架构与数据隔离策略”，核心是 多租户 与 隔离 的平衡。我的方案会先保主链路正确性：关键状态落 MySQL，并用唯一键、版本号或状态机保证幂等；热点读用缓存，但必须有失效、回源保护和一致性窗口；非核心动作走 MQ 异步，消费端做幂等、重试、死信和补偿；入口到下游统一配置超时、限流、熔断和降级。上线前我会做压测和故障演练，上线时按租户、地域或流量标签灰度，上线后用指标、日志、trace 和业务对账证明效果，必要时能快速回滚。
+```java
+// 租户上下文（ThreadLocal 存储）
+public class TenantContext {
+    private static final ThreadLocal<String> CONTEXT = new ThreadLocal<>();
 
-## 六、加分点
+    public static void setTenantId(String tenantId) { CONTEXT.set(tenantId); }
+    public static String getTenantId() {
+        String tenantId = CONTEXT.get();
+        if (tenantId == null) throw new IllegalStateException("未设置租户");
+        return tenantId;
+    }
+    public static void clear() { CONTEXT.remove(); }
+}
 
-- 能讲清楚“为什么现在做、为什么这样做、为什么不做更复杂方案”，体现优先级和成本意识。
-- 能把失败场景说具体：超时、重复、乱序、主从延迟、缓存不一致、队列堆积、数据补偿失败。
-- 能给出可验证指标：P99、错误率、积压量、缓存命中率、GC 停顿、慢 SQL、业务成功率、人工处理量。
-- 能说明线上演进路径：先旁路观测，再灰度放量，最后切主并保留回滚。
-- 能接受苏格拉底式追问：每个结论都能继续回答“证据是什么、边界在哪里、失败怎么办、如何沉淀”。
+// Web 过滤器设置租户上下文
+@Component
+public class TenantFilter implements Filter {
+    @Autowired private TenantResolver resolver;
 
-## 七、企业级面试定位：从“会用”到“能负责”
+    @Override
+    public void doFilter(ServletRequest req, ServletResponse resp, FilterChain chain) {
+        HttpServletRequest request = (HttpServletRequest) req;
+        try {
+            String tenantId = resolver.resolve(request);
+            TenantContext.setTenantId(tenantId);
+            chain.doFilter(req, resp);
+        } finally {
+            TenantContext.clear();   // 关键：清理 ThreadLocal 防泄露
+        }
+    }
+}
 
-企业级面试不会只问“多租户 是什么”，而是看你能不能对一条真实生产链路负责。回答“多租户架构与数据隔离策略”时，要把自己放到 **核心系统 owner** 的位置：既要能做方案，也要能解释收益、风险、成本和上线后的治理。
+// RPC 透传（Dubbo Filter 把 tenant_id 放到 RPC context）
+@Activate(group = CommonConstants.CONSUMER)
+public class TenantRpcFilter implements Filter {
+    @Override
+    public Result invoke(Invoker<?> invoker, Invocation invocation) {
+        // 消费端：把当前租户放入 RPC 附件
+        String tenantId = TenantContext.getTenantId();
+        invocation.setAttachment("tenant_id", tenantId);
+        return invoker.invoke(invocation);
+    }
+}
 
-| 面试官考察点 | 企业级回答方式 |
-|--------------|----------------|
-| 业务价值 | 先说明这个问题影响 高并发高可用 中的哪条核心链路：交易成功率、履约时效、搜索转化、成本水位还是研发效率 |
-| 技术边界 | 讲清 多租户、隔离、安全 分别解决什么，不把所有问题都推给一个组件 |
-| 生产证据 | 用 tenant_context_miss、authz_deny_count、cross_tenant_alarm、audit_log_coverage 证明判断，而不是用“感觉变快了”证明方案 |
-| 风险控制 | 上线前有压测、灰度、回滚、降级和数据校验；上线后有看板、告警、复盘和 owner |
-| 组织落地 | 能沉淀规范、模板、starter、平台能力或 Code Review 清单，让团队重复使用 |
+@Activate(group = CommonConstants.PROVIDER)
+public class TenantRpcProviderFilter implements Filter {
+    @Override
+    public Result invoke(Invoker<?> invoker, Invocation invocation) {
+        // 提供端：从 RPC 附件恢复租户上下文
+        String tenantId = invocation.getAttachment("tenant_id");
+        TenantContext.setTenantId(tenantId);
+        try {
+            return invoker.invoke(invocation);
+        } finally {
+            TenantContext.clear();
+        }
+    }
+}
+```
 
-### 企业级回答骨架
+## 三、机制层：共享 Schema 的数据隔离
 
-1. **先定目标**：这个方案是为了提升 SLA、降低成本、减少人工处理，还是支撑业务增长。
-2. **再定边界**：哪些事情属于 多租户 的职责，哪些应该交给数据库、缓存、消息、网关、平台或人工流程。
-3. **拆主链路**：把入口、服务、数据、异步、观测、应急六段讲清楚。
-4. **讲证据链**：用日志、指标、trace、审计流水、压测结果和灰度对比证明方案有效。
-5. **讲演进**：先最小可行治理，再平台化沉淀，最后形成规范和自动化。
+**MyBatis 拦截器自动注入 tenant_id**（核心机制）：
 
-### 面试中要主动补的生产细节
+```java
+@Intercepts(@Signature(type = StatementHandler.class,
+    method = "prepare", args = {Connection.class, Integer.class}))
+public class TenantInterceptor implements Interceptor {
 
-- **容量**：峰值 QPS、P99、连接池、线程池、分区数、实例规格和扩容阈值。
-- **一致性**：幂等键、唯一约束、状态机、版本号、补偿任务和对账机制。
-- **发布**：灰度维度、回滚条件、配置开关、数据迁移方案和失败止损窗口。
-- **协作**：哪些团队接入，如何迁移，如何保障兼容，如何处理历史数据和遗留调用方。
-- **成本**：机器成本、存储成本、研发成本、运维成本和复杂度成本。
+    @Override
+    public Object intercept(Invocation invocation) throws Throwable {
+        StatementHandler handler = (StatementHandler) invocation.getTarget();
+        BoundSql boundSql = handler.getBoundSql();
+        String sql = boundSql.getSql();
 
-## 八、苏格拉底式面试追问
+        // 检查是否是多租户表（有 tenant_id 字段的表）
+        String tableName = parseTableName(sql);
+        if (!isMultiTenantTable(tableName)) {
+            return invocation.proceed();   // 非多租户表不过滤
+        }
 
-下面这组追问不是让你背答案，而是训练你在面试现场一层层逼近本质。每一问都要先回答“为什么”，再回答“怎么做”，最后回答“如何证明”。
+        // 获取当前租户
+        String tenantId = TenantContext.getTenantId();
 
-| 追问层级 | 面试官可能这样问 | 高分回答方向 |
-|----------|------------------|--------------|
-| 目标追问 | 你为什么认为“多租户架构与数据隔离策略”值得做，而不是先做别的优化？ | 用业务 SLA、用户影响面、成本水位和故障频率排序，说明优先级不是拍脑袋 |
-| 证据追问 | 你手里有哪些证据能证明问题真实存在？ | 拿 tenant_context_miss、authz_deny_count、cross_tenant_alarm、trace、日志、慢查询、告警和业务流水交叉验证 |
-| 边界追问 | 这个方案的边界在哪里，哪些问题它解决不了？ | 说明 多租户 负责的范围，以及必须依赖 隔离、安全 或业务流程兜底的部分 |
-| 反例追问 | 什么情况下你不会采用这个方案？ | 低流量、低风险、团队不具备运维能力、数据一致性收益不明显时，先做轻量治理 |
-| 风险追问 | 方案上线后最可能引入的新风险是什么？ | 主动点出 缓存 Key 缺少租户维度造成串数据，并说明灰度、开关、回滚、补偿和告警阈值 |
-| 验证追问 | 你如何证明上线后真的变好了？ | 给出上线前基线、灰度对照组、核心指标、观察窗口和复盘结论 |
-| 沉淀追问 | 如果让团队以后少踩坑，你会沉淀什么？ | 沉淀接入模板、监控大盘、告警规则、演练脚本、最佳实践和 Code Review checklist |
+        // 用 JSqlParser 解析 SQL，注入 tenant_id 条件
+        Statement stmt = CCJSqlParserUtil.parse(sql);
+        Select select = (Select) stmt;
+        PlainSelect plainSelect = (PlainSelect) select.getSelectBody();
 
-### 现场对话示例
+        EqualsTo tenantCondition = new EqualsTo(
+            new Column(tableName + ".tenant_id"),
+            new StringLiteral(tenantId)
+        );
 
-**面试官**：你说要做“多租户架构与数据隔离策略”，你怎么证明不是过度设计？  
-**候选人**：我会先看影响面。如果只是局部低频问题，我会先补监控、限流或 SQL 优化；如果它已经影响核心 SLA、造成频繁告警或人工补偿成本很高，才进入架构治理。判断依据不是主观感觉，而是 tenant_context_miss、authz_deny_count、业务失败率和事故记录。
+        Expression where = plainSelect.getWhere();
+        if (where == null) {
+            plainSelect.setWhere(tenantCondition);
+        } else {
+            plainSelect.setWhere(new AndExpression(where, tenantCondition));
+        }
 
-**面试官**：如果你判断错了呢？  
-**候选人**：所以我不会一次性大改。我会先做旁路观测和灰度验证，保留回滚开关。灰度期间如果 tenant_context_miss 没有改善，或者 authz_deny_count 反而变差，就停止扩大范围，回到假设层重新复盘。
+        // 替换 SQL
+        MetaObject metaObject = SystemMetaObject.forObject(boundSql);
+        metaObject.setValue("sql", stmt.toString());
+        return invocation.proceed();
+    }
+}
 
-**面试官**：你怎么让这个方案被团队长期执行？  
-**候选人**：我会把它沉淀成标准动作：设计评审看边界，开发阶段看幂等和异常链路，发布阶段看灰度和回滚，线上阶段看 tenant_context_miss、authz_deny_count、cross_tenant_alarm。这样它不是个人经验，而是团队机制。
+// 原 SQL: SELECT * FROM t_order WHERE status = 'PAID'
+// 拦截后: SELECT * FROM t_order WHERE status = 'PAID' AND t_order.tenant_id = 'acme'
 
-## 九、专项架构深挖：对象、链路、失败模式
+// INSERT 自动填充 tenant_id
+@Intercepts(@Signature(type = Executor.class, method = "update",
+    args = {MappedStatement.class, Object.class}))
+public class TenantInsertInterceptor implements Interceptor {
+    @Override
+    public Object intercept(Invocation invocation) throws Throwable {
+        Object entity = invocation.getArgs()[1];
+        if (entity instanceof MultiTenant) {
+            MultiTenant mt = (MultiTenant) entity;
+            if (mt.getTenantId() == null) {
+                mt.setTenantId(TenantContext.getTenantId());  // 自动填充
+            } else if (!mt.getTenantId().equals(TenantContext.getTenantId())) {
+                throw new SecurityException("租户 ID 不匹配，疑似越权");  // 防篡改
+            }
+        }
+        return invocation.proceed();
+    }
+}
+```
 
-这一题不要停在“知道 多租户”的层面，面试官真正想听的是你如何把它放进一条可运行、可观测、可演进的 Java 后端链路里。
+## 四、机制层：独立 Schema 的动态数据源
 
-| 深挖点 | 回答要点 |
-|--------|----------|
-| 核心对象 | 租户、账号、角色、资源、数据范围；tenant_id、数据权限表达式、行列级权限；审计日志、越权拦截和脱敏策略 |
-| 设计主线 | 租户上下文从网关透传到应用、缓存和数据库；强隔离优先独立库表，弱隔离用租户字段和权限过滤；权限校验前置到查询构造和领域服务边界 |
-| 失败模式 | 缓存 Key 缺少租户维度造成串数据；后台任务绕过权限过滤；SQL 拼接遗漏 tenant_id 导致越权查询 |
-| 验证指标 | tenant_context_miss、authz_deny_count、cross_tenant_alarm、audit_log_coverage |
+**AbstractRoutingDataSource 动态路由**：
 
-**架构拆解**：
+```java
+public class TenantRoutingDataSource extends AbstractRoutingDataSource {
 
-1. **入口层**：先确认请求来源、鉴权方式、流量峰值和是否允许降级；涉及 隔离 时，要说明入口是否需要限流、签名、灰度标签或租户隔离。
-2. **服务层**：把 多租户架构与数据隔离策略 拆成同步主链路和异步旁路；同步链路只保留必须立即影响用户结果的逻辑，旁路任务通过消息或任务调度补齐。
-3. **数据层**：核心状态写入要有幂等键、唯一索引或版本号；读链路可以引入缓存、搜索索引或预计算，但要交代失效、回源和一致性窗口。
-4. **治理层**：为 安全 设计超时、重试、熔断、降级、告警和回滚开关；所有策略都要能按业务线、租户或流量标签灰度。
+    @Override
+    protected Object determineCurrentLookupKey() {
+        return TenantContext.getTenantId();   // 返回当前租户 ID 作为路由键
+    }
+}
 
-**高分回答细节**：
+// 配置：每个租户一个 DataSource
+@Configuration
+public class DataSourceConfig {
+    @Bean
+    @Primary
+    public DataSource dataSource() {
+        TenantRoutingDataSource routing = new TenantRoutingDataSource();
+        Map<Object, Object> targets = new HashMap<>();
+        // KA 租户独立数据源
+        targets.put("lenovo", buildDataSource("jdbc:mysql://db-lenovo:3306/lenovo"));
+        targets.put("huawei", buildDataSource("jdbc:mysql://db-huawei:3306/huawei"));
+        // 共享租户走默认数据源
+        routing.setDefaultTargetDataSource(buildDataSource("jdbc:mysql://db-shared:3306/saas"));
+        routing.setTargetDataSources(targets);
+        return routing;
+    }
+}
+```
 
-- 不要只说“可以用 多租户”，要说明它解决的是吞吐、延迟、一致性、成本还是研发效率。
-- 如果方案引入缓存、队列或异步任务，要补一句“如何发现积压、如何补偿、如何对账”。
-- 如果方案涉及数据库或状态流转，要把唯一约束、乐观锁、状态机非法跳转拦截讲出来。
-- 如果方案涉及平台化，要说明接入规范、版本兼容和多业务线差异化扩展方式。
+## 五、实战层：资源隔离与 Noisy Neighbor 防护
 
-## 十、二轮场景追问与项目表达
+**租户级限流**（防一个租户打挂所有租户）：
 
-面试进入二轮时，问题通常会从“你知道什么”升级为“你是否真的落过地”。可以准备下面这套追问答案。
+```java
+@Component
+public class TenantRateLimiter {
+    // 每个租户独立的令牌桶
+    private final Map<String, RateLimiter> limiters = new ConcurrentHashMap<>();
 
-### 追问 1：如果线上突然抖动，你怎么定位？
+    @PostConstruct
+    public void init() {
+        // 从配置加载每租户的 QPS 配额
+        tenantConfigRepo.findAll().forEach(config -> {
+            limiters.put(config.getTenantId(),
+                RateLimiter.create(config.getMaxQps()));   // 如 KA: 1000 QPS，免费版: 10 QPS
+        });
+    }
 
-先从用户感知指标切入：成功率、P99、错误码分布和核心业务量是否异常。然后沿 traceId 逐层下钻到网关、应用、线程池、连接池、缓存、数据库和消息队列。针对“多租户架构与数据隔离策略”，重点看 tenant_context_miss、authz_deny_count、cross_tenant_alarm，确认是容量问题、依赖问题、数据热点，还是最近变更引起。
+    public void check(String tenantId) {
+        RateLimiter limiter = limiters.get(tenantId);
+        if (limiter == null) limiter = limiters.get("default");  // 默认配额
+        if (!limiter.tryAcquire()) {
+            throw new RateLimitException("租户[" + tenantId + "]超过 QPS 配额");
+        }
+    }
+}
 
-### 追问 2：如果让你重构现有系统，你怎么控风险？
+// 网关层拦截
+@Component
+public class TenantRateLimitFilter implements Filter {
+    @Autowired private TenantRateLimiter limiter;
 
-我会采用“旁路观测 -> 双写校验 -> 小流量灰度 -> 分批切主 -> 保留回滚”的节奏。第一阶段不改变用户链路，只采集新方案结果；第二阶段对新旧结果做 diff；第三阶段按租户、地域或用户桶逐步放量。涉及 多租户 和 隔离 的地方，要提前定义不一致阈值，一旦超过阈值立即自动降级或回滚。
+    @Override
+    public void doFilter(ServletRequest req, ServletResponse resp, FilterChain chain) {
+        String tenantId = TenantContext.getTenantId();
+        limiter.check(tenantId);   // 超额直接拒绝
+        chain.doFilter(req, resp);
+    }
+}
+```
 
-### 追问 3：你如何判断这个方案值得做？
+**存储配额**（防一个租户塞满共享库）：
 
-从收益和成本两边算：收益看是否降低 P99、错误率、人工处理量、资源成本或研发交付周期；成本看引入了多少新组件、运维复杂度、数据一致性风险和团队学习成本。如果 安全 不是当前主要瓶颈，我会先选择更小的治理动作，比如补监控、加开关、优化 SQL、拆线程池，而不是直接重构。
+```java
+// 租户存储用量监控
+@Scheduled(cron = "0 0 2 * * ?")   // 每天凌晨统计
+public void checkTenantStorageQuota() {
+    for (String tenantId : allTenantIds) {
+        long used = storageMetricService.getTenantStorageBytes(tenantId);
+        long quota = tenantConfigRepo.findById(tenantId).getStorageQuota();
+        if (used > quota * 0.9) {
+            alertService.send("租户[" + tenantId + "]存储使用率达 90%");
+        }
+        if (used > quota) {
+            // 超额：禁止写入（INSERT/UPDATE 返回错误）
+            tenantConfigRepo.updateStatus(tenantId, "STORAGE_EXCEEDED");
+        }
+    }
+}
+```
 
-### STAR 项目表达
+## 六、底层本质：隔离的成本曲线
 
-- **S（背景）**：原系统在 多租户 场景下出现性能、稳定性或协作边界问题，影响核心链路 SLA。
-- **T（任务）**：目标是在不影响业务连续性的前提下，把 多租户架构与数据隔离策略 做到可扩展、可观测、可回滚。
-- **A（行动）**：梳理核心对象和状态机，拆分同步/异步链路，引入幂等、补偿、限流、降级和灰度；同时建设 tenant_context_miss、authz_deny_count 看板。
-- **R（结果）**：用压测、灰度和线上指标证明收益，例如 P99 下降、错误率下降、积压清零、发布回滚时间缩短或人工处理量减少。
+回到第一性：**多租户隔离的本质是"用多少成本保证多大的隔离强度"**。
 
-### 二轮复盘清单
+```
+隔离强度
+  ↑
+  │  独立 DB ───────────────  最强（物理隔离），成本随租户线性增长
+  │
+  │  独立 Schema ──────────  中（逻辑隔离），成本共享实例
+  │
+  │  共享 Schema+tenant_id   弱（应用层隔离），成本最优
+  │
+  └──────────────────────→ 租户数量
+```
 
-- 这个方案最脆弱的单点在哪里？
-- 数据不一致时谁发现、谁补偿、谁对账？
-- 扩容 10 倍时，瓶颈最可能先出现在 CPU、网络、数据库、缓存还是队列？
-- 如果业务规则频繁变化，配置化、规则引擎和代码发布的边界怎么划？
-- 如何向非技术负责人解释这次架构改造的收益和风险？
+- **独立 DB 的成本是 O(租户数)**：每个租户一个实例，万级租户不可行。但隔离最强（物理隔离，不存在应用层 bug 导致泄露的可能）。
+- **共享 Schema 的成本是 O(1)**：所有租户共享一套 DB，成本固定。但隔离靠应用层（MyBatis 拦截器），一旦拦截器有 bug 或遗漏，就跨租户泄露。
 
-## 十一、面试官 5 个企业级追问
+**为什么混合模式是实践最优**：5% 的 KA 客户贡献 80% 收入，用独立 DB 保证合规和安全；75% 的长尾客户共享 Schema，成本最优。中间 20% 用独立 Schema 平衡。这是"按价值分配成本"的工程经济学——花钱在重要的地方。
 
-1. **你在真实项目里怎么判断“多租户架构与数据隔离策略”是不是当前最该解决的问题？**  
-   先用业务指标和系统指标交叉验证：业务看成功率、转化率、资金差错、人工处理量；系统看 tenant_context_miss、authz_deny_count、cross_tenant_alarm。如果问题只影响局部体验，先小步治理；如果已经影响核心 SLA、成本或交付效率，再立项做架构升级。
+**Noisy Neighbor 的本质**：共享资源下，一个租户的高负载消耗共享资源（CPU/IO/连接池），影响其他租户。解法是资源隔离——每租户独立的限流配额（QPS）、独立的连接池、独立的线程池。极端情况下用容器级隔离（每租户独立 Pod）。
 
-2. **如果方案上线后效果不明显，你会如何复盘？**  
-   我会拆成目标、假设、动作、指标四层复盘：目标是否定义清楚，多租户 是否真是瓶颈，隔离 的指标是否能证明收益，灰度样本是否足够。复盘结论不能停留在“继续观察”，必须给出继续、回滚、缩小范围或调整方案四选一。
+## 七、AI 架构师加问：5 个
 
-3. **这个方案最大的技术风险是什么？你怎么提前兜底？**  
-   最大风险通常来自 缓存 Key 缺少租户维度造成串数据。上线前要准备压测基线、灰度策略、降级开关、数据校验和回滚脚本；上线后用 tenant_context_miss 和 authz_deny_count 做分钟级观察，一旦越过阈值立即止损。
+1. **用 AI 检测多租户越权漏洞，怎么做？**
+   静态扫描：所有 Mapper SQL 是否经过 TenantInterceptor（有 SQL 绕过 MyBatis 原生 JDBC 就是风险）；动态测试：用租户 A 的 token 查租户 B 的数据 ID，断言返回空。AI 训练样本：历史跨租户泄露事故 + 正常多租户配置。
 
-4. **如果团队里有人反对你的设计，你怎么说服？**  
-   我不会用“架构正确”压人，而是把方案拆成收益、成本、风险和替代方案。对于 安全，给出最小可行改造路径：先补观测和开关，再做局部灰度，最后再扩大范围。能用数据证明的地方用数据，不能证明的地方先做 PoC。
+2. **AI 辅助租户资源配置（动态配额），怎么做？**
+   AI 根据租户历史 QPS、存储增长、付费等级动态调整配额。付费用户高峰期自动扩容（不影响其他租户），免费用户严控配额。但调整要有边界（不能超过物理容量），且要人工确认大额调整。
 
-5. **你如何把这个能力沉淀成团队可复用资产？**  
-   把一次性方案沉淀成规范、模板、starter、组件或平台能力：包括接入文档、默认配置、监控大盘、告警规则、演练脚本和 Code Review 清单。对于“多租户架构与数据隔离策略”，至少要沉淀 租户、账号、角色、资源、数据范围 的建模规范，以及 tenant_context_miss、authz_deny_count 的验收标准。
+3. **多租户 AI 推理，怎么隔离？**
+   模型共享（同一模型服务所有租户），但数据隔离——推理请求带 tenant_id，特征数据按租户隔离存储，结果缓存按 tenant_id 分 key。模型的 prompt 模板按租户定制（KA 客户私有模板）。
 
-## 十二、AI 架构师加问：5 个 AI 相关问题
+4. **多租户系统接入 RAG，知识库怎么隔离？**
+   向量库按 tenant_id 分 namespace（或分 collection），检索时强制带 tenant_id 过滤。通用知识库（产品文档）所有租户共享，私有知识库（租户上传）严格隔离。AI 检索前先做租户鉴权。
 
-1. **如果把“多租户架构与数据隔离策略”改造成 AI Copilot 或 Agent 能力，你会让 AI 接管哪一段，哪些动作必须保留确定性代码？**  
-   我会让 AI 负责意图理解、方案推荐、异常归因、知识检索和操作建议；真正改变核心状态的动作仍由 Java 服务、状态机、权限系统和审计流程执行。涉及 多租户 的场景，AI 输出只能作为候选决策，必须经过规则校验、权限校验和幂等保护。
+5. **AI 监测 Noisy Neighbor，怎么设计？**
+   监控每租户的资源使用（CPU/IO/连接数），用异常检测（如 Z-score）识别"突增"租户。一个租户的 QPS 突然涨 10 倍可能是异常（压测/攻击），AI 自动降级该租户的配额，保护其他租户。
 
-2. **你会如何设计 AI Infra / AI Harness 来评测这个场景的效果？**  
-   先沉淀黄金样本集：正常请求、边界请求、历史故障、恶意输入和人工专家答案；再设计离线 eval、在线灰度、人工复核和回放机制。对于“多租户架构与数据隔离策略”，至少要评估准确率、可解释性、拒答率、幻觉率、工具调用成功率，以及 tenant_context_miss、authz_deny_count 对业务链路的影响。
-
-3. **如果 AI 需要调用工具或执行运维/业务动作，你怎么控制权限和风险？**  
-   工具调用必须做强 schema、最小权限、参数校验、审批流、审计日志和预算限制。高风险动作采用“建议 -> 人工确认 -> 确定性执行 -> 结果回写”的闭环；一旦出现 缓存 Key 缺少租户维度造成串数据，要能通过 trace、tool_call_id 和业务流水快速回放。
-
-4. **这个场景接入 RAG 时，知识库、向量索引和权限过滤怎么设计？**  
-   知识库要分层：代码规范、架构文档、事故复盘、监控说明、业务 SOP；索引要支持版本、租户、密级和过期时间。检索前先做身份与数据范围过滤，检索后做引用校验和置信度判断，避免 AI 把无权限内容或过期方案带进回答。
-
-5. **你如何防止 AI 在这个系统里引入新的安全、成本和稳定性问题？**  
-   安全上防 prompt injection、敏感信息泄露、过度代理和不安全输出；成本上设置模型路由、缓存、限流、token 预算和降级模型；稳定性上监控 AI 调用延迟、失败率、fallback_rate、人工接管率和用户纠错率。AI 能力上线也要像 Java 服务一样走压测、灰度、告警和回滚。
-
-## 十三、记忆口诀与面试现场表达
+## 八、记忆口诀与面试现场表达
 
 ### 1 分钟记忆口诀
 
-记住这道题就抓 **“场景、边界、链路、风险、验证”** 五个词。脑子里可以先浮现一个画面：经验丰富的值班负责人拿着工具箱、调度台和应急预案，在处理“业务流量和系统风险同时出现”。
+抓 **"三种隔离、拦截器注 tenant_id、资源配额防邻居噪音"**。
 
-- **场景**：先说明“多租户架构与数据隔离策略”服务于什么业务目标，不要上来就堆 多租户。
-- **边界**：讲清楚哪些事情同步做，哪些事情异步做，哪些事情绝不能交给不可靠链路。
-- **链路**：入口、服务、数据、治理、观测五层串起来。
-- **风险**：主动点出 缓存 Key 缺少租户维度造成串数据、后台任务绕过权限过滤。
-- **验证**：最后落到 tenant_context_miss、authz_deny_count、cross_tenant_alarm，让面试官感觉你真的上线过。
-
-### 拟人化理解
-
-可以把“多租户架构与数据隔离策略”想成一个经验丰富的值班负责人：多租户 是他的工具箱、调度台和应急预案，隔离 是他面对的现场信号，安全 是他准备好的后手。平时他不抢业务主流程的方向盘，但一旦出现异常，他会先看指标，再控风险，最后谈优化。这样记，比死背组件名更稳。
+- **三种模式**：独立 DB（强贵）/ 独立 Schema（中）/ 共享 Schema+tenant_id（弱省）
+- **租户识别**：域名/请求头/JWT claim，ThreadLocal 透传 + RPC 附件
+- **数据隔离**：MyBatis 拦截器自动 WHERE tenant_id，INSERT 自动填充
+- **资源隔离**：每租户限流配额（QPS/存储/连接池），防 Noisy Neighbor
+- **混合策略**：KA 独立库，长尾共享库
 
 ### 面试现场 60 秒回答
 
-> 面试官如果问我“多租户架构与数据隔离策略”，我会这样答：我会先确认业务目标、规模、SLA 和一致性要求，再选择合适的架构手段。 然后我会把方案拆成主链路、旁路和兜底链路：主链路保证正确性，旁路承接异步扩展，兜底链路负责补偿、对账、降级和回滚。这个题最容易翻车的是 缓存 Key 缺少租户维度造成串数据，所以我会提前设计灰度、监控和止损阈值，重点看 tenant_context_miss、authz_deny_count。如果要进一步演进，我会先旁路验证，再小流量灰度，最后沉淀成团队规范或平台能力。
+> 多租户三种隔离模式：独立数据库（隔离最强成本最高，适合 KA 金融客户）、独立 Schema（中间态，腰部客户）、共享 Schema + tenant_id 字段（成本最优，长尾客户）。京东商家平台混合用——Top 100 商家独立库，腰部 1 万商家独立 Schema，100 万长尾商家共享 Schema。租户识别在网关层从域名/JWT 解析 tenant_id 放入 ThreadLocal，RPC 调用通过 Dubbo Filter 透传。数据隔离用 MyBatis 拦截器——SELECT 自动追加 WHERE tenant_id，INSERT 自动填充 tenant_id，业务代码无感。资源隔离每租户独立限流配额（KA 1000 QPS，免费版 10 QPS），防 Noisy Neighbor。最容易翻车的是拦截器遗漏——某条 SQL 绕过 MyBatis 原生 JDBC 导致跨租户泄露，所以要定期扫描 SQL 日志，所有查询必须带 tenant_id 条件。
 
-### 被追问时的转场话术
+## 九、苏格拉底式面试追问
 
-- **如果面试官追问细节**：我会先把链路画出来，再逐段讲入口、服务、数据、治理和观测，避免散点回答。
-- **如果面试官质疑复杂度**：我会承认不是所有场景都要上完整方案，并说明低 QPS、低风险场景可以先用更轻量的治理动作。
-- **如果面试官问线上案例**：我会按 STAR 说背景、任务、动作、结果，并用 tenant_context_miss 或 authz_deny_count 证明收益。
-- **如果面试官问 AI 改造**：我会强调 AI 做建议和归因，确定性代码做执行和审计，避免把核心状态直接交给模型。
+| 追问层级 | 面试官可能这样问 | 高分回答方向 |
+|----------|------------------|--------------|
+| 目标追问 | 为什么不直接给每个租户一套独立系统（连应用都独立）？ | 用成本说话：万级租户各一套应用 = 万套运维（监控/部署/升级成本爆炸）。共享应用 + 数据隔离是 SaaS 的成本优势所在。用 tenant_cost_ratio（每租户均摊成本）和 isolation_breach_count（隔离泄露次数）衡量 |
+| 证据追问 | 怎么证明租户隔离真的生效？ | 自动化测试：租户 A 的 token 查租户 B 的数据 ID 必须返回空/403；SQL 审计：扫描所有生产 SQL，没有 tenant_id 条件的查询必须告警；渗透测试：定期做跨租户越权测试 |
+| 边界追问 | 共享 Schema 能保证绝对隔离吗？ | 不能。靠应用层（拦截器）有遗漏风险（原生 JDBC/动态 SQL/DBA 手动查）。绝对隔离要独立 DB。但独立 DB 成本高，实践中用"共享 Schema + 严格拦截器 + 定期审计"达到 99.99% 隔离 |
+| 反例追问 | 什么场景必须用独立 DB？ | 金融/医疗（合规要求物理隔离）、KA 客户合同要求独立部署、数据量极大（单租户 TB 级，共享库装不下）、定制化需求（租户要自定义字段/索引） |
+| 风险追问 | 多租户最大的风险是什么？ | 主动点出：跨租户数据泄露（拦截器 bug 或遗漏，是 P0 事故）、Noisy Neighbor（一个租户打挂所有）、租户数据迁移风险（迁错覆盖其他租户）、DBA 误操作（手动 SQL 忘加 tenant_id） |
+| 验证追问 | 怎么保证拦截器没遗漏？ | 静态扫描：所有 Mapper 必须经过拦截器；动态审计：慢查询日志解析，所有 SQL 必须含 tenant_id 条件（不含的告警）；混沌测试：故意用原生 JDBC 写查询，验证是否被拒绝 |
+| 沉淀追问 | 多租户系统沉淀什么？ | 租户隔离拦截器框架（TenantInterceptor）、租户识别组件库（域名/JWT/Header resolver）、租户配额管理平台、跨租户越权自动化测试框架、租户数据迁移工具 |
 
-### 反问面试官
+### 现场对话示例
 
-> 这个问题在贵团队更偏业务主链路治理，还是更偏平台化能力建设？如果是主链路，我会重点展开一致性和稳定性；如果是平台化，我会重点讲接入规范、默认能力和治理闭环。
+**面试官**：共享 Schema 模式下，DBA 要手动查数据排查问题，忘了加 tenant_id 怎么办？
 
+**候选人**：这是多租户系统的高频事故点。三层防护。第一层，DB 账号权限——给 DBA 的账号设置行级安全策略（如 PostgreSQL 的 Row Security Policy），即使 DBA 忘加 tenant_id，DB 层自动过滤。MySQL 没有原生 RLS，可以用视图替代——DBA 只能查 v_order 视图（视图里硬编码 tenant_id 条件或通过 session 变量）。第二层，SQL 审计——慢查询日志和 binlog 解析，扫描所有手动执行的 SQL，不含 tenant_id 条件的告警，DBA 被通知补上。第三层，流程规范——DBA 查生产数据必须走工单审批，工单模板预置 tenant_id 条件，DBA 只填租户 ID 和业务条件。京东的做法是生产库 DBA 只读账号强制走 SQL 代理网关，网关自动注入 tenant_id（类似应用层的拦截器），DBA 绕不开。另外，定期做"越权演练"——用 A 租户的身份尝试查 B 租户数据，验证所有通道都隔离。
+
+**面试官**：大客户要从共享 Schema 迁到独立库，怎么平滑迁移？
+
+**候选人**：四步走。第一步，双写期——应用层写入时同时写共享库和独立库（双写），读还是读共享库。双写用异步消息保证最终一致，不影响主链路 RT。第二步，数据同步——把历史数据从共享库迁移到独立库，用 DataX 或自研工具按 tenant_id 过滤导出，导入独立库。导入后做数据校验（count 对比、关键字段 checksum）。第三步，切读——灰度切读流量到独立库（先 1% 观察，再 10%，再全量）。读切换期保持双写（万一独立库有问题可回滚读）。第四步，停老——全量读切到独立库后，观察 1-2 周稳定，停止向共享库写入，清理共享库该租户的数据（标记已迁移，延迟删除防回滚）。关键是每一步都可回滚——双写期出问题切回单写，切读期出问题切回读共享库。京东商家平台每年有几十次大客户迁移，整套流程工具化，平均 2 周完成一个客户迁移。
+
+**面试官**：Noisy Neighbor 问题具体怎么防？
+
+**候选人**：多层级防护。第一层，网关层限流——每租户独立令牌桶，按付费等级配 QPS（KA 1000 QPS，免费版 10 QPS），超额直接拒绝。第二层，应用层隔离——每租户独立的线程池或信号量（如 Semaphore），大租户的请求不会占满全局线程池。第三层，DB 层隔离——共享库给每租户独立的 DB 账号，账号配置资源组（如 MySQL 的 resource_group）限制 CPU/IO。第四层，连接池隔离——每租户独立的连接池（或 HikariCP 的 maxPoolSize 按租户分），防止一个租户耗尽所有连接。第五层，监控告警——实时监控每租户的 RT/QPS/错误率，某租户 RT 突增时自动降级（如自动降低其配额）。极端情况下（某租户持续异常），自动熔断该租户的所有请求（返回 503），保护其他租户。京东云的实践：每个租户的请求带 tenant_id 标签，Kubernetes 的 NetworkPolicy 按 label 限流，Prometheus 按租户分维度监控，Grafana 大盘可下钻到单租户。
+
+## 常见考点
+
+1. **多租户和分库分表什么关系？**——分库分表是"水平拆分"（按 sharding key 分散数据），多租户是"逻辑隔离"（按 tenant_id 隔离）。两者可叠加——用 tenant_id 作为分片键，大租户独占分片，小租户共享分片。
+2. **GDPR 对多租户的要求？**——数据可携带（用户要求导出数据，必须按 tenant_id 过滤）、被遗忘权（删除某用户数据，不能影响其他租户）、数据驻留（欧盟用户数据存在欧盟的 DB，可能需要按租户地域分库）。
+3. **多租户怎么做数据备份恢复？**——独立 DB 直接备份实例；共享 Schema 按 tenant_id 条件导出（mysqldump --where="tenant_id='acme'"）。恢复时不能覆盖其他租户——只能恢复到临时库，再按 tenant_id 迁移到生产库。
+4. **租户配置（每租户不同的业务规则）怎么存？**——独立的 tenant_config 表（tenant_id, config_key, config_value），应用启动或请求时加载该租户的配置。或用配置中心（Apollo/Nacos）按租户分 namespace。
