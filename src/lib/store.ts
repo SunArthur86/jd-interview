@@ -67,7 +67,7 @@ interface AppState {
   notes: Record<string, string>;
   ratings: Record<string, Rating>;
   theme: 'light' | 'dark';
-  sortOrder: 'easy-first' | 'hard-first' | 'default';
+  sortOrder: 'easy-first' | 'hard-first' | 'newest-first' | 'oldest-first' | 'default';
   searchHistory: string[];
   dailyLog: Record<string, DailyLog>;
   lastStudyDate: string | null;

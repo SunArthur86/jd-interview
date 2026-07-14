@@ -23,6 +23,7 @@ export interface Question {
   feynman?: Feynman;
   first_principle?: FirstPrinciple;
   memory_points?: string[];
+  createdAt?: string;
 }
 
 export type Rating = 'know' | 'fuzzy' | 'dont';

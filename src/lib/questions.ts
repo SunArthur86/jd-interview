@@ -1,9 +1,29 @@
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 import matter from 'gray-matter';
 import type { Question } from './types';
 
 const QUESTIONS_DIR = path.join(process.cwd(), 'questions');
+
+/** 获取文件的最后 git 提交时间（ISO 字符串），git 不可用时回退到文件 mtime */
+function getCreatedAt(filePath: string): string {
+  try {
+    const rel = path.relative(process.cwd(), filePath);
+    const out = execSync(`git log -1 --format=%cI -- "${rel}"`, {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'ignore'],
+    }).trim();
+    if (out) return out;
+  } catch {
+    // git 不可用或文件未被跟踪，回退到 mtime
+  }
+  try {
+    return fs.statSync(filePath).mtime.toISOString();
+  } catch {
+    return '';
+  }
+}
 
 function loadAll(): Question[] {
   if (!fs.existsSync(QUESTIONS_DIR)) return [];
@@ -14,7 +34,8 @@ function loadAll(): Question[] {
     if (!fs.statSync(full).isDirectory()) continue;
     const files = fs.readdirSync(full).filter((f) => f.endsWith('.md')).sort();
     for (const file of files) {
-      const raw = fs.readFileSync(path.join(full, file), 'utf-8');
+      const absPath = path.join(full, file);
+      const raw = fs.readFileSync(absPath, 'utf-8');
       const { data, content } = matter(raw);
       const lines = content.split('\n');
       let question = '';
@@ -49,6 +70,7 @@ function loadAll(): Question[] {
         memory_points: Array.isArray(data.memory_points)
           ? data.memory_points.map(String)
           : [],
+        createdAt: getCreatedAt(absPath),
       });
     }
   }

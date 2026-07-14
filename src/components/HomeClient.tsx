@@ -83,6 +83,10 @@ export default function HomeClient({ questions }: { questions: Question[] }) {
       sorted.sort((a, b) => (DIFF_ORDER[a.difficulty] || 9) - (DIFF_ORDER[b.difficulty] || 9));
     } else if (store.sortOrder === 'hard-first') {
       sorted.sort((a, b) => (DIFF_ORDER[b.difficulty] || 0) - (DIFF_ORDER[a.difficulty] || 0));
+    } else if (store.sortOrder === 'newest-first') {
+      sorted.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+    } else if (store.sortOrder === 'oldest-first') {
+      sorted.sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
     }
     return sorted;
   }, [questions, currentCategory, difficulty, subcategory, selectedTags, favOnly, searchQuery, store.favorites, store.sortOrder]);
@@ -216,13 +220,13 @@ export default function HomeClient({ questions }: { questions: Question[] }) {
     return () => window.removeEventListener('keydown', onKey);
   }, [view, modalId, randomQuestion, store]);
 
-  const sortLabel =
-    store.sortOrder === 'easy-first' ? '↑ 由浅入深' : store.sortOrder === 'hard-first' ? '↓ 由深入浅' : '↕ 默认';
-
-  const cycleSort = () => {
-    const next = store.sortOrder === 'easy-first' ? 'hard-first' : store.sortOrder === 'hard-first' ? 'default' : 'easy-first';
-    store.setSortOrder(next);
-  };
+  const sortOptions: { value: typeof store.sortOrder; label: string }[] = [
+    { value: 'easy-first', label: '↑ 由浅入深' },
+    { value: 'hard-first', label: '↓ 由深入浅' },
+    { value: 'newest-first', label: '🕐 最新优先' },
+    { value: 'oldest-first', label: '🕐 最旧优先' },
+    { value: 'default', label: '↕ 默认' },
+  ];
 
   if (view === 'study') {
     return <StudyMode pool={filtered} mode={studyMode} allQuestions={questions} onExit={() => setView('list')} />;
@@ -251,7 +255,16 @@ export default function HomeClient({ questions }: { questions: Question[] }) {
           onClearHistory={() => store.clearSearchHistory()}
           onPickHistory={(h) => setSearchQuery(h)}
         />
-        <button onClick={cycleSort} title="排序" style={iconBtn}>{sortLabel}</button>
+        <select
+          value={store.sortOrder}
+          onChange={(e) => store.setSortOrder(e.target.value as typeof store.sortOrder)}
+          title="排序"
+          style={{ ...iconBtn, cursor: 'pointer', appearance: 'auto' }}
+        >
+          {sortOptions.map((opt) => (
+            <option key={opt.value} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
         <button onClick={() => setFavOnly((v) => !v)} title="仅看收藏" style={iconBtnActive(favOnly)}>
           {favOnly ? '★' : '☆'}
         </button>
