@@ -3,6 +3,7 @@ export interface Feynman {
   analogy?: string;
   key_points?: string[];
   first_principle?: string;
+  socratic?: string[];
 }
 export interface FirstPrinciple {
   problem?: string;

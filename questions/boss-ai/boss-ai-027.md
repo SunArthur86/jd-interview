@@ -1,0 +1,235 @@
+---
+id: boss-ai-027
+difficulty: L4
+category: boss-ai
+subcategory: LLM 推理
+tags:
+- 巨剧核
+- AI 陪伴
+- LLM 推理
+- vLLM
+- KV Cache
+- 量化
+- 批处理
+feynman:
+  essence: "LLM 推理优化是把'一次只能处理一个请求、慢且贵'的原始推理，变成'批量复用、缓存共享、量化精简'的高效服务，让 GPU 利用率从 10% 提升到 80%+。"
+  analogy: "像把'每次只煮一碗饭'升级为'大锅饭 + 保温桶 + 压缩饼干'——批量煮饭（batching）、保温桶复用米饭（KV Cache）、压缩饼干省空间（量化），整体效率几十倍提升。"
+  first_principle: "LLM 推理的瓶颈是 GPU 算力和显存带宽，单请求推理浪费严重（GPU 空转 + KV Cache 不复用 + 全精度参数占显存）。必须从'单次'优化到'批量+共享+精简'。"
+  key_points:
+  - "Continuous batching：动态合并并发请求，GPU 满载"
+  - "KV Cache 复用：共享前缀（system prompt）省显存省算力"
+  - "量化：INT8/INT4 降精度，显存和带宽减半"
+  - "投机解码：小模型起草+大模型校验，2-3 倍加速"
+  - "工程框架：vLLM/SGLang/TGI 主流"
+  socratic:
+  - "100 个用户同时聊，原始推理是一个一个排队还是一起算？哪种高效？"
+  - "100 个对话都用同一个 system prompt（角色人设），这部分计算能复用吗？"
+  - "70B 模型要 140GB 显存，单卡装不下，怎么办？量化降精度会损失多少？"
+  - "为什么 LLM 推理比训练慢得多？瓶颈在哪？"
+  - "投机解码用小模型起草、大模型校验，听起来更慢，为什么反而快？"
+first_principle:
+  problem: "如何把 LLM 推理从'慢、贵、低利用'优化为'快、省、高利用'？"
+  axioms:
+  - "LLM 推理瓶颈是 GPU 算力和显存带宽"
+  - "单请求推理浪费严重（GPU 空转 + 无复用 + 全精度）"
+  - "并发请求往往有相似性（同 system prompt / 同任务）"
+  rebuild: "用三大手段：continuous batching（并发合并满载 GPU）+ KV Cache 复用（共享前缀省算力）+ 量化（降精度省显存）+ 投机解码（小模型加速大模型），把 GPU 利用率从 10% 提升到 80%+。"
+follow_up:
+- "vLLM 为什么快？——PagedAttention（分页式 KV Cache，无碎片）+ continuous batching（动态批）+ 高效调度；比朴素推理快 10-20 倍。"
+- "量化会损失质量吗？——INT8 几乎无损，INT4 略损但可接受；要按场景评估；GPTQ/AWQ 是常用算法。"
+- "自部署 vs API 怎么算账？——QPS 高时自部署便宜（边际成本递减），QPS 低时 API 便宜（按量）；ROI 平衡点要算。"
+memory_points:
+- "三大优化：batching/复用/量化"
+- "Continuous batching：动态并发批处理"
+- "KV Cache 复用：共享前缀"
+- "vLLM：PagedAttention + continuous batching"
+---
+
+# 【巨剧核 AI 陪伴】LLM 推理优化怎么做（vLLM/KV Cache/量化/batching）？
+
+> JD 依据："熟悉 LLM 推理优化、vLLM、KV Cache、量化、批处理。"
+
+## 一、LLM 推理的性能瓶颈
+
+```
+原始推理（一次一请求）：
+  - GPU 大部分时间空转（算一会儿等一会儿）
+  - KV Cache 不复用（同 system prompt 重算）
+  - 全精度参数占大量显存
+  - 显存带宽是瓶颈（不是算力）
+
+效果：
+  GPU 利用率 < 10%
+  成本高（按峰值备卡）
+  延迟大（无并发优化）
+```
+
+## 二、Continuous Batching（连续批处理）
+
+```
+静态 batching（朴素）：
+  等够 N 个请求 → 一起推理 → 等最慢的完成才下一批
+  问题：短请求等长请求，GPU 空转
+
+Continuous batching（vLLM 式）：
+  持续收集并发请求 → 合并成 batch 推理
+  新请求随时加入
+  完成的请求随时退出
+  GPU 一直满载
+
+效果：
+  单卡 QPS 提升 5-20 倍
+  GPU 利用率 10% → 80%+
+```
+
+## 三、KV Cache 复用（PagedAttention）
+
+```
+背景：LLM 生成时每 token 要算 attention，需用前面所有 token 的 Key/Value
+  这些 KV 存在显存，叫 KV Cache
+  同样 prompt 每次重算 = 浪费
+
+场景（AI 陪伴）：
+  1000 个对话用同一个角色 system prompt（2000 token）
+  朴素：每个对话重算这 2000 token 的 KV
+  优化：KV 复用，共享同一份
+
+vLLM PagedAttention：
+  把 KV Cache 分页存储（像 OS 虚拟内存）
+  无碎片、可共享（同前缀的对话共享页）
+  显存利用率高，复用省算力
+
+Prefix Caching：
+  显式缓存常见前缀（system prompt / few-shot 示例）
+  命中直接复用 KV
+```
+
+## 四、量化（INT8/INT4）
+
+```
+背景：
+  FP16/BF16：每参数 2 字节（70B 模型 = 140GB）
+  INT8：每参数 1 字节（70B = 70GB）
+  INT4：每参数 0.5 字节（70B = 35GB）
+
+好处：
+  显存减半/减 4 倍（单卡装得下大模型）
+  显存带宽压力减半（推理更快）
+  吞吐提升 2-3 倍
+
+损失：
+  INT8：几乎无损（< 1%）
+  INT4：略损（1-3%），可接受
+
+算法：
+  GPTQ（后训练量化）
+  AWQ（激活感知）
+  GGUF（llama.cpp 用）
+```
+
+## 五、投机解码（Speculative Decoding）
+
+```
+朴素：大模型逐 token 生成（慢）
+
+投机解码：
+  [1] 小模型（草稿模型）快速生成 k 个 token
+  [2] 大模型并行校验这 k 个 token（一次前向）
+  [3] 接受一致的，拒绝处重新生成
+
+效果：
+  小模型大多猜对 → 大模型校验 k 个 ≈ 1 个的时间
+  整体加速 2-3 倍
+  质量无损（大模型把关）
+
+适用：能找到快且准的草稿模型
+```
+
+## 六、其他优化
+
+```
+张量并行（多卡切模型）：
+  70B 装不下单卡 → 切分到多卡并行
+  推理时多卡协同
+
+流水线并行：
+  模型按层切到多卡
+  请求流过各卡
+
+MoE 推理：
+  每次只激活部分专家
+  推理快但显存大
+
+Distill（蒸馏）：
+  大模型蒸馏小模型
+  特定场景用小模型替代
+
+Caching：
+  prompt 级别缓存（FAQ）
+  语义缓存
+```
+
+## 七、主流推理框架
+
+| 框架 | 特点 | 适用 |
+|---|---|---|
+| vLLM | PagedAttention + continuous batching，主流 | 通用首选 |
+| SGLang | 结构化输出 + 复杂编排优化 | 复杂应用 |
+| TGI（HF） | HF 官方，生态好 | HF 模型 |
+| TensorRT-LLM | NVIDIA 官方，最快 | NVIDIA 卡 |
+| llama.cpp | CPU/边缘，量化好 | 本地/边缘 |
+
+## 八、自部署 vs API 决策
+
+```
+API（OpenAI/通义）：
+  + 弹性大、无运维、起步快
+  - 贵（QPS 高时）、数据出域、依赖外部
+  适合：QPS 低、快速验证、敏感度低
+
+自部署（vLLM + 开源模型）：
+  + 边际成本递减、数据私有、可控
+  - 要 GPU 投资 + 运维、扩容慢
+  适合：QPS 高、隐私敏感、长期运营
+
+混合：
+  自部署小模型 + API 强模型
+  （见多模型路由题）
+```
+
+ROI 平衡点：单卡日均跑够 N 小时，自部署划算。
+
+## 九、典型部署架构
+
+```
+┌────────────────────────────────────┐
+│ LLM 网关（路由/限流/缓存）          │
+├────────────────────────────────────┤
+│ vLLM 集群                          │
+│   实例 1（A100×8，70B INT8）       │
+│   实例 2（A100×8）                 │
+│   ...                              │
+│   + Prefix Cache（共享 system）    │
+├────────────────────────────────────┤
+│ API 备用（OpenAI/Claude fallback） │
+├────────────────────────────────────┤
+│ 监控（GPU 利用率/QPS/延迟）         │
+└────────────────────────────────────┘
+```
+
+## 十、底层本质
+
+LLM 推理优化的本质是**"把 GPU 从'10% 利用'压榨到'80% 利用'"**：
+
+- Batching = 并发合并（不空转）
+- KV 复用 = 不重复算
+- 量化 = 精度换性能
+- 投机解码 = 小模型加速大模型
+
+这是把'昂贵慢推理'变成'便宜快推理'——是 AI 产品能否低成本规模化运营的硬技术，是 OpenAI/Anthropic/字节/阿里都在卷的核心工程能力。
+
+## 常见考点
+
+1. **vLLM 为什么快？**——PagedAttention（KV Cache 分页无碎片+可共享）+ continuous batching（动态批）+ 高效调度器；本质是把 GPU 利用率和显存利用率都拉满。
+2. **KV Cache 占显存怎么算？**——KV size ≈ 2 × n_layers × n_heads × head_dim × seq_len × batch × dtype_size；长上下文 + 大 batch 是显存大头；优化靠 PagedAttention + prefix cache + 量化。
+3. **量化对中文/AI 陪伴场景影响大吗？**——INT8 几乎无影响；INT4 在通用任务影响小，在情感细腻/创意生成可能有损；要按业务评测集验证，不能盲上。

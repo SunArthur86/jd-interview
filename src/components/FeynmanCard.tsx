@@ -1,7 +1,7 @@
 import type { Feynman } from '@/lib/types';
 
 export default function FeynmanCard({ feynman }: { feynman: Feynman }) {
-  if (!feynman || (!feynman.essence && !feynman.analogy && !feynman.key_points?.length && !feynman.first_principle)) return null;
+  if (!feynman || (!feynman.essence && !feynman.analogy && !feynman.key_points?.length && !feynman.first_principle && !feynman.socratic?.length)) return null;
   return (
     <div
       style={{
@@ -37,6 +37,16 @@ export default function FeynmanCard({ feynman }: { feynman: Feynman }) {
               <li key={i}>{p}</li>
             ))}
           </ul>
+        </div>
+      )}
+      {feynman.socratic && feynman.socratic.length > 0 && (
+        <div style={{ fontSize: '14px', marginTop: '8px' }}>
+          🦉 <strong>苏格拉底式追问：</strong>
+          <ol style={{ margin: '4px 0 0', paddingLeft: '20px' }}>
+            {feynman.socratic.map((q, i) => (
+              <li key={i} style={{ marginBottom: '3px', color: 'var(--text-secondary)' }}>{q}</li>
+            ))}
+          </ol>
         </div>
       )}
     </div>
