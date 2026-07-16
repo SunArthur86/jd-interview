@@ -1,7 +1,7 @@
 // Minimal static-asset service worker for offline support.
 // Caches the app shell on install, serves cache-first with network fallback.
-const CACHE = 'jd-interview-v1';
-const BASE = '/jd-interview';
+const CACHE = 'interview-jd-v1';
+const BASE = '/interview-jd';
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();

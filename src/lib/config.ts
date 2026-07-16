@@ -11,9 +11,9 @@ export const APP_CONFIG = {
   appNameShort: 'JD面试题',
   appIcon: '📝',
   appVersion: '1.0',
-  storagePrefix: 'jd-interview',
-  githubUrl: 'https://sunarthur86.github.io/jd-interview/',
-  repoUrl: 'https://github.com/SunArthur86/jd-interview',
+  storagePrefix: 'interview-jd',
+  githubUrl: 'https://sunarthur86.github.io/interview-jd/',
+  repoUrl: 'https://github.com/SunArthur86/interview-jd',
   themeColor: '#0071e3',
   categories: {
     'all':         { label: '全部',            icon: '📚', color: '#0071e3' },

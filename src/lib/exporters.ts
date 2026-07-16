@@ -60,7 +60,7 @@ export function exportProgress(questions: Question[]) {
     favorites, viewed, ratings, notes, dailyLog: store.dailyLog, streak: store.streak,
     dailyGoal: store.dailyGoal, reviewData, reviewAlgorithm: store.reviewAlgorithm, exportDate: new Date().toISOString(),
   };
-  download(`jd-interview-backup-${todayStr()}.json`, JSON.stringify(backup, null, 2), 'application/json');
+  download(`interview-jd-backup-${todayStr()}.json`, JSON.stringify(backup, null, 2), 'application/json');
 }
 
 /** Wrong-answer book export. */

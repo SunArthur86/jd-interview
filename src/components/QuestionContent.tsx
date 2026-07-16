@@ -20,7 +20,7 @@ export default function QuestionContent({ q, onFollowUp, showNotes = true }: Pro
   const setNote = useStore((s) => s.setNote);
   const [fullscreenImg, setFullscreenImg] = useState<string | null>(null);
   const catCfg = APP_CONFIG.categories[q.category] || APP_CONFIG.categories['all'];
-  const basePath = process.env.NODE_ENV === 'production' ? '/jd-interview' : '';
+  const basePath = process.env.NODE_ENV === 'production' ? '/interview-jd' : '';
 
   return (
     <div>

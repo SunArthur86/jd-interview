@@ -2,15 +2,15 @@
   "name": "JD 面试题库",
   "short_name": "JD面试题",
   "description": "针对一线大厂 JD 深度拆解的面试题库，含费曼快记、第一性原理、层层递进深度问答。",
-  "start_url": "/jd-interview/",
-  "scope": "/jd-interview/",
+  "start_url": "/interview-jd/",
+  "scope": "/interview-jd/",
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#0071e3",
   "lang": "zh-CN",
   "icons": [
     {
-      "src": "/jd-interview/icon.svg",
+      "src": "/interview-jd/icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any maskable"

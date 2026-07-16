@@ -37,8 +37,8 @@ npm run build    # 构建静态站点到 out/
 
 ## 🌐 在线访问
 
-- GitHub Pages: https://sunarthur86.github.io/jd-interview/
-- 仓库: https://github.com/SunArthur86/jd-interview
+- GitHub Pages: https://sunarthur86.github.io/interview-jd/
+- 仓库: https://github.com/SunArthur86/interview-jd
 
 ## 🛠️ 技术栈
 

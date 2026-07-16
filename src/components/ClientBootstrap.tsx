@@ -25,7 +25,7 @@ export default function ClientBootstrap({ children }: { children: React.ReactNod
   useEffect(() => {
     if (typeof window === 'undefined') return;
     if (process.env.NODE_ENV !== 'production') return;
-    const basePath = '/jd-interview';
+    const basePath = '/interview-jd';
     navigator.serviceWorker?.register(`${basePath}/sw.js`).catch(() => {});
   }, []);
 
