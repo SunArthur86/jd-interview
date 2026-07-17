@@ -366,3 +366,28 @@ public void fallbackPublisher() {
 3. **binlog 格式必须是 ROW 吗？**——是的。STATEMENT 格式记录 SQL 语句，CDC 解析复杂（如 NOW() 函数）；ROW 格式记录行变更，CDC 直接读。MIXED 不推荐。
 4. **Outbox 表要建索引吗？**——要。aggregate_id 索引（查询同一 aggregate 历史）、created_at 索引（清理按时间）、published_at 索引（Polling 兜底查未发布）。
 5. **Outbox 怎么做事务回滚？**——业务事务回滚时 outbox INSERT 也回滚（同事务），事件不会发布。这正是 Outbox 的原子性保证——业务失败事件不发。
+
+## 结构化回答
+
+**30 秒电梯演讲：** Outbox 模式解决业务数据更新 + 事件发布的原子性问题——传统模式（先更 DB 后发消息）会因发消息失败丢事件，Outbox 把事件和业务数据放同一事务写到一个 outbox 表，保证原子。CDC（Change Data Capture）异步监听 outbox 表变更（通过 binlog），把事件推到 Kafka。这样业务事务原子写 outbox + CDC 异步推 Kafka，实现可靠事件发布
+
+**展开框架：**
+1. **Outbox 表** — 和业务表同库，存待发布事件（id, aggregate_id, type, payload, status, created_at）
+2. **CDC** — Debezium 监听 outbox 表 binlog，变更即推 Kafka
+3. **幂等** — 消费端按 event_id 去重，CDC 重启可能重投
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——Outbox 表会无限膨胀吗？
+
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Outbox + CDC 如何保证事件可靠发布 | "这题核心是——Outbox 模式解决业务数据更新 + 事件发布的原子性问题——传统模式（先更 DB 后发消息）……" | 开场钩子 |
+| 0:15 | 像寄信。Outbox 是邮局信箱——你写类比图 | "打个比方：像寄信。Outbox 是邮局信箱——你写。" | 核心类比 |
+| 0:40 | Outbox 表示意/对比图 | "和业务表同库，存待发布事件（id, aggregate_id, type, payload, status, created_at）" | Outbox 表要点 |
+| 1:05 | CDC示意/对比图 | "Debezium 监听 outbox 表 binlog，变更即推 Kafka" | CDC要点 |
+| 1:30 | 幂等示意/对比图 | "消费端按 event_id 去重，CDC 重启可能重投" | 幂等要点 |
+| 1:55 | 总结卡 | "记住：Outbox 表。下期见。" | 收尾 |

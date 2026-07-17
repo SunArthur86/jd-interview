@@ -274,3 +274,27 @@ JD 中台三套库，搜索风控和数仓，
 6. **vs Canal**：多 DB 支持、Schema Registry、社区是选 Debezium 的三大理由
 7. **监控**：binlog position 滞后、queue 堆积、task 失败是三大核心指标
 8. **tombstone 事件**：delete 操作额外产生一个 null value，用于 Kafka log compaction 清理 key
+
+## 结构化回答
+
+**30 秒电梯演讲：** 京东订单库分库分表后，搜索平台（ES）、风控实时画像、数据中台三套系统都要订单数据。如果用定时任务抽数，秒级延迟和数据库压力无法承受
+
+**展开框架：**
+1. **binlog_format 必须是 ROW** — binlog_format 必须是 ROW（否则 before/after 无法反解）—— 高频考点
+2. **at-least-once，下游必须幂等** — 用 topic-partition-offset 或业务主键 + version 去重
+3. **GTID 模式是主从切换** — GTID 模式是主从切换的救命稻草，没有 GTID 切换后位点全乱
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——Debezium 部署在哪？
+
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Debezium 在 Java 数据同步中的应用 | "这题一句话：京东订单库分库分表后，搜索平台（ES）、风控实时画像、数据中台三套系统都要订单数据。" | 开场钩子 |
+| 0:15 | binlog_format 必须示意/对比图 | "binlog_format 必须是 ROW（否则 before/after 无法反解）—— 高频考点" | binlog_format 必须要点 |
+| 0:40 | at-least-once，下游示意/对比图 | "用 topic-partition-offset 或业务主键 + version 去重" | at-least-once，下游要点 |
+| 1:05 | GTID 模式是主从切换示意/对比图 | "GTID 模式是主从切换的救命稻草，没有 GTID 切换后位点全乱" | GTID 模式是主从切换要点 |
+| 1:55 | 总结卡 | "记住：binlog_format。下期见。" | 收尾 |

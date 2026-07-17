@@ -426,3 +426,28 @@ public void consume(OrderEvent event) {
 3. **Java Agent 原理？**——Instrumentation API 字节码注入，类加载时给 HTTP/JDBC/MQ 加 span，业务无感。
 4. **头部采样 vs 尾部采样？**——头部（TraceIDRatio 入口按比例，简单可能漏错误）；尾部（Collector 看结果，保留错误+慢请求，需缓存全链路）。
 5. **三支柱联动？**——Metrics → Exemplar → Trace（看链路）→ traceId 关联 Logs（看日志）。告警到根因一条线下钻。
+
+## 结构化回答
+
+**30 秒电梯演讲：** OpenTelemetry（OTel）是 CNCF 的可观测性统一标准，三件事——Trace（链路）/Metrics（指标）/Logs（日志）的采集 SDK + 数据格式（OTLP 协议）。本质是解决厂商锁定：应用代码只调 OTel API，数据通过 OTLP 协议发到 Collector，Collector 转发到任意后端（Jaeger/Tempo/SkyWalking/Datadog）。换后端不改应用代码
+
+**展开框架：**
+1. **OTel 三支柱** — Trace / Metrics / Logs（统一标准）
+2. **W3C TraceCon** — W3C TraceContext（traceparent header）跨服务传播
+3. **Span = 操作单元** — Span = 操作单元（traceId + spanId + parentSpanId 串成树）
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——OTel 和 SkyWalking / Jaeger 区别？
+
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：OpenTelemetry 在 Java 微服务 | "这题核心是——OpenTelemetry（OTel）是 CNCF 的可观测性统一标准，三件事——Trace（链路）……" | 开场钩子 |
+| 0:15 | 像 USB-C 标准——设备（应用）只有 USB类比图 | "打个比方：像 USB-C 标准——设备（应用）只有 USB。" | 核心类比 |
+| 0:40 | OTel 三支柱示意/对比图 | "Trace / Metrics / Logs（统一标准）" | OTel 三支柱要点 |
+| 1:05 | W3C TraceCon示意/对比图 | "W3C TraceContext（traceparent header）跨服务传播" | W3C TraceCon要点 |
+| 1:30 | Span = 操作单元示意/对比图 | "Span = 操作单元（traceId + spanId + parentSpanId 串成树）" | Span = 操作单元要点 |
+| 1:55 | 总结卡 | "记住：OTel 是 CNCF 可观。下期见。" | 收尾 |

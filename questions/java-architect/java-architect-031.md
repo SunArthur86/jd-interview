@@ -349,3 +349,26 @@ try {
 3. **acks=all 一定不丢吗？**——ISR 全损前不丢；min.insync.replicas 触发时是拒写。配 unclean.leader.election.enable=false 防脑裂丢数据，业务侧仍需幂等兜底。
 4. **消费者 rebalance 怎么减少？**——session.timeout / max.poll.interval 调合理、用 CooperativeStickyAssignor、优雅停机主动退组、监控 rebalance_rate。
 5. **exactly-once 跨系统怎么实现？**——伪命题。Kafka 事务只管 Kafka 内，跨 MySQL 必须业务幂等（唯一键/状态机/Redis 令牌）+ at-least-once。
+
+
+## 结构化回答
+
+**30 秒电梯演讲：** 聊到Kafka 分区、副本与消费语义，我的理解是——Kafka 把一个 Topic 切成多个 Partition 分布在不同 Broker 上做并行，每个 Partition 又有多副本（Leader/Follower）做高可用。分区是并发单元（决定吞吐上限），副本是可用性单元（决定 RPO/数据零丢失），消费语义（at-most / at-least / exactly-once）是 offset 提交与业务幂等的组合选择。打个比方，像 JD 快递分拣中心：Topic 是一类包裹（如"订单事件"），Partition 是 N 条独立传送带（每条单线顺序、多条并行），副本是每条传送带旁录了一份"备份录像"的副手（Leader 挂了副手接管）。消费者组是 N 个分拣员，每人盯一条传送带，offset 就是他在传送带上贴的"已处理到第几件"标签。
+
+**展开框架：**
+1. **分区是并行单元** — 吞吐 ≈ 分区数 × 单分区吞吐，分区数决定消费并行度
+2. **副本是可用性单元** — Leader 读写，Follower 从 Leader 拉取同步，ISR 集合决定谁能当选
+3. **三种消费语义** — at-most-once（先提交 offset 再处理）、at-least-once（先处理再提交，默认）、exactly-once（幂等 producer + 事务或业务幂等）
+
+**收尾：** 这块我在项目里也踩过坑——想深入的话，可以接着聊：分区数怎么定？您更想看哪个方向？
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡 | "Kafka 分区、副本与消费语义——这道题面试官到底想考什么？我用 30 秒给你讲透。" | 开场钩子 |
+| 0:15 | Kafka 架构图 | 先说核心：Kafka 把一个 Topic 切成多个 Partition 分布在不同 Broker 上做并行，每个 Partition 又有多副本（Leader/Follower）做高可用。 | 核心定义 |
+| 0:30 | 高可用架构图 | Leader 读写，Follower 从 Leader 拉取同步，ISR 集合决定谁能当选。 | 副本是可用性单元 |
+| 1:30 | 总结卡 | 一句话记忆：分区=并发单元（吞吐），副本=可用单元（RPO），ISR=all+min.insync.replicas=2 是生产标配。 下期可以接着聊：分区数怎么定。 | 收尾总结 |

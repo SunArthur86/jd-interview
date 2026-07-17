@@ -201,3 +201,24 @@ java -jar scm-app.jar --debug
 2. **命名规范**——官方 Starter 叫 `spring-boot-starter-xxx`（官方命名），第三方叫 `xxx-spring-boot-starter`，强制用后者避免混淆。
 3. **Starter 准入清单**——CR 检查项：必须有 `@AutoConfiguration`、必须用 `AutoConfiguration.imports`（不能退回 spring.factories）、必须提供 properties 类、必须有集成测试证明可注入。
 
+## 结构化回答
+
+**30 秒电梯演讲：** 如何让一个组件引入依赖后自动接入 Spring 容器，又能在用户需要时覆盖默认行为？简单说就是——Spring Boot 自动装配通过 spring.factories / AutoConfiguration.imports + @Conditional 系列注解，让"引入依…。
+
+**展开框架：**
+1. **@Sprin** — @SpringBootApplication = @SpringBootConfiguration + @EnableAutoConfiguration + …
+2. **AutoCo** — AutoConfiguration.imports（2.7+）声明自动配置类
+3. **@Condi** — @ConditionalOnClass / OnMissingBean / OnProperty 按条件装配
+
+**收尾：** 您看这块要不要再展开聊聊？
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Spring Boot 自动装配原理？怎么写自定义 Starter？ | 今天聊「Spring Boot 自动装配原理？怎么写自定义 Starter？」。一句话：Spring Boot 自动装配通过 spring.factories / AutoConfiguration.imp… | 开场钩子 |
+| 0:12 | 核心概念图 + 关键词浮现 | 要点是：@SpringBootApplication = @SpringBootConfiguration + @EnableAutoConfig… | 核心概念 |
+| 1:00 | 能力/参数拆解表 | 要点是：AutoConfiguration.imports（2.7+）声明自动配置类 | 能力拆解 |
+| 2:00 | 总结卡 + 下期预告 | 记住核心要点就够了。下期见。 | 收尾 |

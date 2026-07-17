@@ -345,3 +345,26 @@ while (running) {
 3. **Kafka 和 RocketMQ 区别？**——RocketMQ 是阿里开源、Java 写、支持事务消息（原生）、定时消息；Kafka 是 LinkedIn 开源、Scala/Java 写、生态最大。国内电商用 RocketMQ 多（事务消息方便），大数据场景用 Kafka 多。
 4. **Redis Stream 怎么做死信队列？**——XPENDING 看 idle 超时，XCLAIM 给专门 DLQ consumer，DLQ consumer 写到独立 stream 或 DB 供人工处理。Redis Stream 没有原生 DLQ，要自己实现。
 5. **消息顺序怎么保证？**——单分区/单 stream 内严格有序，跨分区/跨 stream 无序。需要全局有序只能单分区（牺牲并行）。按业务 key 路由到同分区可保证"同 key 有序"。
+
+## 结构化回答
+
+**30 秒电梯演讲：** Redis Stream 和 Kafka 都是日志型消息系统，但定位完全不同：Redis Stream 是内存优先、单机为主、低延迟、轻量——10 万 QPS 单实例、亚毫秒延迟、运维简单；Kafka 是磁盘优先、分布式、高吞吐、可回溯——百万 QPS 集群、毫秒延迟、运维复杂。Redis Stream 适合轻量异步任务、跨实例事件、单机房消息总线；Kafka 适合核心业务事件流、跨系统数据管道、大数据分析
+
+**展开框架：**
+1. **Redis Stream** — 内存优先、单机为主、亚毫秒延迟、10 万 QPS、轻量
+2. **Kafka** — 磁盘优先、分布式、毫秒延迟、百万 QPS、可回溯
+3. **Consumer Group** — 两者都支持，但 Kafka 的更成熟（rebalance、offset 管理）
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——Redis Stream 消息怎么持久化？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Redis Stream 与 Kafka 的场景 | "这题核心是——Redis Stream 和 Kafka 都是日志型消息系统，但定位完全不同：Redis Str……" | 开场钩子 |
+| 0:15 | Redis Stream示意/对比图 | "内存优先、单机为主、亚毫秒延迟、10 万 QPS、轻量" | Redis Stream要点 |
+| 0:40 | Kafka示意/对比图 | "磁盘优先、分布式、毫秒延迟、百万 QPS、可回溯" | Kafka要点 |
+| 1:25 | 总结卡 | "记住：Redis Stream。下期见。" | 收尾 |

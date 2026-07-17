@@ -306,3 +306,26 @@ HTAP 行存加列存，TiFlash 异步副本查得快。
 6. **TiDB vs ShardingSphere** —— 自动化 vs 成本
 7. **迁移方案** —— DM + Lightning + 双写灰度
 8. **适用边界** —— TB 级 + HTAP 用 TiDB，简单 OLTP 用 MySQL
+
+## 结构化回答
+
+**30 秒电梯演讲：** 京东金融的交易表单库已经 5TB，ShardingSphere 分了 64 库，扩容困难。考虑迁 TiDB
+
+**展开框架：**
+1. **TiDB 三层架构** — TiDB 三层架构 —— TiDB/PD/TiKV/TiFlash
+2. **Region 自动分片** — Region 自动分片 —— 96MB 切片
+3. **Percolator 事务模型** — Percolator 事务模型 —— 2PC + Primary Lock
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——TiDB 比 MySQL 强在哪？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：TiDB / 分布式数据库的适用场景与代价 | "这题一句话：京东金融的交易表单库已经 5TB，ShardingSphere 分了 64 库，扩容困难。" | 开场钩子 |
+| 0:15 | TiDB 三层架构示意/对比图 | "TiDB 三层架构 —— TiDB/PD/TiKV/TiFlash" | TiDB 三层架构要点 |
+| 0:40 | Region 自动分片示意/对比图 | "Region 自动分片 —— 96MB 切片" | Region 自动分片要点 |
+| 1:25 | 总结卡 | "记住：TiDB 三层架构。下期见。" | 收尾 |

@@ -362,3 +362,26 @@ public class OrderService {
 2. **@PostConstruct、afterPropertiesSet、init-method 执行顺序？**——@PostConstruct（注解，最先）→ InitializingBean.afterPropertiesSet（接口）→ @Bean(initMethod)（自定义方法）。推荐用 @PostConstruct 解耦不依赖 Spring 接口。
 3. **Bean 作用域有哪些？**——singleton（默认，单例）、prototype（每次新建）、request（HTTP 请求）、session（HTTP 会话）、application（ServletContext）。Web 作用域需要 RequestContextListener 或 DispatcherServlet 支持。
 4. **@Lazy 的作用？**——延迟初始化，首次使用才创建 Bean。用途：打破循环依赖（@Lazy 注入代理）、加速启动（不常用 Bean 延迟加载）、避免启动失败（依赖未就绪时延迟）。
+
+
+## 结构化回答
+
+**30 秒电梯演讲：** 聊到Spring Bean 生命周期与扩展点，我的理解是——Bean 生命周期的本质是"Spring 对一个对象从生到死的全流程管控"——实例化→属性注入→初始化→使用→销毁，每个阶段都开放扩展点（Aware 接口、BeanPostProcessor、InitializingBean）。Spring 之所以强大，就是这套可插拔的扩展机制让框架能整合任何第三方库。打个比方，像公务员入职流程：HR 创建档案（实例化）→ 分配办公室和同事（属性注入）→ 培训和宣誓（初始化）→ 上岗工作（使用）→ 退休离职（销毁）。每一步都有对应接口（Aware/PostProcessor）让"相关部门"介入处理。
+
+**展开框架：**
+1. **完整生命周期** — 实例化→属性注入→Aware 回调→BeanPostProcessor 前置→初始化→BeanPostProcessor 后置→使用→销毁
+2. **4 类扩展点** — Aware（注入容器资源）、BeanPostProcessor（前后置增强）、InitializingBean/disposableBean（初始化/销毁回调）、@PostConstruct/@PreDestroy（注解）
+3. **BeanFactoryPostPro** — BeanFactoryPostProcessor vs BeanPostProcessor：前者改 BeanDefinition（类元数据），后者改 Bean 实例
+
+**收尾：** 这块我在项目里也踩过坑——想深入的话，可以接着聊：循环依赖怎么解决？您更想看哪个方向？
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡 | "Spring Bean 生命周期与扩展点——这道题面试官到底想考什么？我用 30 秒给你讲透。" | 开场钩子 |
+| 0:15 | Spring Bean 生命周期图 | 先说核心：Bean 生命周期的本质是"Spring 对一个对象从生到死的全流程管控"——实例化→属性注入→初始化→使用→销毁，每个阶段都开放扩展点（Aware 接口、BeanPostPr。 | 核心定义 |
+| 0:30 | 概念结构示意图 | Aware（注入容器资源）、BeanPostProcessor（前后置增强）。 | 4 类扩展点 |
+| 1:30 | 总结卡 | 一句话记忆：生命周期 8 步：实例化→注入→Aware→前置→初始化→后置→使用→销毁。 下期可以接着聊：循环依赖怎么解决。 | 收尾总结 |

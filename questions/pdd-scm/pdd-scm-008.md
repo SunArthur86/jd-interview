@@ -201,3 +201,25 @@ Kafka 事务和本地消息表解决不同问题：
 2. **幂等 SDK**——`@Idempotent(key = "orderId", ttl = 86400)` 注解，自动 Redis SETNX 去重，业务方加注解即生效。
 3. **Code Review 规则**——任何 `consumer.poll` 后的 for 循环必须有 try-catch 转 DLQ 逻辑，裸 `commitSync()` 不允许；SonarQube 扫 `catch (Exception` 后无 throw 的吞异常代码报 critical。
 
+## 结构化回答
+
+**30 秒电梯演讲：** 消息从生产到消费经过多个环节，每个环节都可能失败，如何保证不丢不重？简单说就是——Kafka 靠"生产端 acks=all + Broker 多副本 + 消费端手动提交 offset"三段保证消息不丢，靠"幂等生产 + 事务"保证不重。
+
+**展开框架：**
+1. **生产端** — 生产端：acks=all（所有副本确认）、retries、幂等（enable.idempotence）
+2. **Broker** — Broker：多副本（replication.factor=3）、min.insync.replicas=2
+3. **消费端** — 消费端：手动提交 offset（enable.auto.commit=false）+ 幂等消费
+
+**收尾：** 您看这块要不要再展开聊聊？
+
+## 视频脚本
+
+> 预计时长：3 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Kafka 怎么保证消息不丢不重？ | 今天聊「Kafka 怎么保证消息不丢不重？」。一句话：Kafka 靠"生产端 acks=all + Broker 多副本 + 消费端手动提交 offset"三段保证消息不丢… | 开场钩子 |
+| 0:12 | 核心概念图 + 关键词浮现 | 要点是：生产端：acks=all（所有副本确认）、retries、幂等（enable.idempotence） | 核心概念 |
+| 1:04 | 能力/参数拆解表 | 要点是：Broker：多副本（replication.factor=3）、min.insync.replicas=2 | 能力拆解 |
+| 1:56 | 流程图：输入→处理→输出 | 要点是：消费端：手动提交 offset（enable.auto.commit=false）+ 幂等消费 | 关键机制 |
+| 3:00 | 总结卡 + 下期预告 | 记住核心要点就够了。下期见。 | 收尾 |

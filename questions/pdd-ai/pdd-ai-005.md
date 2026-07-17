@@ -209,3 +209,26 @@ Starter 的设计哲学是"约定优于配置，但允许 escape hatch"。大部
 **Q：怎么让团队设计 starter 时不再踩 @ConditionalOnMissingBean 顺序坑？**
 
 沉淀成 starter 设计规范。第一，所有 `@Bean` 方法必须加 `@ConditionalOnMissingBean(value=具体类型.class)`，不能只靠方法名。第二，`AutoConfiguration.imports` 文件路径和类名要在 README 里明确写，新人 copy-paste 不会错。第三，starter 必须集成 `spring-boot-configuration-processor`，CI 里检查 `additional-spring-configuration-metadata.json` 是否生成。第四，写一个 `StarterTest`——用 `ApplicationContextRunner` 自动化测试 starter 在"用户没定义 Bean""用户定义了 Bean""配置缺省"三种场景下的行为，作为回归测试。第五，每次 starter 发版，在测试环境用 `--debug` 看 Conditions Evaluation Report，确认没有意外的 NEGATIVE_MATCH。
+
+## 结构化回答
+
+**30 秒电梯演讲：** 怎么让框架"开箱就是用"且能按需装配？简单说就是——Spring Boot 自动装配是"约定优于配置"。spring.factories（旧）/AutoConfiguration.imports（2.7…；@ConditionalOnXxx 控制装配条件。
+
+**展开框架：**
+1. **@Sprin** — @SpringBootApplication 三合一
+2. **spring** — spring.factories（旧）/AutoConfiguration.imports（2.7+）
+3. **@Condi** — @ConditionalOnXxx 控制装配条件
+
+**收尾：** 您想继续往深里聊吗——比如「怎么排查 Bean 没装配？」
+
+## 视频脚本
+
+> 预计时长：3 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Spring Boot 自动装配原理与模型服务 Starter 怎么设计？ | 今天聊「Spring Boot 自动装配原理与模型服务 Starter 怎么设计？」。一句话：Spring Boot 自动装配是"约定优于配置" | 开场钩子 |
+| 0:12 | 核心概念图 + 关键词浮现 | 要点是：@SpringBootApplication 三合一 | 核心概念 |
+| 1:04 | 能力/参数拆解表 | 要点是：spring.factories（旧）/AutoConfiguration.imports（2.7+） | 能力拆解 |
+| 1:56 | 流程图：输入→处理→输出 | 要点是：@ConditionalOnXxx 控制装配条件 | 关键机制 |
+| 3:00 | 总结卡 + 下期预告 | 记住这些核心点就够了。下期我们接着聊——怎么排查 Bean 没装配？。 | 收尾 |

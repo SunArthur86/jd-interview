@@ -420,3 +420,26 @@ Quarkus (Native): 0.02-0.05s 启动（GraalVM + Quarkus）
 3. **GraalVM Native Image 的限制？**——(1) 反射/动态代理要配 reflect-config.json（Spring Boot 3 AOT 自动生成大部分）；(2) 构建慢（5-10 分钟静态分析）；(3) 不能运行时类加载（Class.forName 动态加载失败）；(4) 调试难（无完整 JVM 工具）；(5) 包体积大（100MB+）。启动 < 100ms 但构建复杂。
 4. **Quarkus 为什么比 Spring Boot 启动快？**——Build-time Bootstrap，把 Spring 的运行时反射（Bean 扫描、依赖注入、自动配置）移到构建时处理。启动时只创建预编译的 Bean，无运行时反射开销。JVM 模式启动 < 1s（vs Spring Boot 5-10s），Native 模式 < 50ms。
 5. **Java Serverless 适合什么场景？**——(1) 事件驱动（文件上传触发处理、Webhook）；(2) 低频任务（定时 ETL）；(3) 突发流量（大促弹性扩容）；(4) 异步处理（MQ 消费）。不适合：(1) 长跑核心 API（JVM 长跑 JIT 优化更划算）；(2) 高 QPS 稳态（冷启动频繁）；(3) 重状态应用（Serverless 无状态）。
+
+## 结构化回答
+
+**30 秒电梯演讲：** Java 在 Serverless（AWS Lambda/阿里云 FC）的最大障碍是冷启动——JVM 启动慢（加载类、JIT 编译）、Spring Boot 上下文初始化慢（5-10 秒），远超 Serverless 的毫秒级响应预期。解法三选一：(1) AWS SnapStart（CRIU 快照，启动从 5s 降到 200ms）、(2) GraalVM Native Image（AOT 编译，启动 < 100ms 但构建复杂）、(3) 框架精简（Quarkus/Micronaut 替代 Spring Boot）。适用边界：事件驱动/低频/突发流量场景适合，长跑/高 QPS/重状态不适合
+
+**展开框架：**
+1. **冷启动原因** — JVM 类加载 + JIT 编译 + 框架初始化（Spring Boot 5-10s）
+2. **AWS SnapStart** — CRIU 内存快照，启动 5s → 200ms（仅 Prime 支持的 Lambda）
+3. **GraalVM Native Image** — AOT 编译，启动 < 100ms，但构建慢+反射配置复杂
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——SnapStart 原理是什么？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Serverless Java 的冷启动与适用边 | "这题核心是——Java 在 Serverless（AWS Lambda/阿里云 FC）的最大障碍是冷启动——JVM……" | 开场钩子 |
+| 0:15 | 冷启动原因示意/对比图 | "JVM 类加载 + JIT 编译 + 框架初始化（Spring Boot 5-10s）" | 冷启动原因要点 |
+| 0:40 | AWS SnapStart示意/对比图 | "CRIU 内存快照，启动 5s → 200ms（仅 Prime 支持的 Lambda）" | AWS SnapStart要点 |
+| 1:25 | 总结卡 | "记住：冷启动原因。下期见。" | 收尾 |

@@ -415,3 +415,27 @@ public class CedarAuthzService {
 3. **策略热加载怎么实现？**——OPA 支持 `--watch` 监听文件变化自动 reload；独立服务通过 Git webhook + API reload；in-process 通过配置中心推送。
 4. **决策日志怎么存？**——结构化 JSON（user、action、resource、decision、reason、timestamp），写 Kafka → ES/ClickHouse，支持查询和审计。
 5. **ABAC 怎么实现"时间相关"规则？**——把当前时间作为 context.input 传给 OPA，Rego 用 `time.parse_rfc3339_ns` 解析后判断 weekday/hour。
+
+## 结构化回答
+
+**30 秒电梯演讲：** 细粒度权限的核心痛点是规则散落在业务代码里，改一次要发版 + 全量回归。策略引擎（Policy Engine）把授权决策从业务代码抽出来变成独立工件——业务代码只问can(user, action, resource)，决策由外部策略文件（Rego/Cedar）给出。改规则只需改策略文件（热加载），不动业务代码。OPA（Rego）生态成熟、复杂场景强；Cedar（AWS）语法简洁、形式化验证、易上手
+
+**展开框架：**
+1. **OPA（Open Policy Agent）** — Rego 语言、CNCF 毕业项目、生态最大
+2. **Cedar** — AWS 推出、语法简洁、形式化验证、支持 partial evaluation
+3. **ABAC** — ABAC（基于属性）优于 RBAC（基于角色）：能表达"manager 看本部门订单"
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——OPA 和 Spring Security 配合还是替代？
+
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：细粒度权限与策略引擎 OPA/Cedar 选型 | "这题一句话：细粒度权限的核心痛点是规则散落在业务代码里，改一次要发版 + 全量回归。" | 开场钩子 |
+| 0:15 | 像红绿灯系统类比图 | "打个比方：像红绿灯系统。" | 核心类比 |
+| 0:40 | OPA（Open Policy 示意/对比图 | "Rego 语言、CNCF 毕业项目、生态最大" | OPA（Open Policy 要点 |
+| 1:05 | Cedar示意/对比图 | "AWS 推出、语法简洁、形式化验证、支持 partial evaluation" | Cedar要点 |
+| 1:55 | 总结卡 | "记住：OPA。下期见。" | 收尾 |

@@ -349,3 +349,27 @@ WHERE TIME_TO_SEC(TIMEDIFF(NOW(), trx_started)) > 5;   -- 超过 5 秒的事务
 2. **事务隔离级别怎么选？**——默认用数据库隔离级别（MySQL RR、Oracle RC）。资金类高一致用 SERIALIZABLE（性能差，慎用）；高并发读多用 RC + 乐观锁；一般业务用默认 RR 足够。
 3. **@Transactional(readOnly = true) 有什么用？**——提示数据库做读优化（如不记 undo log）、Hibernate FlushMode 设 MANUAL、语义清晰（代码可读性）。不强制只读，但能优化。
 4. **跨服务事务怎么保证一致？**——@Transactional 管不了跨服务。方案：本地消息表（业务库写消息表，消息服务异步投递，消费方幂等）、Saga（长链路补偿）、TCC（Try-Confirm-Cancel 业务侵入）。生产优先本地消息表 + 幂等。
+
+
+## 结构化回答
+
+**30 秒电梯演讲：** 聊到Spring 事务传播、隔离级别与失效场景，我的理解是——Spring 事务的本质是"AOP 代理 + ThreadLocal 绑定 Connection"——通过动态代理在方法前后加 begin/commit/rollback，用 ThreadLocal 让同一事务的多条 SQL 共用一个 Connection。失效场景都源于"绕过了代理"或"异常被吞"。打个比方，像快递公司的"保价通道"：@Transactional 是给包裹贴保价标签，AOP 代理是快递员（必须经过它才能享受保价），ThreadLocal 是每个快递员自己的保价单（线程隔离）。你跳过快递员自己送（this 调用）、保价单写错类型（异常被吞）、或换快递员送（多线程），保价就失效。
+
+**展开框架：**
+1. **7 种传播行为** — REQUIRED/REQUIRES_NEW/NESTED/SUPPORTS/NOT_SUPPORTED/NEVER/MANDATORY
+2. **4 种隔离级别** — DEFAULT/READ_UNCOMMITTED/READ_COMMITTED/REPEATABLE_READ/SERIALIZABLE
+3. **失效场景** — self-invocation（this 调用）、非 public、异常被吞、异常类型不匹配、多线程、未托管 Bean
+
+**收尾：** 这块我在项目里也踩过坑——想深入的话，可以接着聊：同类内部调用为什么事务失效？您更想看哪个方向？
+
+## 视频脚本
+
+> 预计时长：3 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡 | "Spring 事务传播、隔离级别与失效场景——这道题面试官到底想考什么？我用 30 秒给你讲透。" | 开场钩子 |
+| 0:15 | 事务隔离级别对比表 | 先说核心：Spring 事务的本质是"AOP 代理 + ThreadLocal 绑定 Connection"——通过动态代理在方法前后加 begin/commit/rollback，用 。 | 核心定义 |
+| 0:40 | Spring Bean 生命周期图 | DEFAULT/READ_UNCOMMITTED/READ_COMMITTED/REPEATABLE_READ/SERIALIZABLE。 | 4 种隔离级别 |
+| 1:05 | AOP 动态代理原理图 | self-invocation（this 调用）、非 public、异常被吞、异常类型不匹配、多线程、未托管 Bean。 | 失效场景 |
+| 2:30 | 总结卡 | 一句话记忆：事务 = AOP 代理拦截 + ThreadLocal 绑定 Connection。 下期可以接着聊：同类内部调用为什么事务失效。 | 收尾总结 |

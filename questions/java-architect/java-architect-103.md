@@ -348,3 +348,26 @@ try (var scope = new StructuredTaskScope.ShutdownOnFailure()) {
 3. **取消传播怎么实现？**——scope.shutdown() 遍历所有未完成子任务调用 interrupt，配合虚拟线程 + 友好 IO（NIO/HttpClient）才能真正取消。
 4. **怎么实现超时？**——scope.joinUntil(Instant deadline) 或自定义 scope 重写 isTimeout，到点 shutdown 取消所有子任务。
 5. **JDK 版本要求？**——21/22/23 预览（需 --enable-preview），24（JEP 505）GA。生产建议 JDK 24+ 直接用 GA 版本。
+
+## 结构化回答
+
+**30 秒电梯演讲：** Structured Concurrency（JEP 505，JDK 24 正式）把并发任务的生命周期绑到代码块的词法作用域——StructuredTaskScope 内 fork 的子任务，必须在 scope 关闭前完成（或被取消）。它解决了 CompletableFuture 的孤儿任务、取消不传播、错误处理散落三大痛点，让并发编排回到 try-with-resources 的直觉
+
+**展开框架：**
+1. **StructuredTa** — StructuredTaskScope（JDK 21 预览、JDK 24 GA）：fork 子任务 + shutdown 策略
+2. **ShutdownOnSuccess** — 第一个成功就取消其他（适用"任何可用"模式）
+3. **取消传播** — scope.shutdown() 自动取消所有未完成子任务
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——StructuredTaskScope 和 ExecutorService 区别？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Structured Concurrency 如 | "这题核心是——Structured Concurrency（JEP 505，JDK 24 正式）把并发任务的生命……" | 开场钩子 |
+| 0:15 | StructuredTa示意/对比图 | "StructuredTaskScope（JDK 21 预览、JDK 24 GA）：fork 子任务 + shutdown 策略" | StructuredTa要点 |
+| 0:40 | ShutdownOnSucces示意/对比图 | "第一个成功就取消其他（适用任何可用模式）" | ShutdownOnSucces要点 |
+| 1:25 | 总结卡 | "记住：StructuredTask。下期见。" | 收尾 |

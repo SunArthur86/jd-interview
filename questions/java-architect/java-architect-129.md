@@ -385,3 +385,27 @@ ReactorRiskEventServiceGrpc.ReactorRiskEventServiceStub stub =
 3. **proto3 和 proto2 区别？**——proto3 移除 required、移除 default value 显式设置、新增 map 类型、原生 JSON 支持。proto3 更简洁但失去一些约束。
 4. **gRPC 怎么做服务发现？**——gRPC 内置 NameResolver（DNS、xDS），生产用 Consul/Nacos 自定义 Resolver；负载均衡用 round_robin / pick_first，或 xDS 做 Envoy 控制。
 5. **gRPC 错误码有哪些？**——gRPC 用 status code（OK、CANCELLED、DEADLINE_EXCEEDED、UNAVAILABLE...），自定义错误用 `Status.withDescription` + RichError 模式。
+
+## 结构化回答
+
+**30 秒电梯演讲：** gRPC 流式接口（Server/Client/Bidi Streaming）让服务端可以持续推、客户端可以持续拉，但当下游消费速度 < 上游生产速度时，缓冲区会无限膨胀直至 OOM。背压（Backpressure）的本质是让下游的反向压力传给上游——下游处理慢就让上游慢点发。gRPC 用 HTTP/2 flow control（WINDOW_UPDATE 帧）做传输层背压，应用层用 Reactor/Flowable 的 `request(n)` 机制做语义背压。超时控制要分流整体超时和单消息超时，流式场景整体超时用 deadline，单消息超时用 per-message timeout
+
+**展开框架：**
+1. **四种 gRPC 模式** — Unary（一元）、Server Streaming、Client Streaming、Bidi Streaming
+2. **HTTP/2 flow control** — 每个 stream 有 send/recv window，消费后 WINDOW_UPDATE 补
+3. **应用层背压** — Reactor 的 limitRate(n)、Flowable 的 request(n)
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——HTTP/2 flow control 怎么工作？
+
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：gRPC 流式接口的背压与超时控制 | "这题核心是——gRPC 流式接口（Server/Client/Bidi Streaming）让服务端可以持续推、客……" | 开场钩子 |
+| 0:15 | 像水龙头接水池类比图 | "打个比方：像水龙头接水池。" | 核心类比 |
+| 0:40 | 四种 gRPC 模式示意/对比图 | "Unary（一元）、Server Streaming、Client Streaming、Bidi Streaming" | 四种 gRPC 模式要点 |
+| 1:05 | HTTP/2 flow示意/对比图 | "每个 stream 有 send/recv window，消费后 WINDOW_UPDATE 补" | HTTP/2 flow要点 |
+| 1:55 | 总结卡 | "记住：四种模式。下期见。" | 收尾 |

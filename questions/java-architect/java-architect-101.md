@@ -314,3 +314,26 @@ try {
 3. **虚拟线程要不要池化？**——不要。虚拟线程创建成本 ≈ 1us，比平台线程轻 50 倍，用完即弃。`Executors.newVirtualThreadPerTaskExecutor()` 每个任务一个新 VT。
 4. **ThreadLocal 在虚拟线程下有什么坑？**——百万 VT 每个都有 ThreadLocal 等于内存 ×N；inheritable 在 carrier 切换时透传错乱。用 ScopedValue（不可变 + 自动清理）或显式 try-finally remove。
 5. **怎么监控虚拟线程健康？**——JFR 采集 jdk.VirtualThreadStart/Pinned/Submit 事件（pinning 计数）、jstack 看 carrier 数和挂起原因、Micrometer 1.12+ 暴露 jvm.threads.virtual 指标。
+
+## 结构化回答
+
+**30 秒电梯演讲：** 虚拟线程是把线程 = 内核线程这一 30 年假设打破的轻量级抽象——JVM 在少量 carrier（平台线程）上调度海量虚拟线程，遇到阻塞操作时把栈帧 unmount 到堆，让 carrier 立即服务其他虚拟线程。落地不是开个开关，而是要解决 ThreadLocal 泄漏、pinning、synchronized 阻塞、连接池上限、监控失真等真实工程问题
+
+**展开框架：**
+1. **虚拟线程 ≠ 平台线程** — 栈在堆、JVM 调度、阻塞 unmount，万级并发无压力
+2. **carrier 线程数** — carrier 线程数 = ForkJoinPool 平台线程数（默认 CPU 核数），是真正的并发度上限
+3. **三大坑** — synchronized 阻塞导致 pinning、ThreadLocal 继承引发内存泄漏、池化虚拟线程是反模式
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——虚拟线程能完全替代 Reactor/CompletableFuture 吗？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：JDK 21 虚拟线程在线上系统如何落地 | "这题核心是——虚拟线程是把线程 = 内核线程这一 30 年假设打破的轻量级抽象——JVM 在少量 carrie……" | 开场钩子 |
+| 0:15 | 虚拟线程 ≠ 平台线程示意/对比图 | "栈在堆、JVM 调度、阻塞 unmount，万级并发无压力" | 虚拟线程 ≠ 平台线程要点 |
+| 0:40 | carrier 线程数示意/对比图 | "carrier 线程数 = ForkJoinPool 平台线程数（默认 CPU 核数），是真正的并发度上限" | carrier 线程数要点 |
+| 1:25 | 总结卡 | "记住：虚拟线程 = 栈在堆 + J。下期见。" | 收尾 |

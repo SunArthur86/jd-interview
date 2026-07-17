@@ -407,3 +407,27 @@ slo:
 3. **Histogram 和 Summary 区别？**——Histogram 服务端聚合分位，跨实例可合并；Summary 客户端算分位，跨实例无法合并。生产用 Histogram。
 4. **RED 和 USE 黄金信号？**——RED：Rate/Errors/Duration（服务视角）；USE：Utilization/Saturation/Errors（资源视角）。
 5. **高基数标签怎么避免？**——标签值必须是有限集合（如 type/status/channel），不用 userId/orderId 当标签。每个标签组合 = 一条时序。
+
+## 结构化回答
+
+**30 秒电梯演讲：** Micrometer 是 Spring Boot 的指标门面（类似 SLF4J 之于日志），定义一套维度（name + tags + 数值）的指标模型，底层可对接 Prometheus / Datadog / NewRelic / CloudWatch。设计指标体系的核心是少而准——RED（Rate/Errors/Duration）+ USE（Utilization/Saturation/Errors）+ 业务核心指标（如订单量、支付成功率），用 SLO 倒推采集什么，不是什么都能采
+
+**展开框架：**
+1. **Micrometer 是** — Micrometer 是指标门面（SLF4J 模式），支持多后端
+2. **四种指标类型** — Counter（递增）/Gauge（瞬时值）/Histogram（分布）/Timer（延迟+计数）
+3. **RED 黄金信号** — Rate（QPS）/Errors（错误率）/Duration（P99 延迟）
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——Histogram 和 Summary 区别？
+
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Micrometer 指标体系如何设计 | "这题核心是——Micrometer 是 Spring Boot 的指标门面（类似 SLF4J 之于日志），定义……" | 开场钩子 |
+| 0:15 | 像汽车仪表盘：油量表（Gauge类比图 | "打个比方：像汽车仪表盘：油量表（Gauge。" | 核心类比 |
+| 0:40 | Micrometer 是示意/对比图 | "Micrometer 是指标门面（SLF4J 模式），支持多后端" | Micrometer 是要点 |
+| 1:05 | 四种指标类型示意/对比图 | "Counter（递增）/Gauge（瞬时值）/Histogram（分布）/Timer（延迟+计数）" | 四种指标类型要点 |
+| 1:55 | 总结卡 | "记住：Micrometer 是指标。下期见。" | 收尾 |

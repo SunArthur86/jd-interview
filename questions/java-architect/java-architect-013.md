@@ -341,3 +341,26 @@ public class MyAutoConfiguration { }
 2. **@ConfigurationProperties 和 @Value 区别？**——@ConfigurationProperties 批量绑定前缀下所有属性到 POJO（类型安全、有 IDE 提示、可校验）；@Value 单个注入（`${key}`，灵活但不类型安全）。推荐 @ConfigurationProperties。
 3. **怎么禁用某个自动配置？**——`@SpringBootApplication(exclude = XxxAutoConfiguration.class)`、`spring.autoconfigure.exclude=com.xxx.XxxAutoConfiguration`（配置文件）、或 `@EnableAutoConfiguration(exclude = ...)`。
 4. **application.yml 和 application.properties 哪个好？**——yml 层级清晰（适合复杂配置）、支持 Profile；properties 简单无格式坑、性能略好。现代项目多选 yml。注意 yml 不支持 @PropertySource 直接加载（要自定义）。
+
+
+## 结构化回答
+
+**30 秒电梯演讲：** 聊到Spring Boot 自动配置原理与 starter 设计，我的理解是——自动配置的本质是"约定优于配置 + 条件化 Bean 注册"——starter 声明一组 Bean 定义，@Conditional 决定哪些生效，Spring Boot 根据类路径/属性/已存在 Bean 自动装配。让业务方加一个依赖就开箱即用。打个比方，像宜家家具的"智能套装"：你买一个"卧室套装"（starter），里面包含床、衣柜、床头柜（一组 Bean），但只有你卧室有窗户时才送窗帘（@ConditionalOnProperty），只有你已有床垫时才送床单（@ConditionalOnBean）。Spring Boot 的 AutoConfiguration 就是这套智能套装系统。
+
+**展开框架：**
+1. **@SpringBootApplica** — @SpringBootApplication = @SpringBootConfiguration + @EnableAutoConfiguration + @ComponentScan
+2. **@EnableAutoConfigu** — @EnableAutoConfiguration 通过 SPI 加载 META-INF/spring.factories（2.7+ 改 spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports）
+3. **条件注解** — @ConditionalOnClass/OnBean/OnProperty/OnMissingBean/OnWebApplication
+
+**收尾：** 这块我在项目里也踩过坑——想深入的话，可以接着聊：spring.factories 和 AutoConfiguration.imports 区别？您更想看哪个方向？
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡 | "Spring Boot 自动配置原理与 starte——这道题面试官到底想考什么？我用 30 秒给你讲透。" | 开场钩子 |
+| 0:15 | Spring Bean 生命周期图 | 先说核心：自动配置的本质是"约定优于配置 + 条件化 Bean 注册"——starter 声明一组 Bean 定义，@Conditional 决定哪些生效，Spring Boot 根据类。 | 核心定义 |
+| 0:30 | 概念结构示意图 | @EnableAutoConfiguration 通过 SPI 加载 META-INF/spring.factories（2.7+ 改 spring/org。 | @EnableAutoConfigu |
+| 1:30 | 总结卡 | 一句话记忆：@SpringBootApplication 三合一：Configuration + EnableAutoConfiguration + ComponentScan。 下期可以接着聊：spring.factories 和 AutoConfiguration.imports 区别。 | 收尾总结 |

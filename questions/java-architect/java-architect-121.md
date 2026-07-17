@@ -431,3 +431,26 @@ spec:
 3. **readiness 为什么不查下游？**——下游故障时所有 Pod 摘流量，级联雪崩。下游故障用熔断降级（Sentinel）。
 4. **startup 解决什么？**——慢启动（JVM 预热）期间 liveness 误杀。startup 先判断启动完成，期间 liveness 不生效。
 5. **PDB 防什么？**——防自愿中断（发布/缩容）的批量重启，minAvailable 保证最少可用 Pod 数。
+
+## 结构化回答
+
+**30 秒电梯演讲：** K8s 三探针（startup/liveness/readiness）+ 重启机制是服务自愈的核心，但配置不当会引发雪崩——liveness 误判导致 Pod 反复重启、readiness 失败导致流量摘除、级联重启打爆下游。核心原则：① startup 先判断启动完成（慢启动场景）；② liveness 只判死锁/僵死（不判慢）；③ readiness 判能否接流量（包含依赖检查）。配合优雅停机 + PDB + 限流，才能防控雪崩
+
+**展开框架：**
+1. **三探针** — startup（启动完成）/liveness（存活）/readiness（接流量）
+2. **startup 先于 l** — startup 先于 liveness（慢启动场景，JVM 预热期不杀 Pod）
+3. **liveness 只判死锁/僵死** — 不判慢（慢不是死）
+
+**收尾：** 以上是我的整体思路，您想从哪个角度继续深入？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Pod 重启、探针与服务雪崩防控 | "这题核心是——K8s 三探针（startup/liveness/readiness）+ 重启机制是服务自愈的核心，……" | 开场钩子 |
+| 0:15 | 三探针示意/对比图 | "startup（启动完成）/liveness（存活）/readiness（接流量）" | 三探针要点 |
+| 0:40 | startup 先于 l示意/对比图 | "startup 先于 liveness（慢启动场景，JVM 预热期不杀 Pod）" | startup 先于 l要点 |
+| 1:25 | 总结卡 | "记住：三探针。下期见。" | 收尾 |

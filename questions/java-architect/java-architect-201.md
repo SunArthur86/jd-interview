@@ -486,3 +486,28 @@ public class TransferService {
 3. **performance_schema.data_lock_waits 怎么用？**——JOIN data_locks 查 waiting_trx_id → blocking_trx_id。两条边互相指向 = 死锁环。比 SHOW ENGINE INNODB STATUS 结构化，适合程序化分析。
 4. **死锁根因和修复方向？**——根因是加锁顺序相反（事务 A 先锁 X 再锁 Y，事务 B 先锁 Y 再锁 X）。修复：(1) 统一加锁顺序（小 ID 先锁）；(2) 缩短事务（事务里不做 RPC）；(3) 补索引（避免范围锁扩大）；(4) 降隔离级别（RC 无间隙锁）；(5) 拆批（大事务拆小）；(6) 死锁重试（幂等兜底）；(7) 热点串行化（队列/分片锁）。
 5. **死锁是 bug 吗？**——不是。死锁是 InnoDB 的正常保护机制（wait-for graph 检测 + 自动回滚，比超时快）。偶发死锁业务侧重试即可。但频繁死锁是业务设计问题（加锁顺序不一致），必须修根因。架构师要控制死锁频率（告警阈值 < 10 次/分钟），不能简单调大 `innodb_lock_wait_timeout` 掩盖问题。
+
+## 结构化回答
+
+**30 秒电梯演讲：** 线上频繁死锁告警，我不会背"死锁是互相等待"这种概念，而是能拿出一条完整的证据链把现场还原出来——`SHOW ENGINE INNODB STATUS` 拿第一现场，`performance_schema.data_lock_waits` 还原锁等待图，`events_statements_history_long` 把事务 ID 映射回 SQL，最后定位到"哪两类业务 SQL 加锁顺序相反形成环"，对症修复。死锁本身是 InnoDB 正常的保护机制，但频繁死锁一定是业务设计有问题。
+
+**展开框架：**
+1. **第一现场** — `SHOW ENGINE INNODB STATUS\G` 看 LATEST DETECTED DEADLOCK，读出两个事务 ID、谁等什么锁、谁持有什么锁、InnoDB 回滚了谁；但只保留最近一次，频繁死锁要 `SET GLOBAL innodb_print_all_deadlocks = ON` 从 error log 收集全部。
+2. **还原锁等待图** — `performance_schema.data_lock_waits JOIN data_locks`，查 `waiting_trx_id → blocking_trx_id`，两条边互相指向（A 等 B、B 等 A）就证明形成了死锁环，这是结构化、可程序化分析的证据。
+3. **映射回 SQL 定位根因** — `threads JOIN events_statements_history_long` 把事务 ID 映射到线程的 SQL 历史，结合应用 traceId 定位业务链路，根因通常是加锁顺序相反、事务过长、索引缺失导致范围锁扩大。
+
+**收尾：** 修复优先级是统一加锁顺序（小 ID 先锁，能消除"顺序相反"类死锁）、缩短事务（事务里不做 RPC）、补索引、死锁幂等重试兜底。您想往深里聊哪一段——锁等待图的 SQL 怎么写，还是业务语义天然相反时（下单先扣库存 vs 退款先退库存）怎么权衡？
+
+## 视频脚本
+
+> 预计时长：4 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：线上频繁死锁，怎么用 MySQL 证据链定位？ | 线上死锁告警频繁，面试官要的不是"死锁是互相等待"这种概念，而是你能不能把现场一条条证据串起来。我用三步证据链还原。 | 开场钩子 |
+| 0:20 | 刑侦破案类比图：案发现场→勘查报告→监控→通讯记录 | 把排查想成刑侦破案：死锁是案发现场，SHOW ENGINE INNODB STATUS 是勘查报告，performance_schema 是监控录像，events_statements_history_long 是通讯记录。三份证据串起来才能锁定凶手。 | 核心类比 |
+| 0:50 | 终端演示：SHOW ENGINE INNODB STATUS\\G 高亮 LATEST DETECTED DEADLOCK | 第一步拿第一现场：SHOW ENGINE INNODB STATUS，看 LATEST DETECTED DEADLOCK 段，读出两个事务 ID、等待锁、持有锁、回滚了谁。注意它只保留最近一次。 | 第一现场 |
+| 1:40 | SQL 截图：data_lock_waits JOIN data_locks + 锁等待环状图 | 第二步还原锁等待图：data_lock_waits JOIN data_locks，看 waiting_trx_id 指向 blocking_trx_id，两条边互相指向就是死锁环，比看日志更结构化。 | 锁等待图 |
+| 2:30 | SQL 截图：threads JOIN events_statements_history_long + 两类加锁顺序相反的 SQL 对比 | 第三步映射回 SQL：threads JOIN events_statements_history_long 把事务 ID 映射到线程的 SQL 历史，定位是哪两类业务 SQL 加锁顺序相反。频繁死锁记得打开 innodb_print_all_deadlocks 从 error log 收集全部。 | SQL 还原 |
+| 3:20 | 修复优先级表：统一加锁顺序 / 缩短事务 / 补索引 / 死锁重试 | 修复方向：统一加锁顺序（小 ID 先锁，能消除顺序相反类死锁）、缩短事务、补索引避免范围锁扩大、业务侧死锁幂等重试。死锁是 InnoDB 正常保护，但频繁死锁必须修根因，不能靠调大锁超时掩盖。 | 修复方案 |
+| 3:50 | 总结卡 + 下期预告 | 记住五个词：第一现场、锁等待图、SQL 还原、全量收集、统一加锁顺序。下期我们聊——业务语义天然相反时（下单 vs 退款）怎么避免死锁。 | 收尾 |

@@ -346,3 +346,26 @@ klass 是元空间（Metaspace）里的指针
 3. **整堆内存能省多少？**——10-20%。小对象密集场景（缓存、对象流）省 30%；大对象主导场景（byte[]）省 5%。
 4. **性能提升来源？**——堆密度提升（GC 扫描少）+ CPU 缓存命中率提升（更多对象进 L1/L2）+ 内存带宽节省。应用整体提速 5-10%。
 5. **什么时候启用？**——JDK 25 默认开（-XX:+UseCompactObjectHeaders）。JDK 24 是预览（需显式开）。生产建议直接 JDK 25+。
+
+## 结构化回答
+
+**30 秒电梯演讲：** Compact Object Headers（JEP 519，JDK 25 GA）把 Java 对象头从 12 字节（64 位 + 压缩指针）压到 8 字节——把标记字（mark word）和类指针（klass pointer）合并成一个 64 位字。一个 16 字节的 Java 对象（8 头 + 2 字段 + 6 对齐）压到 8 字节，整个堆内存占用降 10-20%，对缓存友好的现代 CPU 是显著性能提升
+
+**展开框架：**
+1. **Compact Obje** — Compact Object Headers（JEP 519，JDK 25 GA）：12B → 8B
+2. **合并 mark word** — 合并 mark word + klass pointer 为一个 64 位字
+3. **整堆内存降 10** — 20%（小对象密集场景降 30%）
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——JDK 25 之前怎么优化对象头？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：JDK 25 Compact Object He | "这题核心是——Compact Object Headers（JEP 519，JDK 25 GA）把 Java 对象……" | 开场钩子 |
+| 0:15 | Compact Obje示意/对比图 | "Compact Object Headers（JEP 519，JDK 25 GA）：12B → 8B" | Compact Obje要点 |
+| 0:40 | 合并 mark word示意/对比图 | "合并 mark word + klass pointer 为一个 64 位字" | 合并 mark word要点 |
+| 1:25 | 总结卡 | "记住：Compact Object。下期见。" | 收尾 |

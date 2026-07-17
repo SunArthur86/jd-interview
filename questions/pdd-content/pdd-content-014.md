@@ -205,3 +205,26 @@ JDK 8 的 computeIfAbsent 有个已知问题：如果加载函数内部又对同
 2. **JMH 吞吐对比**——对比 CHM vs synchronizedMap vs Collections.synchronizedMap 在不同线程数下的 ops/s，CHM 应随线程数线性增长（直到 CPU 瓶颈），synchronizedMap 应持平或下降。
 3. **线上巡检**——本地缓存（CHM）定时对账，对比 CHM 的 entry 数 vs 数据源（如 Redis）的 key 数，差异大告警（可能是 CHM 的淘汰逻辑或并发问题）。
 沉淀：所有共享 Map 必须用 CHM（Sonar 禁止 new HashMap 在多线程上下文）；热点 key 缓存用 Caffeine 不手写 computeIfAbsent；阻塞队列必须有界（禁止无界 LinkedBlockingQueue）。
+
+## 结构化回答
+
+**30 秒电梯演讲：** 多线程并发访问集合如何安全+高吞吐？简单说就是——高并发集合（ConcurrentHashMap/CopyOnWriteArrayList/BlockingQueue）用"分段锁/CAS/复制"让多线程安全且高吞吐；内容场景如本…。COW：写时复制；BlockingQueue：阻塞。
+
+**展开框架：**
+1. **CHM** — CHM：JDK8 CAS+synchronized 头节点
+2. **COW** — COW：写时复制
+3. **BlockingQueu** — BlockingQueue：阻塞
+
+**收尾：** 您想继续往深里聊吗——比如「ConcurrentHashMap 为什么不允许 null？」
+
+## 视频脚本
+
+> 预计时长：3 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：高并发集合在内容场景的应用？ | 今天聊「高并发集合在内容场景的应用？」。一句话：高并发集合（ConcurrentHashMap/CopyOnWriteArrayList/BlockingQueue）… | 开场钩子 |
+| 0:12 | 代码片段 + 关键行高亮 | 要点是：CHM：JDK8 CAS+synchronized 头节点 | 核心概念 |
+| 1:04 | 能力/参数拆解表 | 要点是：COW：写时复制 | 能力拆解 |
+| 1:56 | 流程图：输入→处理→输出 | 要点是：BlockingQueue：阻塞 | 关键机制 |
+| 3:00 | 总结卡 + 下期预告 | 记住这些核心点就够了。下期我们接着聊——ConcurrentHashMap 为什么不允许 null？。 | 收尾 |

@@ -332,3 +332,26 @@ JD 电商选 MySQL，到家配送选 PG。
 6. **复制模型差异** —— MySQL binlog vs PG 流复制 + 逻辑复制
 7. **高可用方案** —— Patroni（PG）vs MHA/Orchestrator（MySQL）
 8. **选型决策** —— OLTP 简单选 MySQL，复杂/HTAP 选 PG
+
+## 结构化回答
+
+**30 秒电梯演讲：** 京东到家早期用 MySQL，随着业务复杂度提升（复杂分析查询、地理位置搜索、JSON 文档），MySQL 越来越吃力
+
+**展开框架：**
+1. **PG vs MySQL 设计哲学** — PG vs MySQL 设计哲学 —— 简单稳定 vs 功能完整
+2. **JSONB + GIN 索引** — JSONB + GIN 索引 —— PG 杀手锏，必考
+3. **PostGIS 地理空间** — PostGIS 地理空间 —— 配送/地图场景
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——PG 比 MySQL 强在哪？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：PostgreSQL 与 MySQL 在 Jav | "这题一句话：京东到家早期用 MySQL，随着业务复杂度提升（复杂分析查询、地理位置搜索、JSON 文档），MySQL 越来越吃力。" | 开场钩子 |
+| 0:15 | PG vs MySQL 设计哲学示意/对比图 | "PG vs MySQL 设计哲学 —— 简单稳定 vs 功能完整" | PG vs MySQL 设计哲学要点 |
+| 0:40 | JSONB + GIN 索引示意/对比图 | "JSONB + GIN 索引 —— PG 杀手锏，必考" | JSONB + GIN 索引要点 |
+| 1:25 | 总结卡 | "记住：PG vs MySQL 设计。下期见。" | 收尾 |

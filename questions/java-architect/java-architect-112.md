@@ -400,3 +400,26 @@ public class OrderService {
 3. **HikariCP 在虚拟线程下怎么配？**——按后端 MySQL 容量配（50-100），不随线程模型变。默认 10 个连接是灾难（百万 VT 等连接 pinning）。
 4. **JNI/GPU 调用为什么不能用虚拟线程？**——JNI 内阻塞必然 pinning（JVM 看不到 native 栈）。用平台线程池（gpuExecutor）隔离。
 5. **怎么监控虚拟线程健康？**——JFR jdk.VirtualThreadPinned（pinning 频率）+ jvm.threads.virtual.count（VT 数）+ carrier CPU 利用率 + HikariCP wait。
+
+## 结构化回答
+
+**30 秒电梯演讲：** Spring Boot 3.2+ 一行配置 `spring.threads.virtual.enabled=true` 开启虚拟线程，但开启不等于调优。虚拟线程和平台线程池（@Async、TaskExecutor、HikariCP、Reactor）的共存策略——哪些应该改虚拟线程、哪些必须保留平台线程池、哪些要分而治之——才是落地的核心
+
+**展开框架：**
+1. **spring.threa** — spring.threads.virtual.enabled=true（Spring Boot 3.2+）
+2. **Tomcat / @As** — Tomcat / @Async / TaskExecutor 默认改虚拟线程
+3. **必须保留平台线程池的场景** — CPU 密集、JNI/GPU、第三方 SDK
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——spring.threads.virtual.enabled 影响哪些组件？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Spring Boot 虚拟线程配置与线程池共存 | "这题核心是——Spring Boot 3.2+ 一行配置 `spring.threads.virtual.enab……" | 开场钩子 |
+| 0:15 | spring.threa示意/对比图 | "spring.threads.virtual.enabled=true（Spring Boot 3.2+）" | spring.threa要点 |
+| 0:40 | Tomcat / @As示意/对比图 | "Tomcat / @Async / TaskExecutor 默认改虚拟线程" | Tomcat / @As要点 |
+| 1:25 | 总结卡 | "记住：spring.threads。下期见。" | 收尾 |

@@ -433,3 +433,26 @@ public class BackChannelLogoutController {
 3. **scope=openid 是 OIDC 标志？**——是的。OIDC client 必须请求 openid scope，IdP 才会发 id_token。其他 scope（profile/email）控制 id_token 里包含哪些 claim。
 4. **refresh_token 续期怎么处理 SSO？**——access_token 过期用 refresh_token 续，不需要用户重新登录（保持 SSO）。但 refresh_token 也有过期时间（如 7 天），过期后用户要重新登录。
 5. **IdP 高可用怎么部署？**——多副本部署（K8s 多 pod）+ 共享存储（数据库 + infinispan/redis cache session）+ 负载均衡 + 跨机房容灾。session 不能存本地（粘性会限制水平扩展）。
+
+## 结构化回答
+
+**30 秒电梯演讲：** OAuth2.1 是 OAuth2.0 的整理 + 安全补丁——强制 PKCE、废弃 implicit/password grant、明确 scope 规范。OIDC（OpenID Connect）是 OAuth2.0 的认证扩展层——OAuth2 解决授权（access token 能调什么 API），OIDC 解决认证（id token 证明用户是谁）。企业 SSO 用 OIDC 把多个内部系统统一到身份提供商（IdP），用户一次登录拿到 id token，所有系统都信任，不再各自维护账号
+
+**展开框架：**
+1. **OAuth2.1 强制** — OAuth2.1 强制 PKCE、废弃 implicit 和 password grant、明确 redirect_uri 严格匹配
+2. **OIDC 三种 flow** — Authorization Code（最常用）、Implicit（废弃）、Hybrid（特殊场景）
+3. **OIDC 三种 token** — access_token（调 API）、id_token（认证用户）、refresh_token（续期）
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——access_token 和 id_token 区别？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：OAuth2.1、OIDC 与企业 SSO 集成 | "这题核心是——OAuth2.1 是 OAuth2.0 的整理 + 安全补丁——强制 PKCE、废弃 impli……" | 开场钩子 |
+| 0:15 | OAuth2.1 强制示意/对比图 | "OAuth2.1 强制 PKCE、废弃 implicit 和 password grant、明确 redirect_uri 严格匹配" | OAuth2.1 强制要点 |
+| 0:40 | OIDC 三种 flow示意/对比图 | "Authorization Code（最常用）、Implicit（废弃）、Hybrid（特殊场景）" | OIDC 三种 flow要点 |
+| 1:25 | 总结卡 | "记住：OAuth2.1。下期见。" | 收尾 |

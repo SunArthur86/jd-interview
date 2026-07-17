@@ -423,3 +423,28 @@ K8s 发布新版本（kubectl apply）：
 3. **PID 1 问题？**——ENTRYPOINT 用 shell 启动，SIGTERM 发给 shell 不转发给 JVM。用 exec java 解决。
 4. **消费者优雅停？**——停拉取 → 等批次处理完 → 手动提交 offset（处理完才 ack，防重复消费）。
 5. **terminationGracePeriodSeconds？**——K8s 等优雅退出最长时间，超时发 SIGKILL。生产配 60 秒（含 preStop sleep）。
+
+## 结构化回答
+
+**30 秒电梯演讲：** 优雅停机是 Java 服务无感下线的核心——收到 SIGTERM 后，按摘流量 → 等处理完 → 销毁资源的顺序退出，保证在途请求不丢、消息不重复消费、连接不泄漏。Spring Boot 的 graceful shutdown + ApplicationListener<ContextClosedEvent> + K8s preStop hook 三层协作。坑点：SIGTERM 被吞（PID 1 问题）、preStop sleep 时间不够、线程池 shutdown 顺序错、消费者 offset 未提交
+
+**展开框架：**
+1. **三层协作** — Spring Boot graceful + ApplicationListener + K8s preStop
+2. **摘流量** — 注册中心注销（Eureka/Nacos）+ LB 刷新 + 网关路由更新
+3. **SIGTERM 处理** — Spring 监听 ContextClosedEvent，触发 graceful shutdown
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——为什么不能 kill -9？
+
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Java 服务优雅停机与流量摘除 | "这题核心是——优雅停机是 Java 服务无感下线的核心——收到 SIGTERM 后，按摘流量 → 等处理完 ……" | 开场钩子 |
+| 0:15 | 像餐厅关门——粗暴关（kill -9）是直接类比图 | "打个比方：像餐厅关门——粗暴关（kill -9）是直接。" | 核心类比 |
+| 0:40 | 三层协作示意/对比图 | "Spring Boot graceful + ApplicationListener + K8s preStop" | 三层协作要点 |
+| 1:05 | 摘流量示意/对比图 | "注册中心注销（Eureka/Nacos）+ LB 刷新 + 网关路由更新" | 摘流量要点 |
+| 1:30 | SIGTERM 处理示意/对比图 | "Spring 监听 ContextClosedEvent，触发 graceful shutdown" | SIGTERM 处理要点 |
+| 1:55 | 总结卡 | "记住：三层协作。下期见。" | 收尾 |

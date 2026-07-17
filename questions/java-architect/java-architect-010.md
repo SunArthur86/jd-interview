@@ -303,3 +303,28 @@ flux.log("category").subscribe();
 2. **flatMap 和 concatMap 区别？**——flatMap 并发执行内部 Publisher（无序），concatMap 顺序执行（有序）。需要顺序保证用 concatMap，追求吞吐用 flatMap。
 3. **响应式怎么转同步？**——`mono.block()` 阻塞拿结果（违背响应式原则，慎用）；`flux.toIterable()` 转 Iterable；`mono.toFuture()` 转 CompletableFuture。桥接处用（如传统 MVC 调响应式服务）。
 4. **R2DBC 和 JDBC 区别？**——JDBC 是阻塞（一请求一线程），R2DBC 是响应式（非阻塞，基于 Reactive Streams）。R2DBC 生态不如 JDBC 成熟（驱动少、功能少），但在 WebFlux 中是必须的。生产可考虑 R2DBC for 热路径 + JDBC for 复杂查询。
+
+
+## 结构化回答
+
+**30 秒电梯演讲：** 聊到响应式编程在 Java 后端的适用边界，我的理解是——响应式编程的本质是"用少量线程处理海量并发 IO"——通过事件循环 + 回调 + 背压，避免一个请求一个线程的阻塞模型。它的边界很明确：IO 密集高并发收益大，CPU 密集或同步库生态场景反而更复杂。打个比方，像 Netflix 的内容分发：传统阻塞模型是"每个观众派一个快递员去片库取片"（一请求一线程，万观众万快递员，贵）；响应式是"流水线 + 缓冲带"（事件循环线程 + 背压队列），快递员少但效率高，观众消费不过来时流水线自动减速（背压）。
+
+**展开框架：**
+1. **响应式流契约（Reactive Streams）** — Publisher/Subscriber/Subscription + 背压（request n）
+2. **背压** — 消费者告诉生产者"我只能处理 N 个"，生产者控制发送速率
+3. **WebFlux 基于 Reactor** — WebFlux 基于 Reactor + Netty，少量 EventLoop 线程处理海量请求
+
+**收尾：** 这块我在项目里也踩过坑——想深入的话，可以接着聊：WebFlux 和 MVC 性能差多少？您更想看哪个方向？
+
+## 视频脚本
+
+> 预计时长：4 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡 | "响应式编程在 Java 后端的适用边界——这道题面试官到底想考什么？我用 30 秒给你讲透。" | 开场钩子 |
+| 0:15 | 概念结构示意图 | 先说核心：响应式编程的本质是"用少量线程处理海量并发 IO"——通过事件循环 + 回调 + 背压，避免一个请求一个线程的阻塞模型。它的边界很明确：IO 密集高并发收益大，CPU 密集或同。 | 核心定义 |
+| 0:50 | 流程图 | 消费者告诉生产者"我只能处理 N 个"，生产者控制发送速率。 | 背压 |
+| 1:20 | 代码示例截图 | WebFlux 基于 Reactor + Netty，少量 EventLoop 线程处理海量请求。 | WebFlux 基于 Reactor |
+| 1:50 | 对比表格 | Mono（0/1 元素）和 Flux（0..N 元素）是 Reactor 的两种 Publisher。 | Mono（0/1 元素） |
+| 3:30 | 总结卡 | 一句话记忆：响应式流契约：Publisher/Subscriber/Subscription + request(n) 背压。 下期可以接着聊：WebFlux 和 MVC 性能差多少。 | 收尾总结 |

@@ -420,3 +420,28 @@ public void checkTenantStorageQuota() {
 2. **GDPR 对多租户的要求？**——数据可携带（用户要求导出数据，必须按 tenant_id 过滤）、被遗忘权（删除某用户数据，不能影响其他租户）、数据驻留（欧盟用户数据存在欧盟的 DB，可能需要按租户地域分库）。
 3. **多租户怎么做数据备份恢复？**——独立 DB 直接备份实例；共享 Schema 按 tenant_id 条件导出（mysqldump --where="tenant_id='acme'"）。恢复时不能覆盖其他租户——只能恢复到临时库，再按 tenant_id 迁移到生产库。
 4. **租户配置（每租户不同的业务规则）怎么存？**——独立的 tenant_config 表（tenant_id, config_key, config_value），应用启动或请求时加载该租户的配置。或用配置中心（Apollo/Nacos）按租户分 namespace。
+
+## 结构化回答
+
+**30 秒电梯演讲：** 多租户隔离有三种物理形态：独立数据库（隔离最强成本最高）、共享数据库独立 Schema（中间态）、共享数据库共享 Schema（在表里加 tenant_id 字段，成本最低但隔离最弱）。SaaS 系统通常混合用——大客户独立库，中小客户共享库加 tenant_id。核心机制是路由层 + 数据层：路由层根据请求识别租户，数据层保证租户间数据物理或逻辑隔离
+
+**展开框架：**
+1. **三种隔离模式** — DB-per-tenant / Schema-per-tenant / Shared-DB-with-tenant_id
+2. **租户识别** — 域名（acme.saas.com）/ 请求头（X-Tenant-Id）/ JWT 中的 tenant claim
+3. **数据层隔离** — MyBatis 拦截器自动追加 WHERE tenant_id=?，或动态数据源路由
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——tenant_id 泄露（跨租户访问）怎么防？
+
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：多租户架构与数据隔离策略 | "这题核心是——多租户隔离有三种物理形态：独立数据库（隔离最强成本最高）、共享数据库独立 Schema（中间态）、共……" | 开场钩子 |
+| 0:15 | 像写字楼出租类比图 | "打个比方：像写字楼出租。" | 核心类比 |
+| 0:40 | 三种隔离模式示意/对比图 | "DB-per-tenant / Schema-per-tenant / Shared-DB-with-tenant_id" | 三种隔离模式要点 |
+| 1:05 | 租户识别示意/对比图 | "域名（acme.saas.com）/ 请求头（X-Tenant-Id）/ JWT 中的 tenant claim" | 租户识别要点 |
+| 1:30 | 数据层隔离示意/对比图 | "MyBatis 拦截器自动追加 WHERE tenant_id=?，或动态数据源路由" | 数据层隔离要点 |
+| 1:55 | 总结卡 | "记住：三种隔离。下期见。" | 收尾 |

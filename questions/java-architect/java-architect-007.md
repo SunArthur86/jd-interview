@@ -310,3 +310,26 @@ CompletableFuture<Data> result = CompletableFuture.anyOf(primary, secondary)
 2. **allOf 和 anyOf 区别？**——allOf 等所有 CF 完成（全成功或任一异常），返回 `CompletableFuture<Void>`；anyOf 等任一 CF 完成，返回 `CompletableFuture<Object>`。allOf 用于扇入聚合，anyOf 用于竞速容错。
 3. **CompletableFuture 怎么取消？**——`cf.cancel(true)` 标记完成（异常完成 CancellationException），但**不会中断正在执行的任务**（因为是回调驱动，没有线程可中断）。要真正取消底层任务，要在 Runnable 内部响应中断标志。
 4. **为什么 thenApply 可能阻塞调用方线程？**——如果上游 CF 已提前完成，thenApply 的函数会在调用方线程（调用 thenApply 的那个线程）同步执行。要避免用 thenApplyAsync 强制切线程。
+
+
+## 结构化回答
+
+**30 秒电梯演讲：** 聊到CompletableFuture 编排与异步链路治理，我的理解是——CompletableFuture 的本质是把"回调地狱"变成"可编排的异步数据流"。它不是 Future 的简单升级，而是用 CompletionStage 接口把"任务完成后的动作"建模成链式图——串行、并行、组合、异常处理都变成声明式 API。打个比方，像 Excel 公式链：A1 是原始数据，B1=A1×2，C1=B1+10。CompletableFuture 就是异步版的 Excel——supplyAsync 起 A1，thenApply 是 B1，thenCombine 是把两个 sheet 的结果合到 C1。哪个单元格慢了，下游自动等，不用你写 wait/notify。
+
+**展开框架：**
+1. **创建** — supplyAsync/ runAsync（默认 ForkJoinPool.commonPool）
+2. **转换** — thenApply（同步）、thenApplyAsync（异步切线程）
+3. **组合** — thenCombine（两 CF 合并）、allOf/anyOf（多 CF 聚合）
+
+**收尾：** 这块我在项目里也踩过坑——想深入的话，可以接着聊：为什么默认 ForkJoinPool.commonPool 不能用？您更想看哪个方向？
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡 | "CompletableFuture 编排与异步链路治理——这道题面试官到底想考什么？我用 30 秒给你讲透。" | 开场钩子 |
+| 0:15 | Agent 编排链路图 | 先说核心：CompletableFuture 的本质是把"回调地狱"变成"可编排的异步数据流"。它不是 Future 的简单升级，而是用 CompletionStage 接口把"任务完成。 | 核心定义 |
+| 0:30 | Future 任务编排图 | thenApply（同步）、thenApplyAsync（异步切线程）。 | 转换 |
+| 1:30 | 总结卡 | 一句话记忆：CompletableFuture 是异步 DAG 构造器，不是 Future 升级版。 下期可以接着聊：为什么默认 ForkJoinPool.commonPool 不能用。 | 收尾总结 |

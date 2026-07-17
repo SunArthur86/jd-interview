@@ -370,3 +370,27 @@ wrk -t8 -c100 -d60s http://order-service-boot3/api/orders
 3. **怎么自动升级？**——Spring Boot Migrator（官方 GUI）或 OpenRewrite（Maven 插件，可集成 CI）。自动重构包名 + 升级直接依赖。
 4. **间接依赖的 javax 残留怎么排查？**——mvn dependency:tree | grep javax，找到残留后升级到 Jakarta 版本或 exclusion 排除。
 5. **JDK 自带的 javax 要改吗？**——不要！javax.crypto / javax.sql / javax.net / javax.naming 是 JDK 自带，不属于 Java EE，保持原样。
+
+## 结构化回答
+
+**30 秒电梯演讲：** Spring Boot 3 强制把 javax.* 全部改成 jakarta.*（Java EE → Jakarta EE 9+ 的命名空间迁移），这是一次包名变更，不是API 行为变更。但因为 javax.* 在 Java 生态渗透极深（Servlet/JPA/JMS/Validation/...），所有依赖都要同步升级，是事实上的生态级 break change
+
+**展开框架：**
+1. **Spring Boot** — Spring Boot 3 强制 javax.* → jakarta.*（命名空间迁移）
+2. **影响范围** — Servlet/JPA/JMS/Validation/Annotation/WebSocket 全部
+3. **依赖联动** — 所有第三方库要 Jakarta 版本（Hibernate 6+ / Tomcat 10+ / Jersey 3+）
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——为什么不改成 javax 保留兼容？
+
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Spring Boot 3.x 升级到 Jaka | "这题核心是——Spring Boot 3 强制把 javax.* 全部改成 jakarta.*（Java EE →……" | 开场钩子 |
+| 0:15 | 像把全国所有长安街改名建国街——街道没变类比图 | "打个比方：像把全国所有长安街改名建国街——街道没变。" | 核心类比 |
+| 0:40 | Spring Boot示意/对比图 | "Spring Boot 3 强制 javax.* → jakarta.*（命名空间迁移）" | Spring Boot要点 |
+| 1:05 | 影响范围示意/对比图 | "Servlet/JPA/JMS/Validation/Annotation/WebSocket 全部" | 影响范围要点 |
+| 1:55 | 总结卡 | "记住：Spring Boot 3。下期见。" | 收尾 |

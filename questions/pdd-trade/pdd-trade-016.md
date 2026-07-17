@@ -145,3 +145,25 @@ synchronized 没有"死锁检测"，它一样会死锁（两个 synchronized 块
 2. 锁的规范——必须 `try { lock(); ... } finally { unlock(); }`（防忘释放）、锁命名（便于 jstack 排查）、锁内禁止 RPC/IO（减小临界区）。CI 用 Checkstyle 检查 `lock()` 后必须有 `finally unlock()`。
 3. 显式锁的最后手段——只在"JUC 高层工具满足不了"（如自定义同步器、复杂条件等待）时才用 ReentrantLock/AQS。大多数业务场景，ConcurrentHashMap + Atomic + BlockingQueue 足够，不需要裸用锁。
 
+## 结构化回答
+
+**30 秒电梯演讲：** 如何用一个框架统一表达锁/信号量/闭锁？简单说就是——AQS 用 volatile state + CLH 变种双向队列实现独占/共享同步，是 ReentrantLock/Semaphore/CountDownLatch 的公共基类。
+
+**展开框架：**
+1. **state** — state（volatile）+ CLH 变种双向队列
+2. **独占Ree** — 独占（ReentrantLock）/共享（Semaphore）
+3. **公平先排队** — 公平（先排队）/非公平（先抢再排）
+
+**收尾：** 您看这块要不要再展开聊聊？
+
+## 视频脚本
+
+> 预计时长：3 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：AQS 原理？ReentrantLock 的公平/非公平？ | 今天聊「AQS 原理？ReentrantLock 的公平/非公平？」。一句话：AQS 用 volatile state + CLH 变种双向队列实现独占/共享同步，是 ReentrantLock/… | 开场钩子 |
+| 0:12 | 核心概念图 + 关键词浮现 | 要点是：state（volatile）+ CLH 变种双向队列 | 核心概念 |
+| 1:04 | 能力/参数拆解表 | 要点是：独占（ReentrantLock）/共享（Semaphore） | 能力拆解 |
+| 1:56 | 流程图：输入→处理→输出 | 要点是：公平（先排队）/非公平（先抢再排） | 关键机制 |
+| 3:00 | 总结卡 + 下期预告 | 记住核心要点就够了。下期见。 | 收尾 |

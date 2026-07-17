@@ -421,3 +421,26 @@ try (CloseableHttpResponse resp = httpClient.execute(request)) {
 3. **HikariCP 怎么检测连接泄漏？**——配置 leakDetectionThreshold，连接借出超时未归还，打印持有栈定位泄漏代码。
 4. **ThreadLocal 泄漏原理？**——ThreadLocalMap.Entry 的 key 是弱引用，ThreadLocal 对象回收后 key=null，value 永久驻留（线程池复用累积）。
 5. **怎么预防泄漏？**——try-with-resources（自动 close）+ 线程池有界（不用 newCachedThreadPool）+ ThreadLocal remove + 监控告警。
+
+## 结构化回答
+
+**30 秒电梯演讲：** 线程泄漏与连接泄漏是 Java 服务\慢性死亡\的两大元凶。线程泄漏：创建后不复用、不回收，线程数无限增长（最终 OOM: unable to create new native thread）。连接泄漏：借用后不归还，连接池耗尽（最终所有请求阻塞等待连接）。排查思路：① 告警（线程数/连接数超阈值）→ ② dump（jstack/连接池日志）→ ③ 定位泄漏点（栈追溯代码）→ ④ 修复（try-with-resources / 连接池配置）
+
+**展开框架：**
+1. **线程泄漏** — 线程数无限增长 → OOM: unable to create new native thread"
+2. **连接泄漏** — 连接不归还 → 连接池耗尽 → 请求阻塞
+3. **排查三步** — 告警 → dump（jstack/连接池日志）→ 栈追溯代码
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——线程泄漏和内存泄漏区别？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：线上线程泄漏与连接泄漏如何排查 | "这题一句话：线程泄漏与连接泄漏是 Java 服务\慢性死亡\的两大元凶。" | 开场钩子 |
+| 0:15 | 线程泄漏示意/对比图 | "线程数无限增长 → OOM: unable to create new native thread" | 线程泄漏要点 |
+| 0:40 | 连接泄漏示意/对比图 | "连接不归还 → 连接池耗尽 → 请求阻塞" | 连接泄漏要点 |
+| 1:25 | 总结卡 | "记住：线程泄漏。下期见。" | 收尾 |

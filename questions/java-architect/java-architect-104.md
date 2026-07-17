@@ -345,3 +345,26 @@ ScopedValue 不依赖 carrier，作用域是栈帧属性，子任务通过 Struc
 3. **ScopedValue 能完全替代 ThreadLocal 吗？**——不能。可变状态（数据库连接、事务、Buffer）仍要 ThreadLocal + try-finally remove。ScopedValue 只适合不可变的请求上下文。
 4. **ScopedValue 和 StructuredTaskScope 怎么配合？**——scope.fork 的子任务自动继承父作用域的 ScopedValue（无需 InheritableThreadLocal 的复杂机制）。
 5. **怎么迁移 ThreadLocal 到 ScopedValue？**——按场景：不可变请求上下文（userId/traceId）改 ScopedValue；可变状态（连接/事务/Buffer）保留 ThreadLocal；MDC 用桥接兼容。先改 InheritableThreadLocal（事故源）。
+
+## 结构化回答
+
+**30 秒电梯演讲：** ScopedValue（JEP 506，JDK 24 GA）是 ThreadLocal 在虚拟线程时代的替代品——不可变、自动清理、bounded lifetime。ThreadLocal 的可变 + 永不清理 + 继承混乱在百万虚拟线程下变成内存炸弹和上下文错乱，ScopedValue 用作用域绑定 + 单次写入重新设计上下文传递
+
+**展开框架：**
+1. **ScopedValue（JDK 24 GA）** — 不可变、bounded to scope、自动清理
+2. **ThreadLocal 的坑** — 百万虚拟线程下内存爆炸、继承在 carrier 切换时错乱、永不清理泄漏
+3. **与 Structured** — 与 StructuredTaskScope 天生搭配：子任务自动继承父的 ScopedValue
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——ScopedValue 真的能替代所有 ThreadLocal 吗？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Scoped Values 与 ThreadLo | "这题核心是——ScopedValue（JEP 506，JDK 24 GA）是 ThreadLocal 在虚拟线程时……" | 开场钩子 |
+| 0:15 | ScopedValue（JDK 示意/对比图 | "不可变、bounded to scope、自动清理" | ScopedValue（JDK 要点 |
+| 0:40 | ThreadLocal 的坑示意/对比图 | "百万虚拟线程下内存爆炸、继承在 carrier 切换时错乱、永不清理泄漏" | ThreadLocal 的坑要点 |
+| 1:25 | 总结卡 | "记住：ScopedValue。下期见。" | 收尾 |

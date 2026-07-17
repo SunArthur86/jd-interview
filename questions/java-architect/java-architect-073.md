@@ -395,3 +395,26 @@ groups:
 3. **迁移期双注册怎么做？**——Provider 同时暴露 Dubbo（@DubboService）和 REST（@RestController），注册到 ZK 和 Nacos。消费端按版本部署，旧版走 Dubbo+ZK，新版走 Feign+Nacos，网关用流量标签隔离。
 4. **治理规则漏迁会怎样？**——最典型是 timeout。Dubbo 默认 1s，Feign 默认 60s。漏配会让慢依赖耗尽线程池引发雪崩。每条规则要逐条对照迁移 + 压测验证。
 5. **注册中心怎么平滑切换？**——先 Dubbo 注册中心从 ZK 切 Nacos（Dubbo 3.x 原生支持），再框架迁移。注册中心先行降低风险。过渡期可双注册中心（分号分隔），最后摘除 ZK。
+
+## 结构化回答
+
+**30 秒电梯演讲：** Dubbo 到 SCA（Spring Cloud Alibaba）的迁移本质是通信协议（Dubbo TCP vs HTTP/Feign）+ 注册发现（Zookeeper/Nacos）+ 治理能力（Dubbo SPI vs SCA 生态）三件事的切换。风险不在框架本身，而在迁移过程中新老框架并存调用、注册中心数据不一致、治理规则失效三类问题
+
+**展开框架：**
+1. **Dubbo** — 私有 TCP 协议（默认 dubbo 协议）、接口级注册（每个方法注册到 ZK/Nacos）、SPI 扩展强
+2. **SCA** — HTTP/Feign（或 Dubbo Spring Cloud 两种都行）、应用级注册（Spring Cloud LoadBalancer）、生态广
+3. **迁移三大风险** — 注册中心数据不一致（双注册中心同步）、治理规则失效（超时/重试/限流配置迁移）、新老并存调用混乱
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——为什么不直接用 Dubbo 3.x 而要迁 SCA？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Dubbo 到 Spring Cloud Ali | "这题核心是——Dubbo 到 SCA（Spring Cloud Alibaba）的迁移本质是通信协议（Dubbo……" | 开场钩子 |
+| 0:15 | Dubbo示意/对比图 | "私有 TCP 协议（默认 dubbo 协议）、接口级注册（每个方法注册到 ZK/Nacos）、SPI 扩展强" | Dubbo要点 |
+| 0:40 | SCA示意/对比图 | "HTTP/Feign（或 Dubbo Spring Cloud 两种都行）、应用级注册（Spring Cloud LoadBalancer）、生态广" | SCA要点 |
+| 1:25 | 总结卡 | "记住：迁移四阶段。下期见。" | 收尾 |

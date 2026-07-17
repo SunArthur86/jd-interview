@@ -336,3 +336,27 @@ jstat -gcutil <pid> 1000                 # 看 GC 频率和耗时（仅参考，
 3. **Generational 和单代区别？**——Generational 分代扫描（年轻代小回收为主），吞吐损失从 15% 降到 5%。单代每次扫全堆。JDK 25 移除单代。
 4. **染色指针是什么？**——64 位指针的高 4 位用作 GC 状态标记（Marked0/Marked1/Remapped/Finalizable），GC 修改指针状态而不是对象头。
 5. **什么时候选 ZGC？**——堆 > 16GB + 延迟敏感（P99 RT < 100ms）。堆 < 4GB 用 G1 更简单，吞吐优先用 Parallel。
+
+## 结构化回答
+
+**30 秒电梯演讲：** Generational ZGC（JEP 439，JDK 21 GA）让 ZGC 从单代变成年轻代 + 老年代分代，利用弱分代假说把 GC 扫描范围从全堆降到年轻代。结果是：堆 16GB 时 P99 GC pause < 1ms，吞吐损失从单代 ZGC 的 15% 降到 5%。低延迟服务（交易、风控、支付）从此有了一个既低延迟又高吞吐的 GC
+
+**展开框架：**
+1. **Generational** — Generational ZGC（JEP 439，JDK 21 GA）：分代版 ZGC
+2. **P99 GC pause** — P99 GC pause < 1ms（堆 16GB 内）、< 10ms（堆 16TB 内）
+3. **吞吐损失从单代 ZGC** — 吞吐损失从单代 ZGC 15% 降到 5%
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——Generational ZGC 和 G1 区别？
+
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Generational ZGC 与低延迟服务调 | "这题核心是——Generational ZGC（JEP 439，JDK 21 GA）让 ZGC 从单代变成年轻代……" | 开场钩子 |
+| 0:15 | 像垃圾分类回收：单代 ZGC 是所有垃圾混在一类比图 | "打个比方：像垃圾分类回收：单代 ZGC 是所有垃圾混在一。" | 核心类比 |
+| 0:40 | Generational示意/对比图 | "Generational ZGC（JEP 439，JDK 21 GA）：分代版 ZGC" | Generational要点 |
+| 1:05 | P99 GC pause示意/对比图 | "P99 GC pause < 1ms（堆 16GB 内）、< 10ms（堆 16TB 内）" | P99 GC pause要点 |
+| 1:55 | 总结卡 | "记住：Generational Z。下期见。" | 收尾 |

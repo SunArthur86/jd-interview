@@ -358,3 +358,28 @@ Java 21 终于追上 Kotlin/Scala 的 ADT 能力，且因为 sealed 接口的存
 3. **和 Visitor 模式对比？**——Visitor 是迂回方案（accept + visit），Record Pattern 直接 switch + 解构更简洁。Visitor 适合操作稳定、数据类型稳定场景；Record Pattern 适合数据类型可扩展场景。
 4. **穷尽性怎么保证？**——sealed 让编译器知道所有子类型，switch 不写 default 时编译器校验所有 case 都覆盖，漏一个编译错。
 5. **性能怎么样？**——switch pattern 编译成 tableswitch/lookupswitch（和 switch int 性能等价），解构是字段访问无开销。整体和 instanceof + 强转等价或更快。
+
+## 结构化回答
+
+**30 秒电梯演讲：** Record Pattern（JEP 440/441，JDK 21 GA）是用数据形状做控制流——把 instanceof + 强转 + 字段提取三步合一，让代数数据类型（ADT）在 Java 里第一次可表达。它的工程价值不是少写两行代码，而是把类型分支从运行时 instanceof（易 NPE、易漏分支）变成编译期穷尽检查（sealed + switch pattern = 穷尽性校验）
+
+**展开框架：**
+1. **Record Patte** — Record Pattern（JDK 21 GA）：instanceof 和 switch 都支持
+2. **解构** — record 的组件类型 + 名称自动提取
+3. **嵌套** — Record Pattern 可嵌套（Point(Point(int x,_), _)）
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——Record Pattern 和访问者模式（Visitor）什么关系？
+
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Java 21 Record Pattern 与 | "这题核心是——Record Pattern（JEP 440/441，JDK 21 GA）是用数据形状做控制流—……" | 开场钩子 |
+| 0:15 | 像快递分拣：老 instanceof 是先看是类比图 | "打个比方：像快递分拣：老 instanceof 是先看是。" | 核心类比 |
+| 0:40 | Record Patte示意/对比图 | "Record Pattern（JDK 21 GA）：instanceof 和 switch 都支持" | Record Patte要点 |
+| 1:05 | 解构示意/对比图 | "record 的组件类型 + 名称自动提取" | 解构要点 |
+| 1:30 | 嵌套示意/对比图 | "Record Pattern 可嵌套（Point(Point(int x,_), _)）" | 嵌套要点 |
+| 1:55 | 总结卡 | "记住：Record Pattern。下期见。" | 收尾 |

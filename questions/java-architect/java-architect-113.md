@@ -416,3 +416,26 @@ traceId: "abc123def456789abc123def456789ab"
 3. **MDC 是什么？**——Mapped Diagnostic Context，线程本地的 Map。logback 自动把 MDC 内容输出到日志字段（traceId/spanId/业务字段）。
 4. **日志采集怎么不阻塞业务？**——AsyncAppender 异步写（业务线程只入队，IO 线程写盘）+ neverBlock 队列满丢弃（不阻塞业务）。
 5. **日志成本怎么控制？**——按级别采集（ERROR 全量、DEBUG 关）+ 高频采样 + 保留期分层（ERROR 30 天、INFO 7 天）+ 冷热分离。
+
+## 结构化回答
+
+**30 秒电梯演讲：** 结构化日志（JSON）+ traceId 关联是分布式排查的基础设施——日志不再是给人读的文本，而是给机器查询的结构化数据。一条 traceId 串起网关、订单、库存、支付 N 个服务的日志，秒级定位用户 A 的订单为什么失败。治理核心是 traceId 透传（HTTP/MQ/线程池）+ 日志字段标准化 + 采集成本控制
+
+**展开框架：**
+1. **结构化日志** — JSON 格式（不是文本），字段标准化（timestamp/level/traceId/logger/msg/...）
+2. **traceId 透传** — HTTP（W3C traceparent）、MQ（消息属性）、线程池（TTL）
+3. **MDC + Logbac** — MDC + Logback JSON encoder 自动注入 traceId
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——traceId 怎么生成？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Spring Boot 结构化日志与 trace | "这题核心是——结构化日志（JSON）+ traceId 关联是分布式排查的基础设施——日志不再是给人读的文本，……" | 开场钩子 |
+| 0:15 | 结构化日志示意/对比图 | "JSON 格式（不是文本），字段标准化（timestamp/level/traceId/logger/msg/...）" | 结构化日志要点 |
+| 0:40 | traceId 透传示意/对比图 | "HTTP（W3C traceparent）、MQ（消息属性）、线程池（TTL）" | traceId 透传要点 |
+| 1:25 | 总结卡 | "记住：结构化日志 = JSON +。下期见。" | 收尾 |

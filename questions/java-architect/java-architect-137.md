@@ -379,3 +379,26 @@ public class PaymentProcessor {
 3. **zombie epoch 防什么？**——防止"旧 producer 实例（已死但未通知 coordinator）"继续写消息。新 producer 启动 epoch+1，broker 拒绝旧 epoch 请求。
 4. **Kafka EOS 性能下降多少？**——10-20%。原因是事务协调开销 + LSO 滞后（read_committed 消费者读不到未提交事务后的消息）。
 5. **read_committed 和 read_uncommitted 怎么选？**——read_committed 跳过 abort 事务（推荐，正确性优先）；read_uncommitted 性能略高（能看到 abort 事务的消息）。生产用 read_committed。
+
+## 结构化回答
+
+**30 秒电梯演讲：** Kafka Exactly-Once（EOS）是应用可见的恰好一次——底层仍是 at-least-once（网络可能重投），但通过幂等 producer（PID + seq 去重）+ 事务（跨分区/跨 producer 原子提交）+ read_committed（只读已提交）组合，让业务感知不到重复。但 Kafka EOS 只在Kafka 内部成立（Kafka-to-Kafka），跨外部系统（写 MySQL/调外部 API）必须业务幂等——这是 EOS 的边界
+
+**展开框架：**
+1. **幂等 producer** — enable.idempotence=true，PID + sequence number，broker 端去重
+2. **事务 producer** — transactional.id，beginTransaction + commitTransaction，跨分区原子
+3. **消费端隔离级别** — read_committed（只读已提交，跳过 abort 的事务）
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——幂等 producer 的 PID 怎么来的？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Kafka Exactly Once 语义与业务 | "这题核心是——Kafka Exactly-Once（EOS）是应用可见的恰好一次——底层仍是 at-least……" | 开场钩子 |
+| 0:15 | 幂等 producer示意/对比图 | "enable.idempotence=true，PID + sequence number，broker 端去重" | 幂等 producer要点 |
+| 0:40 | 事务 producer示意/对比图 | "transactional.id，beginTransaction + commitTransaction，跨分区原子" | 事务 producer要点 |
+| 1:25 | 总结卡 | "记住：幂等 producer。下期见。" | 收尾 |

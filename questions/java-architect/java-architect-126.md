@@ -378,3 +378,26 @@ public class OrderController implements OrderApi {
 3. **Linter 规则集怎么设计？**——三层：语法层（spectral:oas 内置）、规范层（公司命名/错误码/分页规范）、安全层（必填鉴权、禁用 query 传敏感字段）。
 4. **OpenAPI 怎么描述分页？**——用 `nextCursor` 游标分页（避免 offset 大表性能问题），response 里 `x-page-next` 字段；或在 header 用 `Link: <url>; rel="next"`。
 5. **怎么自动生成 SDK？**——openapi-generator-cli 支持 50+ 语言，CI 流水线拉 YAML → generate → publish 到 Nexus/npm/PyPI。版本号和 OpenAPI version 一一对应。
+
+## 结构化回答
+
+**30 秒电梯演讲：** API 契约优先设计（Design-First）是指先写 OpenAPI 规范作为机器可读的契约，再生成桩代码、Mock、文档、SDK，最后双方按契约并行开发；OpenAPI 治理是在企业内部把契约版本化、兼容性校验、Linter 规则、Mock/Stub、文档中心、SDK 自动下发串成一条流水线，让契约成为服务端与客户端、上游与下游协作的唯一真相源（single source of truth）
+
+**展开框架：**
+1. **Design-First** — OpenAPI YAML 是工件，进 Git，参与 Code Review，先于代码
+2. **兼容性三类** — non-breaking（加可选字段）、breaking（删字段/改类型/改必填）、risky（语义变化）
+3. **治理四件套** — Linter（spectral）、Diff（openapi-diff）、Mock（prism/ventus）、SDK 生成（openapi-generato……
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——为什么不用 GraphQL 替代 OpenAPI？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：API 契约优先设计与 OpenAPI 治理 | "这题核心是——API 契约优先设计（Design-First）是指先写 OpenAPI 规范作为机器可读的契约……" | 开场钩子 |
+| 0:15 | Design-First示意/对比图 | "OpenAPI YAML 是工件，进 Git，参与 Code Review，先于代码" | Design-First要点 |
+| 0:40 | 兼容性三类示意/对比图 | "non-breaking（加可选字段）、breaking（删字段/改类型/改必填）、risky（语义变化）" | 兼容性三类要点 |
+| 1:25 | 总结卡 | "记住：Design-First。下期见。" | 收尾 |

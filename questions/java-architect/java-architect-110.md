@@ -403,3 +403,28 @@ native-image --pgo=profile.iprof -jar app.jar app-optimized
 3. **reflect-config.json 怎么生成？**——Spring Boot 3 + Spring AOT 自动生成 95%；剩余 5% 用 Tracing Agent（native-image-agent）跑 JVM 模式业务收集。
 4. **为什么启动这么快？**——AOT 编译在构建时完成类加载、Bean 初始化、代码编译，运行时直接执行机器码。封闭世界假设让所有可达代码固化。
 5. **峰值吞吐为什么低？**——无 JIT 动态优化（JVM 的 C2 基于 profile 优化，Native 是 AOT 静态编译）；默认 Serial GC（GraalVM 23+ 支持 G1）。可用 PGO 缓解。
+
+## 结构化回答
+
+**30 秒电梯演讲：** Native Image 是 GraalVM 的 AOT（Ahead-Of-Time）编译——把 Spring Boot 应用编译成原生可执行文件，启动时间从 30 秒降到 50ms，内存占用从 1GB 降到 100MB。代价是失去 JIT 优化（峰值吞吐降 10-30%）、反射/动态代理要配置（reflect-config.json）、构建时间长（5-10 分钟）。它是 Serverless / 函数计算 / CLI 工具的杀手锏，但不是长运行服务的最佳选择
+
+**展开框架：**
+1. **Native Image（GraalVM）** — AOT 编译，启动 < 100ms，内存降 80%
+2. **代价** — 无 JIT（峰值吞吐降 10-30%）、反射/动态代理要配置、构建慢（5-10 分钟）
+3. **reflect** — config.json / resource-config.json / proxy-config.json 配置文件
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——Native Image 和 JVM 模式怎么选？
+
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Native Image 与 JVM 模式如何选 | "这题核心是——Native Image 是 GraalVM 的 AOT（Ahead-Of-Time）编译——把 S……" | 开场钩子 |
+| 0:15 | 像把一部汽车（JVM + JIT）拆了重装成自行类比图 | "打个比方：像把一部汽车（JVM + JIT）拆了重装成自行。" | 核心类比 |
+| 0:40 | Native示意/对比图 | "AOT 编译，启动 < 100ms，内存降 80%" | Native要点 |
+| 1:05 | 代价示意/对比图 | "无 JIT（峰值吞吐降 10-30%）、反射/动态代理要配置、构建慢（5-10 分钟）" | 代价要点 |
+| 1:30 | reflect示意/对比图 | "config.json / resource-config.json / proxy-config.json 配置文件" | reflect要点 |
+| 1:55 | 总结卡 | "记住：Native Image。下期见。" | 收尾 |

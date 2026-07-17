@@ -423,3 +423,26 @@ spec:
 3. **KEDA 和 HPA 区别？**——HPA 基于 CPU/内存（内置指标），KEDA 基于外部事件源（60+ scaler）。可共存互补。
 4. **scale-to-zero 注意什么？**——冷启动延迟 30-60 秒，实时场景设 minReplicaCount=1，批处理可 scale-to-zero 省成本。
 5. **Kafka partition 和 Pod 关系？**——消费并行度上限 = partition 数，maxReplicaCount 不超过 partition 数（多余 Pod 空闲）。
+
+## 结构化回答
+
+**30 秒电梯演讲：** KEDA（Kubernetes Event-Driven Autoscaling）是 K8s 的事件驱动伸缩器——基于队列深度/消息积压等外部信号伸缩 Pod，而非 CPU/内存。解决 HPA 基于 CPU 的盲区：CPU 高不一定需要扩容（可能是 GC），队列积压才真的需要扩容（消费不过来）。KEDA 集成 Kafka/RabbitMQ/Redis Streams/AWS SQS 等 60+ 事件源，让 Java 消费者按待处理消息数精确扩容
+
+**展开框架：**
+1. **KEDA = K8s 事** — KEDA = K8s 事件驱动伸缩（基于外部信号，非 CPU）
+2. **ScaledObject** — 定义伸缩对象 + 触发器（trigger）
+3. **60+ 事件源** — Kafka / RabbitMQ / Redis Streams / AWS SQS / Prometheus
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——KEDA 和 HPA 区别？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：KEDA 事件驱动伸缩与队列消费扩容 | "这题核心是——KEDA（Kubernetes Event-Driven Autoscaling）是 K8s 的事件……" | 开场钩子 |
+| 0:15 | KEDA = K8s 事示意/对比图 | "KEDA = K8s 事件驱动伸缩（基于外部信号，非 CPU）" | KEDA = K8s 事要点 |
+| 0:40 | ScaledObject示意/对比图 | "定义伸缩对象 + 触发器（trigger）" | ScaledObject要点 |
+| 1:25 | 总结卡 | "记住：KEDA = K8s 事件驱。下期见。" | 收尾 |

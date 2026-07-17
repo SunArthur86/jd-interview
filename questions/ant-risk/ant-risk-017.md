@@ -318,3 +318,27 @@ Redis 确实容量大，但延迟高。风控决策查缓存的 RT 预算是 5ms
 3. 监控基线——每个缓存的 size、hit rate、eviction count 上报 Prometheus。size 接近 maximumSize 告警（配额不足）、hit rate 低于阈值告警（缓存效果差）、eviction rate 飙升告警（可能被异常流量冲）。
 4. ThreadLocal/resource 规范——所有 ThreadLocal 必须 try-finally remove（SpotBugs 检测）、所有 IO 必须 try-with-resources、所有监听器注册必须有对应 unregister。
 5. 故障复盘——把这次"多租户缓存实例爆炸 → 6G 泄漏 → OOM"的 MAT Dominator Tree 截图、缓存架构改进存知识库，作为"缓存必须全局配额"的案例。
+
+
+## 结构化回答
+
+**30 秒电梯演讲：** 聊到线上服务 OOM 怎么排查？讲一次完整的排查过程，我的理解是——OOM 排查的核心是"分类型 + 看堆 + 找支配对象"——先判断是哪种 OOM（heap/metaspace/direct/thread），dump 堆，用 MAT 找支配树最大对象。打个比方，OOM 像房间挤爆——先看是哪个房间爆（堆/元空间/直接内存），再看是谁占了最大空间（支配对象），最后找出"只进不出"的占用者（泄漏点）。
+
+**展开框架：**
+1. **OOM 类型** — Java heap space（堆）/ Metaspace / GC overhead / Direct buffer / Unable to create thread
+2. **自动 dump** — -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=
+3. **MAT 三件套** — Dominator Tree（支配树）、Histogram（按类聚合）、Leak Suspects（嫌疑报告）
+
+**收尾：** 这块我在项目里也踩过坑——想深入的话，可以接着聊：内存泄漏和内存溢出区别？您更想看哪个方向？
+
+## 视频脚本
+
+> 预计时长：3 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡 | "线上服务 OOM 怎么排查？讲一次完整的排查过程——这道题面试官到底想考什么？我用 30 秒给你讲透。" | 开场钩子 |
+| 0:15 | JVM 内存分代图 | 先说核心：OOM 排查的核心是"分类型 + 看堆 + 找支配对象"——先判断是哪种 OOM（heap/metaspace/direct/thread），dump 堆，用 MAT 找支配树。 | 核心定义 |
+| 0:40 | 内存结构示意图 | -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=。 | 自动 dump |
+| 1:05 | 概念结构示意图 | Dominator Tree（支配树）、Histogram（按类聚合）、Leak Suspects（嫌疑报告）。 | MAT 三件套 |
+| 2:30 | 总结卡 | 一句话记忆：OOM 五类型：heap / Metaspace / GC overhead / Direct buffer / thread。 下期可以接着聊：内存泄漏和内存溢出区别。 | 收尾总结 |

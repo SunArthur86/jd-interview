@@ -193,3 +193,27 @@ Gap Lock 是 RR 隔离下"当前读"（`SELECT ... FOR UPDATE / LOCK IN SHARE MO
 2. `SHOW ENGINE INNODB STATUS` 看 `LATEST DETECTED DEADLOCK` 和 `TRANSACTIONS` 段——MVCC 读不应出现在 lock 等待列表里。
 3. `performance_schema.data_locks` 看锁类型——快照读不会产生 record lock/gap lock，只有写和当前读会。
 沉淀：审核/改状态走 `FOR UPDATE` 且事务尽量短（<50ms）；读列表/详情走 MVCC 快照读不显式加锁；监控长事务（`trx_duration > 5s` 告警），长事务会撑大 undo version chain 影响性能。
+
+## 结构化回答
+
+**30 秒电梯演讲：** 读写互斥加锁慢，如何让读不加锁还能读到一致快照？简单说就是——MVCC 用"undo log 版本链 + ReadView"实现快照读，不加锁实现 RC/RR 隔离；内容场景评价读取用 MVCC 避免锁等待。undo 版本链；ReadView：活跃事务列表。
+
+**展开框架：**
+1. **隐藏字段** — 隐藏字段：trx_id + roll_pointer
+2. **undo 版** — undo 版本链
+3. **ReadView** — ReadView：活跃事务列表
+
+**收尾：** 您想继续往深里聊吗——比如「RC 和 RR 的快照差异？」
+
+## 视频脚本
+
+> 预计时长：3 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：MVCC 原理与评价读写隔离？ | 今天聊「MVCC 原理与评价读写隔离？」。一句话：MVCC 用"undo log 版本链 + ReadView"实现快照读，不加锁实现 RC/RR 隔离；内容场景评价读… | 开场钩子 |
+| 0:12 | 核心概念图 + 关键词浮现 | 要点是：隐藏字段：trx_id + roll_pointer | 核心概念 |
+| 0:51 | 能力/参数拆解表 | 要点是：undo 版本链 | 能力拆解 |
+| 1:30 | 流程图：输入→处理→输出 | 要点是：ReadView：活跃事务列表 | 关键机制 |
+| 2:09 | 代码片段 + 注释高亮 | 要点是：RC 每次/RR 首次生成 RV | 实战要点 |
+| 3:00 | 总结卡 + 下期预告 | 记住这些核心点就够了。下期我们接着聊——RC 和 RR 的快照差异？。 | 收尾 |

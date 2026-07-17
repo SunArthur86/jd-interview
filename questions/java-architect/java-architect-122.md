@@ -441,3 +441,26 @@ ROI：
 3. **Sidecar 模式性能影响？**——每请求多 2 跳 Envoy，增加 1-3ms 延迟 + 0.5 CPU/Pod 开销。极致性能不适用。
 4. **Service Mesh 适用边界？**——适用：多语言统一/细粒度流量控制/跨团队标准/mTLS。不适用：极致性能/简单架构/小团队。
 5. **Service Mesh 和 Spring Cloud 区别？**——SDK 模式（应用内治理，Java 限定）vs Sidecar 模式（基础设施治理，多语言）。可共存。
+
+## 结构化回答
+
+**30 秒电梯演讲：** Service Mesh（服务网格）把服务间通信治理（流量路由/熔断/重试/加密/可观测）从应用层下沉到基础设施层（Sidecar 代理）。代表实现 Istio：Envoy 作为 Sidecar 接管进出 Pod 的流量，用 VirtualService/DestinationRule 等 CRD 配置治理策略。适用边界：① 多语言生态（治理能力统一）；② 跨团队统一治理；③ 细粒度流量控制（灰度/AB 测试）。不适用：① 极致性能场景（Sidecar 增加 1-3ms 延迟）；② 简单单体；③ 小团队（运维成本高）
+
+**展开框架：**
+1. **Service Mesh** — Service Mesh = Sidecar 代理 + 控制面（Istio）
+2. **Istio = Envo** — Istio = Envoy（数据面）+ istiod（控制面）
+3. **VirtualService** — 流量路由规则（权重/匹配）
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——Sidecar 模式性能影响？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Service Mesh 在 Java 微服务中 | "这题核心是——Service Mesh（服务网格）把服务间通信治理（流量路由/熔断/重试/加密/可观测）从应用……" | 开场钩子 |
+| 0:15 | Service Mesh示意/对比图 | "Service Mesh = Sidecar 代理 + 控制面（Istio）" | Service Mesh要点 |
+| 0:40 | Istio = Envo示意/对比图 | "Istio = Envoy（数据面）+ istiod（控制面）" | Istio = Envo要点 |
+| 1:25 | 总结卡 | "记住：Service Mesh =。下期见。" | 收尾 |

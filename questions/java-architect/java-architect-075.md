@@ -439,3 +439,28 @@ ZGC overhead：
 3. **非堆内存怎么限制？**——MaxMetaspaceSize（元空间）、MaxDirectMemorySize（直接内存）、ReservedCodeCacheSize（JIT）、Xss（线程栈）。不限制的话 Netty 直接内存或线程泄漏会撑爆容器。
 4. **ZGC 比 G1 多占多少？**——约堆的 5-15%。ZGC 的 barrier（引用染色）、mark bitmap、forwarding table 是额外结构。32G 堆 ZGC 比 G1 多占约 1.6G。容器 limit 要额外预留。
 5. **NMT 是什么？**——Native Memory Tracking，-XX:NativeMemoryTracking=detail 开启。jcmd VM.native_memory summary 看 JVM 各分区（Heap/Class/Thread/Code/GC/Internal）的 reserved 和 committed。有 5-10% 开销，生产用 summary 模式。
+
+## 结构化回答
+
+**30 秒电梯演讲：** 容器化 JVM 参数的核心是让 JVM 各内存区（堆/Metaspace/线程栈/直接内存/CodeCache/GC overhead）总和与容器 cgroup memory limit 对齐。堆用 MaxRAMPercentage 自适应，非堆各区显式设上限，总水位留 25% 安全余量。CPU 用 CFS 调度，limit 过低导致 throttle 被 JVM 误判为 STW
+
+**展开框架：**
+1. **JVM 进程内存公式** — 堆 + Metaspace + (Xss × 线程数) + 直接内存 + CodeCache + GC overhead + 安全余量 < 容器 limit
+2. **堆** — MaxRAMPercentage=75（自适应），不用 -Xmx 硬编码
+3. **非堆必须显式限制** — MaxMetaspaceSize、MaxDirectMemorySize、Xss
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——怎么看 JVM 进程实际占了多少内存？
+
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：容器化 JVM 参数与内存水位 | "这题核心是——容器化 JVM 参数的核心是让 JVM 各内存区（堆/Metaspace/线程栈/直接内存/Cod……" | 开场钩子 |
+| 0:15 | 像往一个固定容量（容器 limit）的行李箱里装类比图 | "打个比方：像往一个固定容量（容器 limit）的行李箱里装。" | 核心类比 |
+| 0:40 | JVM 进程内存公式示意/对比图 | "堆 + Metaspace + (Xss × 线程数) + 直接内存 + CodeCache + GC overhead + 安全余量 < 容器 limit" | JVM 进程内存公式要点 |
+| 1:05 | 堆示意/对比图 | "MaxRAMPercentage=75（自适应），不用 -Xmx 硬编码" | 堆要点 |
+| 1:30 | 容器化 JVM 参数与内存水位实战案例 | "实战：8G 容器堆设 6G，偶发 OOMKilled**" | 实战案例 |
+| 1:55 | 总结卡 | "记住：进程内存 = 堆 + Met。下期见。" | 收尾 |

@@ -379,3 +379,26 @@ public TokenResponse exchangeCode(@RequestBody CodeExchangeRequest req) {
 2. **JWT 和 Session 怎么选？**——微服务无状态架构选 JWT（服务端不存储，水平扩容无同步问题）；需要主动管理会话（踢人下线/单设备登录）选 Session。混合用：Access Token 用 JWT，Refresh Token 走 Session。
 3. **Token 过期了前端怎么处理？**——Axios 拦截器捕获 401，自动用 Refresh Token 刷新，重放原请求。如果 Refresh Token 也过期，跳转登录页。注意并发刷新（多个请求同时 401，只刷新一次）。
 4. **SSO 用 OAuth2 还是 CAS？**——企业内部 SSO 常用 CAS（Central Authentication Service），跨组织 SSO 用 OAuth2/OIDC。两者本质相似（票据换 token），OAuth2 更通用（互联网标准）。
+
+## 结构化回答
+
+**30 秒电梯演讲：** OAuth2 是授权协议（让第三方应用拿用户授权的令牌访问资源），JWT 是令牌格式（自包含的 JSON 签名 token）。两者常混用但定位不同：OAuth2 定义了授权码、密码、客户端凭证四种 Grant Type，JWT 是 Access Token 的一种编码格式。会话治理的核心是令牌生命周期管理——签发、刷新、撤销、续期，既保证安全（令牌泄露可撤销）又保证体验（用户无感续期）
+
+**展开框架：**
+1. **OAuth2 四种 Grant Type** — 授权码（最安全，Web 应用）、密码（信任的客户端）、客户端凭证（服务间）、隐式（已废弃，用 PKCE 替代）
+2. **JWT 三段** — Header（算法）.Payload（声明）.Signature（签名）
+3. **JWT 无状态** — 服务端不存储，靠签名验证；缺点是无法主动撤销（除非黑名单）
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——JWT 怎么主动撤销？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：OAuth2、JWT 与会话治理 | "这题核心是——OAuth2 是授权协议（让第三方应用拿用户授权的令牌访问资源），JWT 是令牌格式（自包含……" | 开场钩子 |
+| 0:15 | OAuth2 四种 Grant 示意/对比图 | "授权码（最安全，Web 应用）、密码（信任的客户端）、客户端凭证（服务间）、隐式（已废弃，用 PKCE 替代）" | OAuth2 四种 Grant 要点 |
+| 0:40 | JWT 三段示意/对比图 | "Header（算法）.Payload（声明）.Signature（签名）" | JWT 三段要点 |
+| 1:25 | 总结卡 | "记住：OAuth2 = 授权协议。下期见。" | 收尾 |

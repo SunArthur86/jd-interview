@@ -360,3 +360,26 @@ public class PersistedQueryCache {
 3. **Subscription 怎么做权限？**——WebSocket connect 时鉴权（query string 或 header 带 token），建立 session 后每次 message 校验权限（token 可能已失效）。
 4. **GraphQL Federation 是什么？**——多个子 GraphQL 服务组合成超级 schema（Apollo Federation），适合大型组织（每个团队负责一个域）。路由层处理跨域查询。
 5. **GraphQL 怎么做版本化？**——不推荐 URL 版本（GraphQL 强调"无版本演进"），靠字段 deprecation（`@deprecated`）+ 客户端按需选字段。
+
+## 结构化回答
+
+**30 秒电梯演讲：** GraphQL 的 N+1 问题本质是\resolver 按字段拆分后，每个关联字段触发一次 DB 查询\——查 100 个订单的收货人，若直接 `order.user()`，会发 100 次 SQL。解法是 DataLoader：把同一 tick 内的 N 次 `load(userId)` 攒成一次 batch 查询（`WHERE id IN (...)`），把 O(N) 次查询压成 O(1)。权限治理的本质是\字段级鉴权\——GraphQL 的颗粒度是字段，传统 REST 只能整接口鉴权，所以必须设计 field-level directive（如 `@auth(requires: \ADMIN\)`）在 resolver 层强制校验
+
+**展开框架：**
+1. **DataLoader** — request-scoped，同一 tick 攒批，去重，缓存
+2. **N+1 不只是 DB** — 还包括 RPC、HTTP、ES——任何 resolver 内的远程调用都要 DataLoader
+3. **字段级鉴权** — 用 schema directive @auth 在 resolver 拦截"
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——DataLoader 缓存命中规则？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：GraphQL N+1 查询与权限治理 | "这题核心是——GraphQL 的 N+1 问题本质是\resolver 按字段拆分后，每个关联字段触发一次 DB……" | 开场钩子 |
+| 0:15 | DataLoader示意/对比图 | "request-scoped，同一 tick 攒批，去重，缓存" | DataLoader要点 |
+| 0:40 | N+1 不只是 DB示意/对比图 | "还包括 RPC、HTTP、ES——任何 resolver 内的远程调用都要 DataLoader" | N+1 不只是 DB要点 |
+| 1:25 | 总结卡 | "记住：DataLoader。下期见。" | 收尾 |

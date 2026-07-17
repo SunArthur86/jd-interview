@@ -402,3 +402,27 @@ RocksDB 存大状态，增量 CP 省 IO。
 6. **TwoPhaseCommitSinkFunction** —— 必会实现
 7. **故障恢复** —— 从 Checkpoint 重启
 8. **Checkpoint 参数调优** —— 间隔、超时、并发数
+
+## 结构化回答
+
+**30 秒电梯演讲：** 京东实时交易大盘，用 Flink 消费 Kafka 订单流计算 GMV。要求：Flink 任务重启不能丢数据、不能重复计算、结果秒级一致
+
+**展开框架：**
+1. **State 五种类型** — State 五种类型 —— Value/List/Map/Reducing/Broadcast
+2. **Checkpoint 原理** — Checkpoint 原理 —— Chandy-Lamport + Barrier，必考
+3. **对齐 vs 非对齐** — 对齐 vs 非对齐 —— 反压场景的关键
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——Checkpoint 是什么？
+
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Flink 状态、Checkpoint 与 Ex | "这题一句话：京东实时交易大盘，用 Flink 消费 Kafka 订单流计算 GMV。" | 开场钩子 |
+| 0:15 | State 五种类型示意/对比图 | "State 五种类型 —— Value/List/Map/Reducing/Broadcast" | State 五种类型要点 |
+| 0:40 | Checkpoint 原理示意/对比图 | "Checkpoint 原理 —— Chandy-Lamport + Barrier，必考" | Checkpoint 原理要点 |
+| 1:05 | 对齐 vs 非对齐示意/对比图 | "对齐 vs 非对齐 —— 反压场景的关键" | 对齐 vs 非对齐要点 |
+| 1:55 | 总结卡 | "记住：State 五种类型。下期见。" | 收尾 |

@@ -315,3 +315,26 @@ LinkedHashSet<Integer> reversed = set.reversed();   // 类型不变
 3. **reversed() 是复制吗？**——不是。返回视图，O(1) 时间和空间，反向遍历零成本。
 4. **LinkedHashSet 取最后一个有什么变化？**——JDK 21 之前要 O(n) 遍历（stream().reduce((a,b)->b)），现在 getLast() O(1)（内部拿 tail 指针）。
 5. **性能注意事项？**——ArrayList.addFirst 是 O(n)（数组拷贝），高频场景用 ArrayDeque 或 LinkedList（都实现了 SequencedCollection）。
+
+## 结构化回答
+
+**30 秒电梯演讲：** Sequenced Collections（JEP 431，JDK 21 GA）补齐了 Java 集合 API 30 年的缺口——一套统一的有顺序集合接口，提供 addFirst/addLast/getFirst/getLast/reversed 操作。从此不用记 List 用 add(0, x)、Deque 用 addFirst、LinkedHashSet 没办法拿最后一个元素这种碎片化 API
+
+**展开框架：**
+1. **SequencedCol** — SequencedCollection 接口（JDK 21）：addFirst/addLast/getFirst/getLast/removeFirst/r……
+2. **SequencedSet** — SequencedSet extends SequencedCollection（去重版）
+3. **SequencedMap** — SequencedMap extends Map（按插入顺序的 Map）
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——SequencedCollection 和 Iterable 区别？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Sequenced Collections 对集 | "这题核心是——Sequenced Collections（JEP 431，JDK 21 GA）补齐了 Java 集……" | 开场钩子 |
+| 0:15 | SequencedCol示意/对比图 | "SequencedCollection 接口（JDK 21）：addFirst/addLast/getFirst/getLast/removeFirst/r……" | SequencedCol要点 |
+| 0:40 | SequencedSet示意/对比图 | "SequencedSet extends SequencedCollection（去重版）" | SequencedSet要点 |
+| 1:25 | 总结卡 | "记住：SequencedColle。下期见。" | 收尾 |

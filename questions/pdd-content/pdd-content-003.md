@@ -200,3 +200,27 @@ Semaphore 是"并发数限流"（同时允许 100 个请求在跑），令牌桶
 1. 准确性——压测造 2000 QPS，对比实际通过的评价写入数 vs Sentinel 统计的通过数，误差应 <1%；同时验证限流触发时 Sentinel Dashboard 的拒绝数和日志里的 `BlockException` 数一致。
 2. 平滑性——压测 10 分钟，看 DB 连接池 `active` 是否稳定在阈值内（如 <80），评价提交 P99 是否平稳（不出现限流导致的突发抖动）。
 沉淀：所有限流（Semaphore/Sentinel）配置接入 Apollo 动态配置，支持运行时调整不重启；Semaphore 使用必须配 `finally release`，Sonar 扫描 `acquire` 后必须紧跟 try-finally，否则 review 不过；CLH 队列长度 >100 告警，提前预警持锁过慢。
+
+## 结构化回答
+
+**30 秒电梯演讲：** 多线程争抢资源，如何统一抽象"原子改状态+排队"？简单说就是——AQS 用"state 变量 + CLH FIFO 双向队列 + CAS"实现同步器框架；ReentrantLock/Semaphore/CountDownLatch 都基于它，…。独占（ReentrantLock）/共享（Semaphore）；模板方法：tryAcquire 留给子类。
+
+**展开框架：**
+1. **核心** — 核心：state + CLH + CAS
+2. **独占Ree** — 独占（ReentrantLock）/共享（Semaphore）
+3. **模板方法** — 模板方法：tryAcquire 留给子类
+
+**收尾：** 您想继续往深里聊吗——比如「ReentrantLock 怎么实现可重入？」
+
+## 视频脚本
+
+> 预计时长：3 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：AQS 原理与内容场景应用？ | 今天聊「AQS 原理与内容场景应用？」。一句话：AQS 用"state 变量 + CLH FIFO 双向队列 + CAS"实现同步器框架；ReentrantLock/… | 开场钩子 |
+| 0:12 | 核心概念图 + 关键词浮现 | 要点是：核心：state + CLH + CAS | 核心概念 |
+| 0:51 | 能力/参数拆解表 | 要点是：独占（ReentrantLock）/共享（Semaphore） | 能力拆解 |
+| 1:30 | 流程图：输入→处理→输出 | 要点是：模板方法：tryAcquire 留给子类 | 关键机制 |
+| 2:09 | 代码片段 + 注释高亮 | 要点是：ReentrantLock 用 state 计数可重入 | 实战要点 |
+| 3:00 | 总结卡 + 下期预告 | 记住这些核心点就够了。下期我们接着聊——ReentrantLock 怎么实现可重入？。 | 收尾 |

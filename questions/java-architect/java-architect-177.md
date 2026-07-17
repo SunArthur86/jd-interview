@@ -374,3 +374,27 @@ public class GroupMessageService {
 3. **群消息写扩散还是读扩散？**——小群（< 500）写扩散（推 inbox，读快），大群读扩散（存一份，读时拉）。按群大小选。
 4. **离线消息怎么处理？**——离线时存离线消息表（user_id, msg_id, seq），上线时查 seq > lastSeq 补发。定期清理 30 天前。
 5. **seq 怎么生成？**——Redis INCR 会话级递增。不用时间戳（时钟漂移）。客户端持久化 lastSeq 支持断点续传。
+
+## 结构化回答
+
+**30 秒电梯演讲：** IM 已读未读的核心是BitMap 压缩计数 + sequence number 多端同步。每个会话维护一个 BitMap（每位对应用户是否已读），统计未读数用 BitCount。多端同步靠全局递增的 sequence number，客户端上报 lastSeq，服务端返回 > lastSeq 的消息
+
+**展开框架：**
+1. **已读未读** — Redis BitMap（key=conv:read:{convId}，offset=userId）
+2. **未读数** — BitCount（统计位为 0 的数）+ 会话级未读聚合
+3. **多端同步** — 全局递增 sequence number，客户端上报 lastSeq
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——BitMap 怎么存？
+
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：IM 消息已读未读与多端同步 | "这题一句话：IM 已读未读的核心是BitMap 压缩计数 + sequence number 多端同步。" | 开场钩子 |
+| 0:15 | 像群通知——班长的本子上每人一栏打勾（BitMa类比图 | "打个比方：像群通知——班长的本子上每人一栏打勾（BitMa。" | 核心类比 |
+| 0:40 | 已读未读示意/对比图 | "Redis BitMap（key=conv:read:{convId}，offset=userId）" | 已读未读要点 |
+| 1:05 | 未读数示意/对比图 | "BitCount（统计位为 0 的数）+ 会话级未读聚合" | 未读数要点 |
+| 1:55 | 总结卡 | "记住：已读未读。下期见。" | 收尾 |

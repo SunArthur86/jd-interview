@@ -509,3 +509,28 @@ public class IdempotentMySQLSink extends RichSinkFunction<Result> {
 2. **Flink 的窗口类型？**——Tumbling（翻滚，不重叠）、Sliding（滑动，重叠）、Session（会话，活动间隙）、Global（全局）。实时特征/大屏用 Tumbling 或 Sliding。
 3. **Flink CEP（复杂事件处理）？**——模式识别，如"3 次失败登录后 1 次成功"识别暴力破解。CEP 用 Pattern API 定义模式，流中匹配触发。适用于风控/异常检测。
 4. **Flink SQL 和 DataStream 区别？**——SQL 声明式（写 SQL，简单），DataStream API 编程式（写 Java/Scala，灵活）。SQL 适合简单聚合（开发快），DataStream 适合复杂逻辑（状态/CEP）。可混用（SQL 调 UDF）。
+
+## 结构化回答
+
+**30 秒电梯演讲：** Flink 实时计算是数据流动时就算，和 Java 服务的协同是流处理 + 应用的组合——Flink 负责重计算（窗口聚合/状态机/CEP 模式识别），Java 服务负责业务逻辑（事务/查询/RPC）。典型场景：Flink 算实时大屏（GMV 秒级更新）、实时风控（异常行为秒级拦截）、实时推荐（用户行为秒级反馈）。核心挑战是Flink 流处理和 Java 事务的边界——谁做什么，数据怎么流转
+
+**展开框架：**
+1. **Flink 流处理** — 窗口聚合/状态计算/CEP 模式识别
+2. **Java 服务协同** — Flink 算完发 Kafka，Java 消费处理业务
+3. **异步查询** — Flink Async I/O 查外部系统（数据库/API），不阻塞流
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——Flink 作业怎么和 Spring Boot 应用集成？
+
+
+## 视频脚本
+
+> 预计时长：2 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Flink 实时计算与 Java 服务协同 | "这题核心是——Flink 实时计算是数据流动时就算，和 Java 服务的协同是流处理 + 应用的组合——F……" | 开场钩子 |
+| 0:15 | 像工厂流水线类比图 | "打个比方：像工厂流水线。" | 核心类比 |
+| 0:40 | Flink 流处理示意/对比图 | "窗口聚合/状态计算/CEP 模式识别" | Flink 流处理要点 |
+| 1:05 | Java 服务协同示意/对比图 | "Flink 算完发 Kafka，Java 消费处理业务" | Java 服务协同要点 |
+| 1:30 | 异步查询示意/对比图 | "Flink Async I/O 查外部系统（数据库/API），不阻塞流" | 异步查询要点 |
+| 1:55 | 总结卡 | "记住：Flink 流计算。下期见。" | 收尾 |

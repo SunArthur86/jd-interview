@@ -254,3 +254,27 @@ map.compute(uid, (k, old) -> merge(old, delta));
 2. 静态扫描——写一个 SpotBugs 插件，扫描 `@SharedGlobal` 注解的字段是否被用作 CHM 的 key，命中即告警。
 3. 运行时监控——给 CHM 加一个 wrapper，统计每个 key 的 put 频率（用 sampled counter，只采 1% 避免性能损耗），任何 key 的 QPS > 全表平均 QPS 的 10 倍即告警"疑似热点 key"。
 4. 故障复盘——把这次"SHARED_IP_LIST 单 key 几万 QPS → 桶锁竞争 → CPU 95%"的火焰图和 arthas 截图存入知识库，作为"数据建模要区分实体维度和全局维度"的典型案例。
+
+
+## 结构化回答
+
+**30 秒电梯演讲：** 聊到ConcurrentHashMap 在 JDK7 和 J，我的理解是——ConcurrentHashMap 用"分段锁(JDK7)/CAS+synchronized 桶锁(JDK8+)"把整把大锁拆成桶级小锁，让多线程并发读写不同桶几乎无冲突。打个比方，ConcurrentHashMap 像一个有多排储物柜的仓库，JDK7 是按"区(Segment)"加锁，JDK8 是按"单个柜子(Node)"加锁——锁粒度越细，并发度越高。
+
+**展开框架：**
+1. **JDK7** — Segment[] + HashEntry[]，默认 16 个 Segment（并发度 16）
+2. **JDK8** — Node[] + CAS+synchronized，锁粒度=单个桶
+3. **桶链表长度 ≥8 且数组 ≥64 时** — 桶链表长度 ≥8 且数组 ≥64 时转红黑树（查找 O(n)→O(logn)）
+
+**收尾：** 这块我在项目里也踩过坑——想深入的话，可以接着聊：为什么 JDK8 放弃分段锁？您更想看哪个方向？
+
+## 视频脚本
+
+> 预计时长：3 分钟 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡 | "ConcurrentHashMap 在 JDK7 和——这道题面试官到底想考什么？我用 30 秒给你讲透。" | 开场钩子 |
+| 0:15 | CAS 原理图 | 先说核心：ConcurrentHashMap 用"分段锁(JDK7)/CAS+synchronized 桶锁(JDK8+)"把整把大锁拆成桶级小锁，让多线程并发读写不同桶几乎无冲突。 | 核心定义 |
+| 0:40 | ConcurrentHashMap 结构图 | Node[] + CAS+synchronized，锁粒度=单个桶。 | JDK8 |
+| 1:05 | HashMap 数组+链表图 | 桶链表长度 ≥8 且数组 ≥64 时转红黑树（查找 O(n)→O(logn)）。 | 桶链表长度 ≥8 且数组 ≥64 时 |
+| 2:30 | 总结卡 | 一句话记忆：JDK7 Segment 分段锁，JDK8 CAS+synchronized 桶锁。 下期可以接着聊：为什么 JDK8 放弃分段锁。 | 收尾总结 |

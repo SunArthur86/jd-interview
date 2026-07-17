@@ -307,3 +307,26 @@ Pact（行为契约）    ──► 描述消费方实际使用的子集
 3. **Pact 怎么处理双向兼容？**——Pact 主要是"消费方约束提供方"，但 Pact-Broker 也支持"提供方 pending 契约"（新消费方写契约，提供方还未实现，标记 pending 不阻塞发布）。
 4. **Pact-JVM 和 Spring Cloud Contract 区别？**——SCC 是 Spring 生态的 CDC 实现，契约用 Groovy DSL 写，生成 stub jar 给消费方依赖；Pact 是语言无关的 JSON 工件存 Broker。SCC 更 Spring 化，Pact 更通用。
 5. **can-i-deploy 失败怎么办？**——查 Broker 矩阵看哪个 consumer 没通过 → 要么修 provider 代码（恢复兼容）、要么 bump version（新接口）、要么和 consumer 协商改 Pact。
+
+## 结构化回答
+
+**30 秒电梯演讲：** Consumer-Driven Contract（CDC）测试是把接口是否符合预期的检验权交给消费方——每个消费方写一份 Pact 契约（描述我调用你的什么接口、给什么参数、期望什么响应），提供方在自己的 CI 跑所有消费方的契约，任何破坏性变更当场红。本质是把接口集成测试从端到端测试降级到单机单元测试——速度快、可定位、可在 PR 期拦截
+
+**展开框架：**
+1. **Pact 是 CDC 主流实现（Pact** — JVM、Pact-Broker、Pact-Go）
+2. **消费方写 Pact** — 消费方写 Pact（expected request + minimal response）→ 上传 Broker
+3. **提供方拉 Pact →** — 提供方拉 Pact → 用 Verifier 回放 → 失败则 PR 红
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——Pact 怎么处理动态字段（时间戳、UUID）？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Consumer Driven Contract | "这题核心是——Consumer-Driven Contract（CDC）测试是把接口是否符合预期的检验权交给消……" | 开场钩子 |
+| 0:15 | Pact 是 CDC 主流实现（示意/对比图 | "JVM、Pact-Broker、Pact-Go）" | Pact 是 CDC 主流实现（要点 |
+| 0:40 | 消费方写 Pact示意/对比图 | "消费方写 Pact（expected request + minimal response）→ 上传 Broker" | 消费方写 Pact要点 |
+| 1:25 | 总结卡 | "记住：CDC。下期见。" | 收尾 |

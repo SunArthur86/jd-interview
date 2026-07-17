@@ -427,3 +427,26 @@ sum(rate(container_cpu_cfs_throttled_seconds_total[5m])) by (pod)
 3. **CFS throttle 是什么？**——K8s CPU limit 用 CFS 调度，周期（100ms）内 CPU 时间用完就暂停进程。表现为 RT 抖动、GC 延长。监控 container_cpu_cfs_throttled_seconds，解法是调大 limit 或 request=limit 绑核。
 4. **HPA 怎么配置才不抖？**——用 QPS/RT 自定义指标（比 CPU 准）、scaleDown stabilizationWindowSeconds 设 5-10 分钟、缩容步长小、大促前定时预扩容。
 5. **JVM 启动慢被 liveness 误杀怎么办？**——配 startupProbe（failureThreshold=30, period=10s 给 5 分钟启动窗口）+ livenessProbe 的 initialDelaySeconds 设够长。
+
+## 结构化回答
+
+**30 秒电梯演讲：** K8s 上 Java 服务资源治理的核心矛盾是容器 cgroup 限制与JVM 内存模型的认知错位。K8s 用 request/limit 控制 CPU 和内存，JVM 按堆/非堆/直接内存划分，两者不对齐会导致 OOMKilled（容器超限被杀）或资源浪费（堆设太小）。CPU 限流（CFS throttle）会让 JVM STW 看起来像 GC 停顿
+
+**展开框架：**
+1. **JVM 内存 ≠ 堆内存** — 总内存 = 堆 + Metaspace + 线程栈×线程数 + 直接内存 + JIT cache + GC overhead
+2. **容器 memory li** — 容器 memory limit 必须 > JVM 总内存 + 安全余量（通常留 25%）
+3. **用 MaxRAMPercentage 而非** — Xmx 设堆（自动适配容器内存）
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——OOMKilled 和 Java OOM 有什么区别？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：Kubernetes 上 Java 服务的资源治 | "这题一句话：K8s 上 Java 服务资源治理的核心矛盾是容器 cgroup 限制与JVM 内存模型的认知错位。" | 开场钩子 |
+| 0:15 | JVM 内存 ≠ 堆内存示意/对比图 | "总内存 = 堆 + Metaspace + 线程栈×线程数 + 直接内存 + JIT cache + GC overhead" | JVM 内存 ≠ 堆内存要点 |
+| 0:40 | 容器 memory li示意/对比图 | "容器 memory limit 必须 > JVM 总内存 + 安全余量（通常留 25%）" | 容器 memory li要点 |
+| 1:25 | 总结卡 | "记住：JVM 总内存 = 堆 +。下期见。" | 收尾 |

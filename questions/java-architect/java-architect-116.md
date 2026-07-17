@@ -364,3 +364,26 @@ bpftrace -e '
 3. **eBPF 和 Java Agent 区别？**——Agent 在应用层（JVM 内），eBPF 在内核层（TCP/IO/syscall/调度）。互补关系。
 4. **eBPF 安全吗？**——验证器保证安全（无死循环、不越界、不空指针），要 root 权限加载。
 5. **Java 场景用 eBPF 看什么？**——TCP 重传率、syscall 模式、CPU 调度延迟、文件 IO 延迟、GC 对 syscall 的影响。
+
+## 结构化回答
+
+**30 秒电梯演讲：** eBPF（Extended Berkeley Packet Filter）是 Linux 内核的可编程沙箱——在内核态运行沙箱程序，无需改内核源码或加载内核模块。在 Java 可观测性场景，eBPF 提供内核级观测：网络（TCP 连接/重传/延迟）、文件 IO、系统调用、CPU 调度，无需改 Java 代码、无需 Agent、几乎零开销。代表项目：Pixie（K8s 网络观测）、Parca（持续 profiling）、Cilium（网络+可观测性）
+
+**展开框架：**
+1. **eBPF = Linux** — eBPF = Linux 内核可编程沙箱（不改内核源码）
+2. **钩子点** — kprobe/uprobe/tracepoint/XDP/TC
+3. **无侵入观测 Java** — 网络/IO/syscall/CPU 调度
+
+**收尾：** 以上是我的整体思路。您想继续深入聊——eBPF 和 Java Agent 区别？
+
+
+## 视频脚本
+
+> 预计时长：1 分 30 秒 | 由浅入深
+
+| 时间 | 画面/字幕 | 口播台词 | 讲解要点 |
+|------|----------|----------|----------|
+| 0:00 | 标题卡：eBPF 与 Java 服务可观测性如何结合 | "这题核心是——eBPF（Extended Berkeley Packet Filter）是 Linux 内核的可编……" | 开场钩子 |
+| 0:15 | eBPF = Linux示意/对比图 | "eBPF = Linux 内核可编程沙箱（不改内核源码）" | eBPF = Linux要点 |
+| 0:40 | 钩子点示意/对比图 | "kprobe/uprobe/tracepoint/XDP/TC" | 钩子点要点 |
+| 1:25 | 总结卡 | "记住：eBPF = Linux 内。下期见。" | 收尾 |
