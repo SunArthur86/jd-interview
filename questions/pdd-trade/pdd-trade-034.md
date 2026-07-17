@@ -201,14 +201,16 @@ FP8 的限制是硬件绑定。FP8 只有 H100/H200 原生支持，A100 是 FP16
 
 ## 结构化回答
 
-**30 秒电梯演讲：** LLM 推理慢且贵（显存带宽瓶颈），如何提升吞吐降成本？简单说就是——LLM 推理优化是"用更少 GPU 算更快的 token"。Continuous Batching 动态拼 batch；量化 INT8/FP8 省显存。
+
+**30 秒电梯演讲：** LLM 推理像"餐厅出餐"——KV Cache 是预备食材（不重复切）、Continuous Batching 是动态拼桌（满负荷）、量化是简装盒饭（省成本）、投机解码是预炒半成品（加速）。
 
 **展开框架：**
-1. **KV Cac** — KV Cache 复用历史
-2. **Contin** — Continuous Batching 动态拼 batch
-3. **量化 INT** — 量化 INT8/FP8 省显存
+1. **KV Cache** — 避免重复算历史 token
+2. **Continuous Ba…** — 动态拼 batch，GPU 不闲
+3. **量化：INT** — INT8/FP8 降显存提吞吐
 
-**收尾：** 您想继续往深里聊吗——比如「vLLM 为什么快？」
+**收尾：** vLLM 为什么快？
+
 
 ## 视频脚本
 

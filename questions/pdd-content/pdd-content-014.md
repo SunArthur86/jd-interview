@@ -208,14 +208,16 @@ JDK 8 的 computeIfAbsent 有个已知问题：如果加载函数内部又对同
 
 ## 结构化回答
 
-**30 秒电梯演讲：** 多线程并发访问集合如何安全+高吞吐？简单说就是——高并发集合（ConcurrentHashMap/CopyOnWriteArrayList/BlockingQueue）用"分段锁/CAS/复制"让多线程安全且高吞吐；内容场景如本…。COW：写时复制；BlockingQueue：阻塞。
+
+**30 秒电梯演讲：** ConcurrentHashMap 像多柜台银行——把钱箱分多段（JDK8 后是节点级锁），每个柜台独立干活互不打扰。
 
 **展开框架：**
-1. **CHM** — CHM：JDK8 CAS+synchronized 头节点
-2. **COW** — COW：写时复制
-3. **BlockingQueu** — BlockingQueue：阻塞
+1. **ConcurrentHas…** — JDK7 分段锁/JDK8 CAS+同步
+2. **CopyOnWrite** — CopyOnWrite：写复制，读无锁
+3. **BlockingQueue** — 阻塞队列（生产消费）
 
-**收尾：** 您想继续往深里聊吗——比如「ConcurrentHashMap 为什么不允许 null？」
+**收尾：** ConcurrentHashMap 为什么不允许 null？
+
 
 ## 视频脚本
 

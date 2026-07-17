@@ -196,14 +196,16 @@ Gap Lock 是 RR 隔离下"当前读"（`SELECT ... FOR UPDATE / LOCK IN SHARE MO
 
 ## 结构化回答
 
-**30 秒电梯演讲：** 读写互斥加锁慢，如何让读不加锁还能读到一致快照？简单说就是——MVCC 用"undo log 版本链 + ReadView"实现快照读，不加锁实现 RC/RR 隔离；内容场景评价读取用 MVCC 避免锁等待。undo 版本链；ReadView：活跃事务列表。
+
+**30 秒电梯演讲：** MVCC 像档案馆——每次改都留底稿（undo），读者按"领取时间"看对应版本，互不打扰。
 
 **展开框架：**
-1. **隐藏字段** — 隐藏字段：trx_id + roll_pointer
-2. **undo 版** — undo 版本链
-3. **ReadView** — ReadView：活跃事务列表
+1. **隐藏字段** — trx_id（事务ID）/roll_pointer（指向 undo）
+2. **undo 版本链** — undo 版本链：每改一次留一份
+3. **ReadView** — 事务开启时的活跃事务列表
 
-**收尾：** 您想继续往深里聊吗——比如「RC 和 RR 的快照差异？」
+**收尾：** RC 和 RR 的快照差异？
+
 
 ## 视频脚本
 

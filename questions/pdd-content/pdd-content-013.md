@@ -227,14 +227,16 @@ Feign 超时但下游自测正常，常见根因排查：
 
 ## 结构化回答
 
-**30 秒电梯演讲：** 微服务间如何优雅调用+发现+容错？简单说就是——Spring Cloud 用 Feign（声明式 RPC）+ Ribbon/LoadBalancer（负载）+ Sentinel/Hystrix（熔断限流）+ Nacos/Eur…。调用：Feign（接口）；负载：LoadBalancer。
+
+**30 秒电梯演讲：** Spring Cloud 像城市基础设施——Feign 是出租车（声明去哪）、注册中心是电话簿、熔断是保险丝、网关是收费站。
 
 **展开框架：**
-1. **注册** — 注册：Nacos
-2. **调用** — 调用：Feign（接口）
-3. **负载** — 负载：LoadBalancer
+1. **注册发现** — Nacos/Eureka
+2. **声明式调用** — Feign（接口注解）
+3. **负载均衡** — Ribbon/LoadBalancer
 
-**收尾：** 您想继续往深里聊吗——比如「Feign 超时怎么配？」
+**收尾：** Feign 超时怎么配？
+
 
 ## 视频脚本
 

@@ -436,14 +436,16 @@ LLM 直接生成 SQL 有三个生产风险。第一，**安全性**——LLM 可
 
 ## 结构化回答
 
-**30 秒电梯演讲：** 怎么让 Agent 编排中台完成复杂任务？简单说就是——智能 AI 中台是"用 Agent 编排中台能力"，把传统中台（被动调 API）升级为"会思考、会自主调用、会协作"的智能平台。多 Agent：Planner/Worker/Critic；中台能力 → Tool。
+
+**30 秒电梯演讲：** 像把传统中央厨房升级为智能厨房——之前厨师（业务）按菜谱做菜（调 API），现在智能主厨（Agent）按订单自主调度食材/调料/工序，多 Agent 协作出宴席。
 
 **展开框架：**
-1. **框架** — 框架：LangGraph/AutoGen/自研
-2. **多 Agent** — 多 Agent：Planner/Worker/Critic
-3. **中台能力 →** — 中台能力 → Tool
+1. **编排框架** — LangGraph/AutoGen/自研
+2. **多 Agent 协作** — Planner/Worker/Critic
+3. **状态管理** — 共享状态/记忆
 
-**收尾：** 您想继续往深里聊吗——比如「多 Agent 怎么分工？」
+**收尾：** 多 Agent 怎么分工？
+
 
 ## 视频脚本
 
