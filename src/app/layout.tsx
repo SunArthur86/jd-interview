@@ -5,7 +5,7 @@ import type { Metadata, Viewport } from 'next';
 export const metadata: Metadata = {
   title: 'JD 面试题库',
   description: '针对一线大厂 JD（岗位描述）深度拆解的面试题库，含费曼快记、第一性原理、层层递进深度问答。首个 JD：蚂蚁国际风控 Java 研发工程师。',
-  manifest: '/manifest.json',
+  manifest: '/interview-jd/manifest.json',
 };
 
 export const viewport: Viewport = {
